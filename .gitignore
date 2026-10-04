@@ -29,3 +29,5 @@ Thumbs.db
 # 临时文件
 *.log
 *.tmp
+installer/build_iss.bat
+/tmp/
