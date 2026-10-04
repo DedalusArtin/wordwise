@@ -1,0 +1,339 @@
+//! 窗口管理与应用启动。
+//!
+//! 包含三部分：
+//! - 主窗口：完整功能界面
+//! - **侧边栏窗口（需求 7）**：可长期挂起的窄条窗口，置顶、无边框、
+//!   随时查词与学习，双击图标可收起/展开
+//! - 系统托盘：快速唤出侧边栏、开始复习、退出
+
+use crate::commands;
+use crate::state::{resolve_data_dir, AppState};
+use std::sync::Arc;
+use tauri::{
+    menu::{Menu, MenuItem, PredefinedMenuItem},
+    tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
+    AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder, WindowEvent,
+};
+
+/// 侧边栏窗口标签
+pub const SIDEBAR_LABEL: &str = "sidebar";
+/// 主窗口标签
+pub const MAIN_LABEL: &str = "main";
+
+/// 注册所有 Tauri 命令。
+fn build_invoke_handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
+    tauri::generate_handler![
+        // 系统与配置
+        commands::cmd_app_info,
+        commands::cmd_get_config,
+        commands::cmd_save_config,
+        commands::cmd_set_study_options,
+        commands::cmd_set_llm_config,
+        // LM Studio
+        commands::cmd_llm_status,
+        commands::cmd_llm_autoconnect,
+        commands::cmd_ai_explain,
+        commands::cmd_ai_explain_sync,
+        commands::cmd_ai_generate_entry,
+        // 查词与搜索
+        commands::cmd_lookup,
+        commands::cmd_suggest,
+        commands::cmd_search,
+        commands::cmd_wiki,
+        commands::cmd_get_word,
+        commands::cmd_search_words,
+        commands::cmd_recent_searches,
+        // 词库
+        commands::cmd_list_words,
+        commands::cmd_add_word,
+        commands::cmd_import_words,
+        commands::cmd_delete_word,
+        commands::cmd_word_count,
+        commands::cmd_seed_demo,
+        // 背诵与调度
+        commands::cmd_start_session,
+        commands::cmd_current_question,
+        commands::cmd_submit_answer,
+        commands::cmd_skip,
+        commands::cmd_end_session,
+        commands::cmd_word_state,
+        // 统计与计划
+        commands::cmd_stats,
+        commands::cmd_review_plan,
+        commands::cmd_leech_list,
+        commands::cmd_clear_leech,
+        // 词典源
+        commands::cmd_get_sources,
+        commands::cmd_save_sources,
+        commands::cmd_test_source,
+        commands::cmd_reset_sources,
+        commands::cmd_clear_cache,
+        // 数据
+        commands::cmd_export,
+        commands::cmd_import,
+        // 窗口
+        sidebar_show,
+        sidebar_hide,
+        sidebar_toggle,
+        main_show,
+    ]
+}
+
+/// 创建主窗口。
+fn create_main_window(app: &AppHandle) -> tauri::Result<()> {
+    if app.get_webview_window(MAIN_LABEL).is_some() {
+        return Ok(());
+    }
+    WebviewWindowBuilder::new(app, MAIN_LABEL, WebviewUrl::App("index.html".into()))
+        .title("WordWise · 背单词与 AI 讲解")
+        .inner_size(1180.0, 780.0)
+        .min_inner_size(900.0, 620.0)
+        .center()
+        .resizable(true)
+        .decorations(true)
+        .visible(true)
+        .build()?;
+    Ok(())
+}
+
+/// 创建侧边栏窗口（需求 7）：始终置顶的窄条，长期挂起。
+fn create_sidebar_window(app: &AppHandle) -> tauri::Result<()> {
+    if app.get_webview_window(SIDEBAR_LABEL).is_some() {
+        return Ok(());
+    }
+    let width = 380.0;
+    let height = 620.0;
+
+    WebviewWindowBuilder::new(app, SIDEBAR_LABEL, WebviewUrl::App("index.html?view=sidebar".into()))
+        .title("WordWise 侧边栏")
+        .inner_size(width, height)
+        // 置顶：用户随时查词不被打断
+        .always_on_top(true)
+        .resizable(true)
+        .min_inner_size(300.0, 400.0)
+        .decorations(false)
+        .visible(false)
+        .skip_taskbar(true)
+        .build()?;
+
+    // 关闭时改为隐藏而非销毁，保持常驻
+    if let Some(win) = app.get_webview_window(SIDEBAR_LABEL) {
+        let w = win.clone();
+        win.on_window_event(move |e| {
+            if let WindowEvent::CloseRequested { api, .. } = e {
+                api.prevent_close();
+                let _ = w.hide();
+            }
+        });
+    }
+    Ok(())
+}
+
+/// 显示侧边栏。
+#[tauri::command]
+fn sidebar_show(app: AppHandle) -> Result<(), String> {
+    let win = app
+        .get_webview_window(SIDEBAR_LABEL)
+        .ok_or_else(|| "侧边栏窗口未创建".to_string())?;
+
+    // 首次显示时贴右边缘，避免遮挡工作区
+    if !win.is_visible().unwrap_or(false) {
+        if let Ok(Some(monitor)) = win.primary_monitor() {
+            let size = monitor.size();
+            let scale = monitor.scale_factor();
+            let logical_w = size.width as f64 / scale;
+            let logical_h = size.height as f64 / scale;
+            let wsize = win
+                .outer_size()
+                .map(|s| (s.width as f64 / scale, s.height as f64 / scale))
+                .unwrap_or((380.0, 620.0));
+            let x = (logical_w - wsize.0 - 16.0).max(0.0);
+            let y = ((logical_h - wsize.1) / 2.0).max(0.0);
+            let _ = win.set_position(tauri::LogicalPosition::new(x, y));
+        }
+    }
+
+    win.show().map_err(|e| e.to_string())?;
+    win.set_focus().ok();
+    win.set_always_on_top(true).ok();
+    Ok(())
+}
+
+/// 隐藏侧边栏。
+#[tauri::command]
+fn sidebar_hide(app: AppHandle) -> Result<(), String> {
+    if let Some(win) = app.get_webview_window(SIDEBAR_LABEL) {
+        win.hide().map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+/// 切换侧边栏显隐。
+#[tauri::command]
+fn sidebar_toggle(app: AppHandle) -> Result<bool, String> {
+    let win = app
+        .get_webview_window(SIDEBAR_LABEL)
+        .ok_or_else(|| "侧边栏窗口未创建".to_string())?;
+    let visible = win.is_visible().unwrap_or(false);
+    if visible {
+        win.hide().map_err(|e| e.to_string())?;
+        Ok(false)
+    } else {
+        sidebar_show(app)?;
+        Ok(true)
+    }
+}
+
+/// 显示并聚焦主窗口。
+#[tauri::command]
+fn main_show(app: AppHandle) -> Result<(), String> {
+    if let Some(win) = app.get_webview_window(MAIN_LABEL) {
+        win.show().map_err(|e| e.to_string())?;
+        win.unminimize().ok();
+        win.set_focus().ok();
+    } else {
+        create_main_window(&app).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+/// 构建系统托盘。
+fn build_tray(app: &AppHandle) -> tauri::Result<()> {
+    let open_main = MenuItem::with_id(app, "open_main", "打开主界面", true, None::<&str>)?;
+    let toggle_side = MenuItem::with_id(app, "toggle_sidebar", "显示/隐藏侧边栏", true, None::<&str>)?;
+    let start_review = MenuItem::with_id(app, "start_review", "开始复习", true, None::<&str>)?;
+    let sep = PredefinedMenuItem::separator(app)?;
+    let quit = MenuItem::with_id(app, "quit", "退出 WordWise", true, None::<&str>)?;
+
+    let menu = Menu::with_items(app, &[&open_main, &toggle_side, &start_review, &sep, &quit])?;
+
+    let mut builder = TrayIconBuilder::with_id("main-tray")
+        .tooltip("WordWise · 背单词与 AI 讲解")
+        .menu(&menu)
+        // 左键单击切换侧边栏，符合「随时查词」的使用习惯
+        .show_menu_on_left_click(false)
+        .on_menu_event(|app, event| match event.id().as_ref() {
+            "open_main" => {
+                let _ = main_show(app.clone());
+            }
+            "toggle_sidebar" => {
+                let _ = sidebar_toggle(app.clone());
+            }
+            "start_review" => {
+                let _ = main_show(app.clone());
+                let _ = app.emit("app://start-review", ());
+            }
+            "quit" => {
+                app.exit(0);
+            }
+            _ => {}
+        })
+        .on_tray_icon_event(|tray, event| {
+            if let TrayIconEvent::Click {
+                button: MouseButton::Left,
+                button_state: MouseButtonState::Up,
+                ..
+            } = event
+            {
+                let app = tray.app_handle();
+                let _ = sidebar_toggle(app.clone());
+            }
+        });
+
+    if let Some(icon) = app.default_window_icon() {
+        builder = builder.icon(icon.clone());
+    }
+
+    builder.build(app)?;
+    Ok(())
+}
+
+/// 应用主入口。
+pub fn run_app() {
+    let data_dir = resolve_data_dir();
+
+    let state = match AppState::new(data_dir) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("初始化失败：{}", e);
+            // 用系统消息框提示后退出
+            show_fatal(&format!("WordWise 启动失败：\n{}", e));
+            return;
+        }
+    };
+
+    tauri::Builder::default()
+        .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_shell::init())
+        .manage(state)
+        .invoke_handler(build_invoke_handler())
+        .setup(|app| {
+            let handle = app.handle().clone();
+
+            create_main_window(&handle)?;
+            // 侧边栏预先创建但隐藏，点托盘时才显示
+            if let Err(e) = create_sidebar_window(&handle) {
+                eprintln!("创建侧边栏失败：{}", e);
+            }
+            if let Err(e) = build_tray(&handle) {
+                eprintln!("创建托盘失败：{}", e);
+            }
+
+            // 首次启动且词库为空时，写入示例词库，保证开箱即用
+            let st = handle.state::<Arc<AppState>>();
+            let lang = st.cfg().target_lang.clone();
+            if st.db.word_count(&lang).unwrap_or(0) == 0 {
+                let entries = crate::seed::demo_words(&lang);
+                let now = crate::timeutil::now_ts();
+                let _ = st.db.bulk_upsert_words(&entries, now);
+                for e in &entries {
+                    let _ = st
+                        .db
+                        .upsert_state(&crate::models::StudyState::new(&e.word, &lang, now));
+                }
+                println!("已写入 {} 条示例词库", entries.len());
+            }
+
+            Ok(())
+        })
+        .on_window_event(|window, event| match event {
+            WindowEvent::CloseRequested { api, .. } if window.label() == MAIN_LABEL => {
+                // 主窗口关闭时退到托盘，保持「随时查词」能力可用
+                api.prevent_close();
+                let _ = window.hide();
+
+                // 仅当用户开启了侧边栏常驻时才自动唤出，避免突兀弹出
+                let state = window.app_handle().state::<Arc<AppState>>();
+                let keep_sidebar = state.cfg().sidebar_always_on_top;
+                if keep_sidebar {
+                    let _ = sidebar_show(window.app_handle().clone());
+                }
+            }
+            _ => {}
+        })
+        .run(tauri::generate_context!())
+        .expect("WordWise 运行失败");
+}
+
+/// 致命错误弹窗（不依赖任何 GUI 库）。
+fn show_fatal(msg: &str) {
+    #[cfg(windows)]
+    {
+        use std::process::Command;
+        // 用 PowerShell 弹一个原生消息框，避免引入额外依赖
+        let script = format!(
+            "[System.Windows.Forms.MessageBox]::Show('{}','WordWise',0,16)",
+            msg.replace('\'', "''")
+        );
+        let _ = Command::new("powershell")
+            .args(["-NoProfile", "-Command", &format!(
+                "Add-Type -AssemblyName System.Windows.Forms; {}",
+                script
+            )])
+            .spawn();
+    }
+    #[cfg(not(windows))]
+    {
+        eprintln!("{}", msg);
+    }
+}

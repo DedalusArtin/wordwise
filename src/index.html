@@ -1,0 +1,481 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>WordWise · 背单词与 AI 讲解</title>
+<link rel="stylesheet" href="css/app.css" />
+</head>
+<body data-view="main">
+
+<!-- ============ 标题栏（无边框侧边栏下可拖动） ============ -->
+<div id="titlebar" class="titlebar" data-tauri-drag-region>
+  <div class="tb-left">
+    <span class="tb-logo">W</span>
+    <span class="tb-name">WordWise</span>
+  </div>
+  <div class="tb-right">
+    <button class="tb-btn" id="btn-minimize" title="最小化">&#8211;</button>
+    <button class="tb-btn" id="btn-close-win" title="隐藏到托盘">&#10005;</button>
+  </div>
+</div>
+
+<!-- ============ 侧边栏模式布局 ============ -->
+<div id="sidebar-shell" class="sidebar-shell hidden">
+  <div class="sb-drag" data-tauri-drag-region>
+    <span class="sb-title">查词侧边栏</span>
+    <div class="sb-actions">
+      <button class="icon-btn" id="sb-main" title="打开主界面">&#9635;</button>
+      <button class="icon-btn" id="sb-hide" title="隐藏">&#10005;</button>
+    </div>
+  </div>
+
+  <div class="sb-search">
+    <input id="sb-input" type="text" placeholder="输入单词，回车查询…" autocomplete="off" spellcheck="false" />
+    <button id="sb-go" class="primary-btn sm">查词</button>
+  </div>
+  <div id="sb-suggest" class="suggest-list"></div>
+
+  <div id="sb-body" class="sb-body">
+    <div class="empty-state">
+      <div class="es-icon">&#128214;</div>
+      <p>输入单词即可查词</p>
+      <p class="muted">查询结果会缓存到本地，离线也能看</p>
+    </div>
+  </div>
+
+  <div class="sb-foot">
+    <button class="ghost-btn sm" id="sb-quiz">快速背词</button>
+    <button class="ghost-btn sm" id="sb-explain">AI 讲解</button>
+  </div>
+</div>
+
+<!-- ============ 主界面布局 ============ -->
+<div id="main-shell" class="app-shell">
+  <!-- 左侧导航 -->
+  <aside class="nav">
+    <div class="nav-logo">
+      <span class="logo-mark">W</span>
+      <div class="logo-text">
+        <strong>WordWise</strong>
+        <small>本地大模型背单词</small>
+      </div>
+    </div>
+
+    <nav class="nav-menu">
+      <a class="nav-item active" data-page="study">
+        <span class="ni-icon">&#9997;</span><span>背诵</span>
+      </a>
+      <a class="nav-item" data-page="lookup">
+        <span class="ni-icon">&#128269;</span><span>查词</span>
+      </a>
+      <a class="nav-item" data-page="library">
+        <span class="ni-icon">&#128218;</span><span>词库</span>
+      </a>
+      <a class="nav-item" data-page="leech">
+        <span class="ni-icon">&#9888;</span><span>错词本</span>
+        <span class="ni-badge hidden" id="nav-leech-badge">0</span>
+      </a>
+      <a class="nav-item" data-page="plan">
+        <span class="ni-icon">&#128197;</span><span>复习计划</span>
+      </a>
+      <a class="nav-item" data-page="stats">
+        <span class="ni-icon">&#128202;</span><span>学习统计</span>
+      </a>
+      <a class="nav-item" data-page="settings">
+        <span class="ni-icon">&#9881;</span><span>设置</span>
+      </a>
+    </nav>
+
+    <div class="nav-foot">
+      <div class="llm-chip" id="llm-chip" title="点击重新检测本地模型">
+        <span class="dot" id="llm-dot"></span>
+        <span id="llm-text">检测中…</span>
+      </div>
+      <button class="ghost-btn xs" id="btn-open-sidebar">打开侧边栏</button>
+    </div>
+  </aside>
+
+  <!-- 主内容区 -->
+  <main class="content">
+
+    <!-- ---------- 背诵页 ---------- -->
+    <section class="page active" id="page-study">
+      <header class="page-head">
+        <div>
+          <h1>背诵</h1>
+          <p class="sub" id="study-greeting">准备开始今天的学习</p>
+        </div>
+        <div class="head-actions">
+          <div class="seg" id="mode-seg">
+            <button class="seg-btn active" data-mode="en_to_zh">看英选中</button>
+            <button class="seg-btn" data-mode="zh_to_en">看中选英</button>
+          </div>
+          <button class="primary-btn" id="btn-start">开始背诵</button>
+        </div>
+      </header>
+
+      <!-- 未开始时的概览 -->
+      <div id="study-idle">
+        <div class="cards-4">
+          <div class="stat-card accent-blue">
+            <div class="sc-label">待复习</div>
+            <div class="sc-value" id="s-due">0</div>
+            <div class="sc-hint">今日到期</div>
+          </div>
+          <div class="stat-card accent-orange">
+            <div class="sc-label">强化记忆</div>
+            <div class="sc-value" id="s-leech">0</div>
+            <div class="sc-hint">常错词</div>
+          </div>
+          <div class="stat-card accent-green">
+            <div class="sc-label">已掌握</div>
+            <div class="sc-value" id="s-mastered">0</div>
+            <div class="sc-hint">累计</div>
+          </div>
+          <div class="stat-card accent-purple">
+            <div class="sc-label">连续学习</div>
+            <div class="sc-value"><span id="s-streak">0</span><small>天</small></div>
+            <div class="sc-hint">保持住</div>
+          </div>
+        </div>
+
+        <div class="two-col">
+          <div class="panel">
+            <h3 class="panel-title">开始新的一轮</h3>
+            <p class="muted">系统会按遗忘曲线自动安排顺序：先复习到期词和常错词，再补充薄弱词与新词。</p>
+            <div class="option-row">
+              <label class="check">
+                <input type="checkbox" id="opt-leech-only" />
+                <span>只背强化记忆的常错词</span>
+              </label>
+            </div>
+            <div class="option-row">
+              <label class="field-inline">
+                <span>每轮题量</span>
+                <input type="number" id="opt-batch" min="5" max="100" value="20" />
+              </label>
+            </div>
+            <button class="primary-btn wide" id="btn-start2">开始背诵</button>
+            <button class="ghost-btn wide" id="btn-seed">载入示例词库</button>
+          </div>
+
+          <div class="panel">
+            <h3 class="panel-title">近 14 天学习量</h3>
+            <div class="bar-chart" id="study-chart"></div>
+            <div class="legend">
+              <span><i class="dot-ok"></i>答对</span>
+              <span><i class="dot-bad"></i>答错</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 答题中 -->
+      <div id="study-run" class="hidden">
+        <div class="quiz-top">
+          <div class="progress-wrap">
+            <div class="progress-bar"><div class="progress-fill" id="q-progress"></div></div>
+            <span class="progress-text" id="q-progress-text">0 / 0</span>
+          </div>
+          <div class="quiz-counters">
+            <span class="pill ok">对 <b id="q-correct">0</b></span>
+            <span class="pill bad">错 <b id="q-wrong">0</b></span>
+            <button class="ghost-btn xs" id="btn-end-session">结束本轮</button>
+          </div>
+        </div>
+
+        <div class="quiz-card" id="quiz-card">
+          <div class="qc-badge hidden" id="qc-leech">强化记忆</div>
+          <div class="qc-label" id="q-label">请选择正确的中文释义</div>
+          <div class="qc-prompt" id="q-prompt">—</div>
+          <div class="qc-phonetic" id="q-phonetic"></div>
+          <div class="qc-options" id="q-options"></div>
+          <div class="qc-feedback hidden" id="q-feedback"></div>
+          <div class="qc-actions" id="q-actions"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ---------- 查词页 ---------- -->
+    <section class="page" id="page-lookup">
+      <header class="page-head">
+        <div>
+          <h1>查词</h1>
+          <p class="sub">联网多源聚合 · 本地大模型兜底 · 自动缓存</p>
+        </div>
+      </header>
+
+      <div class="search-bar">
+        <input id="lk-input" type="text" placeholder="输入要查询的单词，支持中英文…" autocomplete="off" spellcheck="false" />
+        <button class="primary-btn" id="lk-go">查询</button>
+        <button class="ghost-btn" id="lk-refresh" title="忽略缓存重新查询">强制刷新</button>
+      </div>
+      <div id="lk-suggest" class="suggest-list"></div>
+
+      <div class="two-col lookup-cols">
+        <div class="panel" id="lk-result">
+          <div class="empty-state">
+            <div class="es-icon">&#128269;</div>
+            <p>输入单词开始查询</p>
+            <p class="muted">支持 dictionaryapi.dev、Wiktionary、有道等多个数据源</p>
+          </div>
+        </div>
+
+        <div class="panel ai-panel">
+          <div class="ai-head">
+            <h3 class="panel-title">AI 讲解</h3>
+            <span class="ai-model" id="ai-model">本地模型</span>
+          </div>
+          <div class="ai-body" id="ai-body">
+            <p class="muted">点击下方按钮，让本地大模型讲解当前单词。</p>
+          </div>
+          <div class="ai-ask">
+            <input id="ai-input" type="text" placeholder="追问，例如：这个词和 rely 有什么区别？" />
+            <button class="primary-btn sm" id="ai-send">提问</button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ---------- 词库页 ---------- -->
+    <section class="page" id="page-library">
+      <header class="page-head">
+        <div>
+          <h1>词库</h1>
+          <p class="sub" id="lib-count">共 0 个单词</p>
+        </div>
+        <div class="head-actions">
+          <input id="lib-search" class="inline-input" type="text" placeholder="搜索词库…" />
+          <button class="ghost-btn" id="btn-import-dialog">批量导入</button>
+          <button class="ghost-btn" id="btn-export">导出备份</button>
+          <button class="ghost-btn" id="btn-import-file">导入备份</button>
+        </div>
+      </header>
+      <div class="panel">
+        <div id="lib-list" class="word-list"></div>
+        <div class="list-foot">
+          <button class="ghost-btn sm" id="lib-prev">上一页</button>
+          <span id="lib-page-info" class="muted">第 1 页</span>
+          <button class="ghost-btn sm" id="lib-next">下一页</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- ---------- 错词本 ---------- -->
+    <section class="page" id="page-leech">
+      <header class="page-head">
+        <div>
+          <h1>错词本</h1>
+          <p class="sub">错误率高的词会自动进入强化记忆队列，并按遗忘曲线高频重现</p>
+        </div>
+        <div class="head-actions">
+          <button class="primary-btn" id="btn-leech-quiz">强化背诵</button>
+        </div>
+      </header>
+      <div class="panel">
+        <div id="leech-list" class="word-list"></div>
+      </div>
+    </section>
+
+    <!-- ---------- 复习计划 ---------- -->
+    <section class="page" id="page-plan">
+      <header class="page-head">
+        <div>
+          <h1>复习计划</h1>
+          <p class="sub">基于艾宾浩斯遗忘曲线与 SM-2 算法动态排程</p>
+        </div>
+      </header>
+      <div class="panel">
+        <h3 class="panel-title">未来 14 天安排</h3>
+        <div id="plan-list" class="plan-list"></div>
+      </div>
+      <div class="panel">
+        <h3 class="panel-title">记忆周期表</h3>
+        <p class="muted">连续答对时，复习间隔按以下节点递增；答错则回到短期强化。</p>
+        <div id="plan-intervals" class="interval-track"></div>
+      </div>
+    </section>
+
+    <!-- ---------- 统计 ---------- -->
+    <section class="page" id="page-stats">
+      <header class="page-head">
+        <div>
+          <h1>学习统计</h1>
+          <p class="sub" id="stamp-now">—</p>
+        </div>
+      </header>
+      <div class="cards-4" id="stats-cards"></div>
+      <div class="two-col">
+        <div class="panel">
+          <h3 class="panel-title">近 14 天答题量</h3>
+          <div class="bar-chart" id="stats-chart"></div>
+        </div>
+        <div class="panel">
+          <h3 class="panel-title">掌握度分布</h3>
+          <div id="mastery-dist" class="mastery-dist"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ---------- 设置 ---------- -->
+    <section class="page" id="page-settings">
+      <header class="page-head">
+        <div>
+          <h1>设置</h1>
+          <p class="sub">记忆辅助内容、本地模型、词典源与语言</p>
+        </div>
+        <button class="primary-btn" id="btn-save-settings">保存设置</button>
+      </header>
+
+      <div class="two-col settings-cols">
+        <!-- 记忆辅助开关（需求 3） -->
+        <div class="panel">
+          <h3 class="panel-title">记忆辅助内容</h3>
+          <p class="muted">按需开启，界面会实时联动。</p>
+          <div class="switch-list">
+            <label class="switch"><span>显示音标</span><input type="checkbox" data-opt="show_phonetic" /></label>
+            <label class="switch"><span>显示单词变形</span><input type="checkbox" data-opt="show_inflections" /></label>
+            <label class="switch"><span>显示例句</span><input type="checkbox" data-opt="show_examples" /></label>
+            <label class="switch"><span>显示相关词</span><input type="checkbox" data-opt="show_related" /></label>
+            <label class="switch"><span>显示词根词缀 / 记忆法</span><input type="checkbox" data-opt="show_mnemonic" /></label>
+            <label class="switch"><span>答错自动弹出详情卡</span><input type="checkbox" data-opt="auto_popup_on_wrong" /></label>
+            <label class="switch"><span>启用 AI 讲解</span><input type="checkbox" data-opt="ai_explain" /></label>
+          </div>
+          <div class="option-row">
+            <label class="field-inline"><span>每轮题量</span><input type="number" id="set-batch" min="5" max="100" /></label>
+            <label class="field-inline"><span>每日上限</span><input type="number" id="set-daily" min="10" max="1000" /></label>
+          </div>
+        </div>
+
+        <!-- 本地模型 -->
+        <div class="panel">
+          <h3 class="panel-title">本地大模型（LM Studio）</h3>
+          <p class="muted">在 LM Studio 中打开 Developer → Start Server 后即可连接。</p>
+          <label class="field"><span>服务地址</span>
+            <input type="text" id="set-llm-url" placeholder="http://127.0.0.1:1234/v1" />
+          </label>
+          <label class="field"><span>模型名（留空自动选择）</span>
+            <input type="text" id="set-llm-model" placeholder="自动选择第一个已加载模型" />
+          </label>
+          <div class="inline-2">
+            <label class="field"><span>温度</span><input type="number" id="set-llm-temp" step="0.1" min="0" max="2" /></label>
+            <label class="field"><span>最大输出长度</span><input type="number" id="set-llm-maxtok" step="64" min="128" max="8192" /></label>
+          </div>
+          <div class="btn-row">
+            <button class="primary-btn sm" id="btn-llm-test">测试连接</button>
+            <span id="llm-test-result" class="muted"></span>
+          </div>
+        </div>
+
+        <!-- 词典源（需求 6） -->
+        <div class="panel span-2">
+          <div class="panel-head-row">
+            <h3 class="panel-title">词典与翻译源（可扩展小语种）</h3>
+            <div class="btn-row">
+              <button class="ghost-btn sm" id="btn-add-source">新增源</button>
+              <button class="ghost-btn sm" id="btn-reset-sources">恢复内置</button>
+              <button class="ghost-btn sm" id="btn-clear-cache">清空缓存</button>
+            </div>
+          </div>
+          <p class="muted">
+            每个源通过 URL 模板 + 字段映射接入，新增语言或词典只需填写配置，无需改代码。
+            映射支持 <code>a.b[0].c</code>、<code>a[*].b</code> 这样的路径表达式。
+          </p>
+          <div id="source-list" class="source-list"></div>
+        </div>
+
+        <!-- 语言与侧边栏 -->
+        <div class="panel span-2">
+          <h3 class="panel-title">语言与侧边栏</h3>
+          <div class="inline-2">
+            <label class="field"><span>学习语言</span>
+              <select id="set-lang">
+                <option value="en">英语</option>
+                <option value="ja">日语</option>
+                <option value="ko">韩语</option>
+                <option value="fr">法语</option>
+                <option value="de">德语</option>
+                <option value="es">西班牙语</option>
+                <option value="ru">俄语</option>
+              </select>
+            </label>
+            <label class="field"><span>侧边栏宽度（px）</span>
+              <input type="number" id="set-sb-width" min="300" max="700" step="20" />
+            </label>
+          </div>
+          <label class="switch"><span>侧边栏始终置顶</span><input type="checkbox" id="set-sb-top" /></label>
+        </div>
+      </div>
+    </section>
+
+  </main>
+</div>
+
+<!-- ============ 单词详情卡（仿有道词典，需求 5） ============ -->
+<div id="detail-overlay" class="overlay hidden">
+  <div class="detail-card" id="detail-card">
+    <button class="dc-close" id="dc-close">&#10005;</button>
+    <div class="dc-head">
+      <div class="dc-word-line">
+        <h2 id="dc-word">word</h2>
+        <button class="icon-btn" id="dc-audio" title="查看音标">&#128266;</button>
+      </div>
+      <div class="dc-phonetic" id="dc-phonetic"></div>
+      <div class="dc-tags" id="dc-tags"></div>
+    </div>
+
+    <div class="dc-tabs" id="dc-tabs">
+      <button class="dc-tab active" data-tab="def">释义</button>
+      <button class="dc-tab" data-tab="infl">变形</button>
+      <button class="dc-tab" data-tab="ex">例句</button>
+      <button class="dc-tab" data-tab="rel">相关词</button>
+      <button class="dc-tab" data-tab="ai">AI 讲解</button>
+    </div>
+
+    <div class="dc-body">
+      <div class="dc-pane active" data-pane="def" id="dc-pane-def"></div>
+      <div class="dc-pane" data-pane="infl" id="dc-pane-infl"></div>
+      <div class="dc-pane" data-pane="ex" id="dc-pane-ex"></div>
+      <div class="dc-pane" data-pane="rel" id="dc-pane-rel"></div>
+      <div class="dc-pane" data-pane="ai" id="dc-pane-ai"></div>
+    </div>
+
+    <div class="dc-foot">
+      <div class="dc-state" id="dc-state"></div>
+      <div class="btn-row">
+        <button class="ghost-btn sm" id="dc-add">加入词库</button>
+        <button class="ghost-btn sm" id="dc-explain">AI 讲解</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ============ 批量导入对话框 ============ -->
+<div id="import-overlay" class="overlay hidden">
+  <div class="modal">
+    <button class="dc-close" id="import-close">&#10005;</button>
+    <h3>批量导入单词</h3>
+    <p class="muted">每行一个单词，或粘贴用逗号/空格分隔的单词。导入后会自动联网补全释义。</p>
+    <textarea id="import-text" rows="10" placeholder="apple&#10;banana&#10;cherry"></textarea>
+    <label class="switch"><span>导入后立即联网补全释义</span><input type="checkbox" id="import-prefetch" checked /></label>
+    <div class="btn-row right">
+      <button class="ghost-btn" id="import-cancel">取消</button>
+      <button class="primary-btn" id="import-confirm">开始导入</button>
+    </div>
+  </div>
+</div>
+
+<!-- ============ 全局提示 ============ -->
+<div id="toast" class="toast hidden"></div>
+
+<script src="js/api.js"></script>
+<script src="js/ui.js"></script>
+<script src="js/study.js"></script>
+<script src="js/lookup.js"></script>
+<script src="js/library.js"></script>
+<script src="js/settings.js"></script>
+<script src="js/sidebar.js"></script>
+<script src="js/app.js"></script>
+</body>
+</html>

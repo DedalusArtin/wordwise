@@ -1,0 +1,51 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "WordWise",
+  "version": "1.0.0",
+  "identifier": "com.dedalusartin.wordwise",
+  "build": {
+    "frontendDist": "../src",
+    "beforeDevCommand": "",
+    "beforeBuildCommand": ""
+  },
+  "app": {
+    "windows": [],
+    "security": {
+      "csp": "default-src 'self'; img-src 'self' data: blob: asset: http://asset.localhost https:; style-src 'self' 'unsafe-inline'; script-src 'self'; font-src 'self' data:; media-src 'self' https:; connect-src 'self' ipc: http://ipc.localhost http://127.0.0.1:* http://localhost:* https:",
+      "assetProtocol": {
+        "enable": true,
+        "scope": ["$APPDATA/**", "$APPLOCALDATA/**"]
+      }
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["nsis", "msi"],
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.ico",
+      "icons/icon.png"
+    ],
+    "publisher": "DedalusArtin",
+    "copyright": "Copyright © 2026 DedalusArtin",
+    "category": "Education",
+    "shortDescription": "基于本地大模型的背单词与 AI 讲解一体化工具",
+    "longDescription": "WordWise 是一款基于本地 LM Studio 大模型的可视化背单词软件。支持双向背诵、联网查词、AI 单词讲解、间隔重复记忆调度、错词强化记忆与可长期挂起的侧边栏查词，并可通过配置 API 接入更多语种的词典源。",
+    "resources": [],
+    "windows": {
+      "allowDowngrades": true,
+      "wix": {
+        "language": ["zh-CN"]
+      },
+      "nsis": {
+        "languages": ["SimpChinese", "English"],
+        "displayLanguageSelector": true,
+        "installMode": "currentUser"
+      }
+    },
+    "createUpdaterArtifacts": false
+  },
+  "plugins": {}
+}

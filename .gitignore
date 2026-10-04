@@ -1,0 +1,31 @@
+# Rust / Cargo
+/src-tauri/target/
+**/*.rs.bk
+Cargo.lock.bak
+
+# 构建产物
+/dist/
+/build/
+*.exe
+*.msi
+installer/output/
+!installer/output/.gitkeep
+
+# 本地数据与缓存
+/wordwise-data/
+*.db
+*.db-wal
+*.db-shm
+.env
+.env.local
+
+# 编辑器
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+
+# 临时文件
+*.log
+*.tmp
