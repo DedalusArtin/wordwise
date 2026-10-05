@@ -29,7 +29,7 @@ cargo --version
 通常是本机 `HTTP_PROXY` 指向了不可用的代理端口。解决办法二选一：
 
 ```bash
-# 方式一：清空代理后构建（build.sh / build.ps1 已自动处理）
+# 方式一：清空代理后构建（build.ps1 已自动处理）
 unset HTTP_PROXY HTTPS_PROXY http_proxy https_proxy
 
 # 方式二：使用国内镜像（写入 ~/.cargo/config.toml）
@@ -126,14 +126,38 @@ cargo tauri build
 # 1) 先构建 release 版本
 cd src-tauri && cargo build --release && cd ..
 
-# 2) 用 Inno Setup 编译脚本（假设 ISCC 在默认位置）
-"C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer\wordwise.iss
+# 2) 用 Inno Setup 编译脚本（必须用 ISCC.exe 的完整路径）
+"G:\Programming\07-utils\Inno Setup 7\ISCC.exe" installer\wordwise.iss
 ```
 
-产物：`installer\output\WordWise-Setup-1.0.0.exe`
+产物：`installer\output\WordWise-Setup-0.35.0.exe`
 
-若 ISCC 不在默认路径，可修改 `build.ps1` 中的 `$IsccPath` 变量，
-或直接把 Inno Setup 安装目录的 `ISCC.exe` 加入 PATH。
+### 4.3b 便携版（免安装）
+
+前端资源已内嵌进 exe，`wordwise.exe` 本身就是**单文件绿色版**，无需任何打包步骤：
+
+```
+src-tauri\target\release\wordwise.exe    ← 直接双击即可运行
+```
+
+`.\build.ps1` 会额外把它连同文档复制到 `dist\`，并压成
+`installer\output\WordWise-<版本>-portable.zip`。
+
+- 不写注册表、不往系统目录拷文件，拷到 U 盘也能跑
+- 学习数据默认在 `%APPDATA%\WordWise`；设 `WORDWISE_DATA_DIR` 可改位置
+- 需要 WebView2 运行时（Windows 10/11 一般已自带）
+
+> **ISCC.exe 默认不在 PATH 里**，命令行敲 `iscc` 是调不到的，必须写完整路径。
+> 本机安装位置：`G:\Programming\07-utils\Inno Setup 7\ISCC.exe`（Inno Setup 7）。
+> 若装在别处，任选一种：
+> - 临时指定：`.\build.ps1 -IsccPath "<你的路径>\ISCC.exe"`
+> - 永久生效：改 `build.ps1` 顶部的 `$DefaultIscc`
+>
+> 排查实际位置：`where.exe ISCC.exe` 或
+> `Get-ChildItem G:\ -Recurse -Filter ISCC.exe -ErrorAction SilentlyContinue`
+>
+> 脚本会自动校验找到的文件确实是 Inno Setup 编译器；版本与预期的
+> Inno Setup 7 不一致时会给出提示。
 
 ### 4.4 一键构建脚本
 
@@ -145,10 +169,13 @@ cd src-tauri && cargo build --release && cd ..
 ```
 
 ```bash
-# Git Bash
-./build.sh
-./build.sh --clean
+# 交互式菜单（推荐，双击 构建.ps1 即可）
+.\构建.ps1
 ```
+
+> 旧版基于 WSL / Git Bash 的 `build.sh`、`build_fixed.sh`、`BUILD_AND_PACK.sh`、
+> `编译.cmd` 已移入 `archive/legacy-build-scripts/`，不再维护。
+> 当前唯一受支持的构建入口是 `build.ps1`（原生 Windows，不依赖 WSL）。
 
 ---
 
@@ -194,7 +221,7 @@ wordwise/
 │
 ├── installer/wordwise.iss      Inno Setup 打包脚本
 ├── scripts/upload_github.py    自动上传到 GitHub
-├── build.ps1 / build.sh        一键构建
+├── build.ps1 / 构建.ps1         一键构建
 └── docs/                       文档
 ```
 

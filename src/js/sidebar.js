@@ -38,12 +38,23 @@ const Sidebar = (() => {
       explain(w);
     });
 
-    // 侧边栏内的相关词点击
+    // 侧边栏内的相关词/变形词点击
     document.getElementById('sb-body')?.addEventListener('click', (e) => {
       const chip = e.target.closest('.rel-chip');
-      if (chip) query(chip.dataset.word);
+      if (chip && chip.dataset.word) { query(chip.dataset.word); return; }
+      const inf = e.target.closest('.infl-form.clickable');
+      if (inf && inf.dataset.word) { query(inf.dataset.word); return; }
       const tab = e.target.closest('[data-sbtab]');
       if (tab) switchPane(tab.dataset.sbtab);
+    });
+    // 发音委托（作用于整个侧边栏体）
+    document.getElementById('sb-body')?.addEventListener('click', (e) => {
+      const b = e.target.closest('.speak-btn');
+      if (!b) return;
+      e.stopPropagation();
+      const host = b.closest('[data-entry-word]');
+      const w = b.dataset.speakWord || (host && host.dataset.entryWord) || (currentEntry && currentEntry.word) || '';
+      if (w) U().speak(w, { accent: b.dataset.speakAccent || 'us', audio: b.dataset.speakAudio || '', lang: b.dataset.speakLang || 'en' });
     });
   }
 
@@ -115,11 +126,12 @@ const Sidebar = (() => {
     const phon = [ph.uk, ph.us].filter(Boolean);
 
     box.innerHTML = `
-      <div class="sb-entry">
+      <div class="sb-entry" data-entry-word="${U().esc(entry.word)}">
         <div class="we-head" style="padding-bottom:10px;margin-bottom:10px">
           <div class="we-word">${U().esc(entry.word)}</div>
-          ${study.show_phonetic !== false && phon.length
-            ? `<div class="we-phon" style="font-size:12px">${phon.map(U().esc).join('  ')}</div>` : ''}
+          ${study.show_phonetic !== false
+            ? `<div class="we-phon" style="font-size:12px">${phon.map(U().esc).join('  ')}${U().speakBtn(entry, 'us', '发音')}</div>`
+            : `<div class="we-phon" style="font-size:12px">${U().speakBtn(entry, 'us', '发音')}</div>`}
           <div class="we-src" style="margin-top:8px">
             ${(entry.source || '').split('+').filter(Boolean).map(s =>
               `<span class="tag">${U().esc(U().sourceLabel(s))}</span>`).join('')}
@@ -145,7 +157,7 @@ const Sidebar = (() => {
           ${(entry.inflections || []).map(i =>
             `<div class="infl-item" style="margin-bottom:6px">
               <span class="infl-label">${U().esc(i.label || '形式')}</span>
-              <span class="infl-form">${U().esc(i.form)}</span></div>`).join('')
+              <span class="infl-form clickable" data-word="${U().esc(i.form)}" title="点击查询 ${U().esc(i.form)}">${U().esc(i.form)}</span></div>`).join('')
             || '<div class="muted">暂无变形信息</div>'}
         </div>
 
@@ -205,8 +217,19 @@ const Sidebar = (() => {
     });
 
     try {
-      const full = await API.aiExplain(word);
-      pane.innerHTML = U().renderMarkdown(full || explaining);
+      // ★ 后端返回 ExplainResult 结构体（兼容旧的字符串形态）
+      const raw = await API.aiExplain(word);
+      const res = (raw && typeof raw === 'object')
+        ? raw
+        : { text: (typeof raw === 'string' && raw) || explaining, original: explaining,
+            lang: '', translated: false };
+      pane.innerHTML =
+        `<div class="ai-lang-bar"><span class="ai-lang-meta">${
+          U().esc(res.translated
+            ? `已自动翻译为 ${window.WordWiseAPI.explainLangLabel(res.lang)}`
+            : `讲解语言：${window.WordWiseAPI.explainLangLabel(res.lang)}`)
+        }</span></div>` +
+        U().renderMarkdown(res.text);
     } catch (e) {
       pane.innerHTML = `<div class="muted" style="color:#e5484d;line-height:1.8">讲解失败：${U().esc(e.message)}</div>`;
     } finally {

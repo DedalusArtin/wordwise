@@ -3,6 +3,9 @@
 //! 命名约定：`cmd_` 前缀便于在主入口统一注册。
 //! 所有命令统一返回 `Result<T, String>`，错误转成中文文案直接给用户看。
 
+pub mod books;
+pub mod extra;
+
 use crate::db;
 use crate::dict;
 use crate::llm;
@@ -61,11 +64,27 @@ pub fn cmd_get_config(state: State<'_, Arc<AppState>>) -> AppConfig {
 /// 保存配置。
 #[tauri::command]
 pub fn cmd_save_config(state: State<'_, Arc<AppState>>, config: AppConfig) -> Result<(), String> {
+    let old_network = state.cfg().network;
     state
         .update_config(|c| {
             *c = config.clone();
         })
-        .map_err(err)
+        .map_err(err)?;
+
+    // 网络/代理配置变了就立刻重建 HTTP 客户端，省得让用户重启应用。
+    let n = &config.network;
+    let changed = n.enable_proxy != old_network.enable_proxy
+        || n.proxy != old_network.proxy
+        || n.use_system_proxy != old_network.use_system_proxy
+        || n.no_proxy != old_network.no_proxy
+        || n.timeout_secs != old_network.timeout_secs
+        || n.connect_timeout_secs != old_network.connect_timeout_secs;
+    if changed {
+        if let Err(e) = state.reload_http() {
+            log::warn!("代理配置已保存，但重建网络客户端失败：{}", e);
+        }
+    }
+    Ok(())
 }
 
 /// 只更新记忆辅助开关（需求 3），前端设置面板高频调用。
@@ -98,14 +117,14 @@ pub fn cmd_set_llm_config(
 #[tauri::command]
 pub async fn cmd_llm_status(state: State<'_, Arc<AppState>>) -> Result<llm::LlmStatus, String> {
     let cfg = state.cfg();
-    Ok(llm::status(&state.http, &cfg.llm).await)
+    Ok(llm::status(&state.http(), &cfg.llm).await)
 }
 
 /// 探测服务并自动选用第一个可用模型，写回配置。
 #[tauri::command]
 pub async fn cmd_llm_autoconnect(state: State<'_, Arc<AppState>>) -> Result<llm::LlmStatus, String> {
     let cfg = state.cfg();
-    let st = llm::status(&state.http, &cfg.llm).await;
+    let st = llm::status(&state.http(), &cfg.llm).await;
     if st.online && !st.active_model.is_empty() {
         let model = st.active_model.clone();
         state
@@ -115,10 +134,83 @@ pub async fn cmd_llm_autoconnect(state: State<'_, Arc<AppState>>) -> Result<llm:
     Ok(st)
 }
 
+/// AI 讲解的返回值。
+///
+/// ★ 之所以从一个字符串变成结构体：前端需要**同时**拿到「最终展示文本」和
+/// 「模型原始输出」，才能提供「查看原文」对照（需求 4）。只返回字符串的话，
+/// 译文替换掉原文后就再也拿不回来了。
+#[derive(Debug, Clone, Serialize)]
+pub struct ExplainResult {
+    pub word: String,
+    /// 最终展示文本（已按 `explain_lang` 处理过）
+    pub text: String,
+    /// 模型原始输出（未翻译）
+    pub original: String,
+    /// 本次生效的讲解语言
+    pub lang: String,
+    /// 是否经过了后处理层的兜底翻译
+    pub translated: bool,
+    /// 兜底翻译失败时的提示（此时 `text == original`，前端应如实告知）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+/// 解析本次要用的讲解语言：配置为空时退回中文。
+fn explain_lang_of(cfg: &AppConfig) -> String {
+    let l = cfg.explain_lang.trim();
+    if l.is_empty() {
+        "zh".to_string()
+    } else {
+        l.to_string()
+    }
+}
+
+/// 后处理兜底：模型没按目标语言输出时，套翻译模板重译整段讲解。
+///
+/// 返回 `(最终文本, 是否翻译过, 提示)`。**任何失败都降级为「保留原文」**，
+/// 宁可显示原文也不要因为一次翻译失败让用户看不到讲解。
+async fn apply_explain_lang(
+    state: &AppState,
+    cfg: &AppConfig,
+    text: String,
+    explain_lang: &str,
+) -> (String, bool, Option<String>) {
+    if !cfg.explain_auto_translate {
+        return (text, false, None);
+    }
+    if llm::text_matches_lang(&text, explain_lang) {
+        return (text, false, None);
+    }
+    match llm::translate_markdown(
+        &state.http(),
+        &cfg.llm,
+        &cfg.explain_translate_template,
+        &text,
+        explain_lang,
+    )
+    .await
+    {
+        Ok(t) if !t.trim().is_empty() => (t, true, None),
+        Ok(_) => (text, false, Some("翻译返回了空内容，已保留原文".into())),
+        Err(e) => (
+            text,
+            false,
+            Some(format!("自动翻译失败，已保留原文（{}）", e)),
+        ),
+    }
+}
+
 /// AI 讲解单词（流式推送）。
 ///
 /// 通过 `explain://delta` 事件把增量文本推给前端，实现打字机效果；
-/// 命令本身返回完整文本，便于前端做兜底与缓存。
+/// 命令本身返回完整结果，便于前端做兜底与「原文/译文」切换。
+///
+/// 分层说明（需求 1 / 2）：
+///   1. **提示词层**：`with_lang_constraint` 把《输出语言》约束追加进 system，
+///      让模型**直接**用目标语言输出 —— 零额外延迟，也保住了流式打字机效果。
+///   2. **输出后处理层**：流式结束后做一次语言检测，模型没听话时套
+///      [`llm::translate_markdown`] 的翻译模板重译整段并替换原文。
+///      这一步保证「选了就一定生效」，代价是多一次模型调用。
 #[tauri::command]
 pub async fn cmd_ai_explain(
     app: tauri::AppHandle,
@@ -126,11 +218,12 @@ pub async fn cmd_ai_explain(
     word: String,
     lang: Option<String>,
     question: Option<String>,
-) -> Result<String, String> {
+) -> Result<ExplainResult, String> {
     use tauri::Emitter;
 
     let cfg = state.cfg();
     let lang = lang.unwrap_or(cfg.target_lang.clone());
+    let explain_lang = explain_lang_of(&cfg);
 
     // 尽量带上词典释义，讲解更准确
     let entry = state
@@ -150,35 +243,41 @@ pub async fn cmd_ai_explain(
         _ => llm::explain_prompt(&entry, ""),
     };
 
+    // 提示词层：把语言要求注入 system（用户可编辑的人设不做改动，只追加）
+    let system = llm::with_lang_constraint(&cfg.llm.system_prompt, &explain_lang);
+
     let app2 = app.clone();
     let word2 = word.clone();
 
-    let full = llm::chat_stream(
-        &state.http,
-        &cfg.llm,
-        &cfg.llm.system_prompt,
-        &user_prompt,
-        |d, kind| {
-            // 忽略发送失败（前端可能已关闭面板）
-            // kind 区分正文与思考过程，前端可分别渲染
-            let channel = match kind {
-                llm::DeltaKind::Content => "explain://delta",
-                llm::DeltaKind::Reasoning => "explain://reasoning",
-            };
-            let _ = app2.emit(
-                channel,
-                serde_json::json!({ "word": word2, "delta": d }),
-            );
-        },
-    )
+    let full = llm::chat_stream(&state.http(), &cfg.llm, &system, &user_prompt, |d, kind| {
+        // 忽略发送失败（前端可能已关闭面板）
+        // kind 区分正文与思考过程，前端可分别渲染
+        let channel = match kind {
+            llm::DeltaKind::Content => "explain://delta",
+            llm::DeltaKind::Reasoning => "explain://reasoning",
+        };
+        let _ = app2.emit(channel, serde_json::json!({ "word": word2, "delta": d }));
+    })
     .await
     .map_err(err)?;
 
-    let _ = app.emit(
-        "explain://done",
-        serde_json::json!({ "word": word, "text": full }),
-    );
-    Ok(full)
+    let original = full.clone();
+    // 输出后处理层兜底
+    let (text, translated, note) =
+        apply_explain_lang(&state, &cfg, original.clone(), &explain_lang).await;
+
+    let out = ExplainResult {
+        word: word.clone(),
+        text: text.clone(),
+        original,
+        lang: explain_lang,
+        translated,
+        note,
+    };
+
+    // 前端据此整体替换（流式期间显示的是可能未经翻译的增量文本）
+    let _ = app.emit("explain://done", serde_json::to_value(&out).unwrap_or_default());
+    Ok(out)
 }
 
 /// 非流式讲解（用于导出、批量生成）。
@@ -187,9 +286,10 @@ pub async fn cmd_ai_explain_sync(
     state: State<'_, Arc<AppState>>,
     word: String,
     lang: Option<String>,
-) -> Result<String, String> {
+) -> Result<ExplainResult, String> {
     let cfg = state.cfg();
     let lang = lang.unwrap_or(cfg.target_lang.clone());
+    let explain_lang = explain_lang_of(&cfg);
     let entry = state
         .db
         .get_word(&word, &lang)
@@ -197,9 +297,73 @@ pub async fn cmd_ai_explain_sync(
         .flatten()
         .unwrap_or_else(|| WordEntry::new(&word));
     let prompt = llm::explain_prompt(&entry, "");
-    llm::chat(&state.http, &cfg.llm, &cfg.llm.system_prompt, &prompt)
+    let system = llm::with_lang_constraint(&cfg.llm.system_prompt, &explain_lang);
+    let original = llm::chat(&state.http(), &cfg.llm, &system, &prompt)
         .await
-        .map_err(err)
+        .map_err(err)?;
+    let (text, translated, note) =
+        apply_explain_lang(&state, &cfg, original.clone(), &explain_lang).await;
+    Ok(ExplainResult {
+        word: word.clone(),
+        text,
+        original,
+        lang: explain_lang,
+        translated,
+        note,
+    })
+}
+
+/// 手动把一段文本翻成指定语言（前端在「切换讲解语言」时调用）。
+///
+/// 与 [`cmd_ai_explain`] 的区别：不重新生成讲解，只对**已有的原文**重译，
+/// 所以切换语言几乎是秒回，也不会因为重生成而改变讲解内容。
+#[derive(Debug, Clone, Serialize)]
+pub struct TranslateResult {
+    pub text: String,
+    pub original: String,
+    pub lang: String,
+    pub translated: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+#[tauri::command]
+pub async fn cmd_translate_text(
+    state: State<'_, Arc<AppState>>,
+    text: String,
+    lang: Option<String>,
+) -> Result<TranslateResult, String> {
+    let cfg = state.cfg();
+    let explain_lang = lang
+        .map(|l| l.trim().to_string())
+        .filter(|l| !l.is_empty())
+        .unwrap_or_else(|| explain_lang_of(&cfg));
+    let original = text.clone();
+    let (out, translated, note) =
+        apply_explain_lang(&state, &cfg, original.clone(), &explain_lang).await;
+    Ok(TranslateResult {
+        text: out,
+        original,
+        lang: explain_lang,
+        translated,
+        note,
+    })
+}
+
+/// 切换 AI 讲解语言并**立即落盘**（需求 5：选择后即时生效、记住上次选择）。
+#[tauri::command]
+pub fn cmd_set_explain_lang(
+    state: State<'_, Arc<AppState>>,
+    lang: String,
+) -> Result<String, String> {
+    let lang = lang.trim().to_string();
+    if lang.is_empty() {
+        return Err("讲解语言不能为空".into());
+    }
+    state
+        .update_config(|c| c.explain_lang = lang.clone())
+        .map_err(err)?;
+    Ok(lang)
 }
 
 /// 用本地大模型生成结构化词条（离线兜底）。
@@ -211,7 +375,7 @@ pub async fn cmd_ai_generate_entry(
 ) -> Result<WordEntry, String> {
     let cfg = state.cfg();
     let lang = lang.unwrap_or(cfg.target_lang.clone());
-    llm::generate_entry(&state.http, &cfg.llm, &word, &lang)
+    llm::generate_entry(&state.http(), &cfg.llm, &word, &lang)
         .await
         .map_err(err)
 }
@@ -229,12 +393,21 @@ pub async fn cmd_lookup(
     force_refresh: Option<bool>,
 ) -> Result<dict::LookupResult, String> {
     let cfg = state.cfg();
-    let lang = lang.unwrap_or(cfg.target_lang.clone());
     let word = word.trim().to_string();
 
     if word.is_empty() {
         return Err("请输入要查询的单词".into());
     }
+
+    // 语言判定：书写系统能明确判断时以「词本身」为准，判不出来才用下拉里选的。
+    //
+    // 这样「选日语 + 查『开心』」不会再被当成日语词——中文词会走中文源、
+    // 打上「中文」标签，日语词（含假名）走日语源。纯拉丁字母（英/法/德…）
+    // 无法区分，仍尊重用户选择，所以下拉依然是有效的手动开关。
+    let requested = lang.unwrap_or_else(|| cfg.target_lang.clone());
+    let lang = crate::dict::detect_lang(&word)
+        .map(|s| s.to_string())
+        .unwrap_or(requested);
 
     if force_refresh.unwrap_or(false) {
         // 强制刷新时清掉这个词的缓存
@@ -246,7 +419,7 @@ pub async fn cmd_lookup(
 
     // 大模型兜底闭包：先尝试用 LLM 生成（离线可用）
     // 注意：这里克隆一份 word / lang 交给闭包，避免 move 之后主流程无法再借用。
-    let http = state.http.clone();
+    let http = state.http();
     let llm_cfg = cfg.llm.clone();
     let llm_word = word.clone();
     let llm_lang = lang.clone();
@@ -259,14 +432,19 @@ pub async fn cmd_lookup(
         }
     };
 
+    // 有代理时才去碰 wiktionary 这类国内直连不通的源
+    let proxy_active = !state.proxy_info().is_direct();
+
     let result = dict::lookup_with_cache(
         &state.db,
         &word,
         &lang,
         &cfg.dict_sources,
-        &state.http,
+        &state.http(),
         ttl,
         allow_llm,
+        &cfg.network,
+        proxy_active,
         fut,
     )
     .await
@@ -285,7 +463,7 @@ pub async fn cmd_suggest(
 ) -> Result<Vec<search::Suggestion>, String> {
     let cfg = state.cfg();
     let lang = lang.unwrap_or(cfg.target_lang.clone());
-    Ok(search::suggest(&state.http, &query, &lang).await)
+    Ok(search::suggest(&state.http(), &query, &lang).await)
 }
 
 /// 综合搜索（候选 + 维基百科知识）。
@@ -298,7 +476,10 @@ pub async fn cmd_search(
 ) -> Result<search::SearchResult, String> {
     let cfg = state.cfg();
     let lang = lang.unwrap_or(cfg.target_lang.clone());
-    search::search(&state.http, &query, &lang, with_wiki.unwrap_or(true))
+    // 维基百科（wikipedia.org）在国内直连必然超时；没有代理时直接跳过，
+    // 否则用户要为此白白多等 8~16 秒。
+    let wiki_ok = with_wiki.unwrap_or(true) && !state.proxy_info().is_direct();
+    search::search(&state.http(), &query, &lang, wiki_ok)
         .await
         .map_err(err)
 }
@@ -312,7 +493,52 @@ pub async fn cmd_wiki(
 ) -> Result<Option<search::WikiSummary>, String> {
     let cfg = state.cfg();
     let lang = lang.unwrap_or(cfg.target_lang.clone());
-    Ok(search::wiki_summary(&state.http, &word, &lang).await)
+    if state.proxy_info().is_direct() {
+        // 直连环境下 wikipedia.org 一定连不上，直接返回空而不是干等超时
+        return Ok(None);
+    }
+    Ok(search::wiki_summary(&state.http(), &word, &lang).await)
+}
+
+/// 生成辞书跳转链接（需求 14）：本地没有的释义，一键去权威辞书查看。
+#[tauri::command]
+pub fn cmd_dict_links(
+    state: State<'_, Arc<AppState>>,
+    word: String,
+    lang: Option<String>,
+) -> Result<Vec<search::DictLink>, String> {
+    let cfg = state.cfg();
+    let lang = lang.unwrap_or(cfg.target_lang.clone());
+    Ok(search::dict_links(&word, &lang))
+}
+
+/// 用系统默认浏览器打开外部链接（辞书跳转用）。
+#[tauri::command]
+pub fn cmd_open_url(url: String) -> Result<(), String> {
+    let u = url.trim();
+    if !(u.starts_with("http://") || u.starts_with("https://")) {
+        return Err("只允许打开 http(s) 链接".into());
+    }
+    open_in_browser(u).map_err(err)
+}
+
+/// 跨平台打开浏览器。
+fn open_in_browser(url: &str) -> anyhow::Result<()> {
+    #[cfg(target_os = "windows")]
+    {
+        std::process::Command::new("cmd")
+            .args(["/C", "start", "", url])
+            .spawn()?;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open").arg(url).spawn()?;
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        std::process::Command::new("xdg-open").arg(url).spawn()?;
+    }
+    Ok(())
 }
 
 /// 读取本地词库中的词。
@@ -334,10 +560,12 @@ pub fn cmd_search_words(
     lang: Option<String>,
     limit: Option<i64>,
 ) -> Result<Vec<db::WordRow>, String> {
-    let lang = lang.unwrap_or_else(|| state.cfg().target_lang);
+    // 前端（单词列表顶部的搜索框）不传 lang —— 语义是「跨语言搜」。
+    // 若这里退化成当前学习语言，日语/中文词条的中文释义就永远搜不到。
+    let lang = lang.filter(|l| !l.trim().is_empty() && l != "all");
     state
         .db
-        .search_words(&lang, &query, limit.unwrap_or(50))
+        .search_words(lang.as_deref(), &query, limit.unwrap_or(50))
         .map_err(err)
 }
 
@@ -427,7 +655,7 @@ pub async fn cmd_import_words(
             &keys,
             &lang,
             &cfg.dict_sources,
-            &state.http,
+            &state.http(),
             4,
         )
         .await
@@ -668,6 +896,38 @@ fn build_card(
             };
             (q, entry.word.clone())
         }
+        // 拼写：题面给中文释义，答案是要拼的单词
+        QuizMode::Spelling | QuizMode::ListenSpell => {
+            let q = entry.primary_definition();
+            let q = if q.trim().is_empty() {
+                "（暂无释义）".to_string()
+            } else {
+                q
+            };
+            (q, entry.word.clone())
+        }
+        // 例句选义：题面是挖空例句，答案是释义
+        QuizMode::ExToZh => {
+            let a = entry.primary_definition();
+            let a = if a.trim().is_empty() {
+                "（暂无释义）".to_string()
+            } else {
+                a
+            };
+            let q = entry
+                .first_example()
+                .map(|(t, _)| mask_word(&t, &entry.word))
+                .unwrap_or_else(|| entry.word.clone());
+            (q, a)
+        }
+        // 例句识词：题面是挖空例句，答案是单词
+        QuizMode::ExPickWord => {
+            let q = entry
+                .first_example()
+                .map(|(t, _)| mask_word(&t, &entry.word))
+                .unwrap_or_else(|| entry.primary_definition());
+            (q, entry.word.clone())
+        }
     };
 
     // 干扰项：从同语言词库随机取，保证不与正确答案重复
@@ -678,14 +938,37 @@ fn build_card(
             break;
         }
         let cand = match mode {
-            QuizMode::EnToZh => p.primary_definition(),
-            QuizMode::ZhToEn => p.word.clone(),
+            QuizMode::EnToZh | QuizMode::ExToZh => p.primary_definition(),
+            _ => p.word.clone(),
         };
         if cand.trim().is_empty() || cand == answer || options.contains(&cand) {
             continue;
         }
         options.push(cand);
     }
+
+    // 例句相关字段
+    let (ex_raw, ex_trans) = entry.first_example().unwrap_or_default();
+    let ex_masked = if ex_raw.is_empty() {
+        String::new()
+    } else {
+        mask_word(&ex_raw, &entry.word)
+    };
+
+    // 拼写提示：初始只给出字母个数（用下划线占位），前端可再点「提示」逐步放开
+    let spell_hint = if mode.is_typing() {
+        entry
+            .word
+            .chars()
+            .map(|c| if c.is_whitespace() { ' ' } else { '_' })
+            .collect::<Vec<_>>()
+            .iter()
+            .map(|c| c.to_string())
+            .collect::<Vec<_>>()
+            .join(" ")
+    } else {
+        String::new()
+    };
 
     Ok(QuizCard {
         prompt,
@@ -694,11 +977,70 @@ fn build_card(
         options,
         mode,
         is_leech,
+        example_masked: ex_masked,
+        example_raw: ex_raw,
+        example_translation: ex_trans,
+        spell_hint,
+        audio: entry.phonetic.audio.clone(),
         index: progress.index,
         total: progress.total,
         correct_count: progress.correct,
         wrong_count: progress.wrong,
     })
+}
+
+/// 把句子里的目标词替换为 ____（大小写不敏感，兼顾词形变化）。
+fn mask_word(sentence: &str, word: &str) -> String {
+    let s = sentence;
+    let w = word.trim();
+    if w.is_empty() {
+        return s.to_string();
+    }
+    let lower = s.to_lowercase();
+    let wl = w.to_lowercase();
+    if let Some(pos) = lower.find(&wl) {
+        let mut out = String::with_capacity(s.len());
+        out.push_str(&s[..pos]);
+        out.push_str("____");
+        out.push_str(&s[pos + wl.len()..]);
+        return out;
+    }
+    // 词形变化：用词干前 3/4 再试一次
+    if wl.len() > 4 {
+        let stem = &wl[..(wl.len() * 3 / 4)];
+        if let Some(pos) = lower.find(stem) {
+            let end = (pos + stem.len() + 2).min(s.len());
+            let mut out = String::with_capacity(s.len());
+            out.push_str(&s[..pos]);
+            out.push_str("____");
+            out.push_str(&s[end..]);
+            return out;
+        }
+    }
+    s.to_string()
+}
+
+/// 供 `commands::extra` 复用的公开构造入口（需求 4 进阶模式）。
+#[allow(clippy::too_many_arguments)]
+pub fn build_card_public(
+    state: &AppState,
+    entry: &WordEntry,
+    mode: QuizMode,
+    lang: &str,
+    is_leech: bool,
+    index: usize,
+    total: usize,
+    correct: i32,
+    wrong: i32,
+) -> Result<QuizCard, String> {
+    build_card(
+        state,
+        entry,
+        mode,
+        lang,
+        is_leech,
+        CardProgress { index, total, correct, wrong },
+    )
 }
 
 /// 题目附带的本轮进度信息。
@@ -739,6 +1081,10 @@ pub fn cmd_submit_answer(
     let mode_str = match mode {
         QuizMode::EnToZh => "en_to_zh",
         QuizMode::ZhToEn => "zh_to_en",
+        QuizMode::Spelling => "spelling",
+        QuizMode::ExToZh => "ex_to_zh",
+        QuizMode::ExPickWord => "ex_pick_word",
+        QuizMode::ListenSpell => "listen_spell",
     };
 
     // 取或建学习状态
@@ -1035,11 +1381,19 @@ pub async fn cmd_test_source(
 
     let mut trace = Vec::new();
     let started = std::time::Instant::now();
+    // 手动测试源时不做 needs_proxy 过滤、也不看 enabled：
+    // 用户就是想确认这个源到底能不能用。
+    let mut probe = source.clone();
+    probe.enabled = true;
+    let net_cfg = state.cfg().network;
     let hit = dict::lookup_multi(
         &test_word,
         &lang,
-        std::slice::from_ref(&source),
-        &state.http,
+        std::slice::from_ref(&probe),
+        &state.http(),
+        net_cfg.lookup_timeout_secs.clamp(3, 30),
+        0,
+        true,
         &mut trace,
     )
     .await;

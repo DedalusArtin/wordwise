@@ -75,11 +75,66 @@ fn push_scalar(v: &Value, out: &mut Vec<String>) {
 }
 
 /// 按路径取值为对象列表（用于 senses / examples 这类嵌套结构）。
+///
+/// 走 `query_wildcard` 而不是 `query`：像有道 `ce.word[0].trs[*].tr[*]` 这种
+/// 「先展开数组再下钻」的路径，用 `query` 会在 `[*]` 处停住、取不到东西。
+/// 无通配符的普通路径两者行为一致。
 pub fn query_objects<'a>(root: &'a Value, path: &str) -> Vec<&'a Value> {
-    match query(root, path) {
-        Some(Value::Array(arr)) => arr.iter().collect(),
-        Some(v @ Value::Object(_)) => vec![v],
-        _ => Vec::new(),
+    let mut out: Vec<&Value> = Vec::new();
+    for v in query_wildcard(root, path) {
+        match v {
+            Value::Array(arr) => out.extend(arr.iter()),
+            v @ Value::Object(_) => out.push(v),
+            _ => {}
+        }
+    }
+    out
+}
+
+/// 按路径取「一段可读文本」。
+///
+/// 与 `query_str` 的区别：命中数组时会把里面的标量元素连接起来。
+/// 很多词典把释义塞在数组里（例如 `def: ["心情愉快；高兴"]`，
+/// 或 `i: ["", {"#text": "..."}]`），只用 `query_str` 取到的是空串，
+/// 整条词条会被判成「无有效释义」而丢弃。
+/// 嵌套对象里的 `#text` 会被取出——这是有道系 JSON 的通用文本容器。
+pub fn query_text(root: &Value, path: &str) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    for v in query_wildcard(root, path) {
+        collect_text(v, &mut parts, 0);
+    }
+    parts.join("；")
+}
+
+fn collect_text<'a>(v: &'a Value, out: &mut Vec<String>, depth: usize) {
+    if depth > 6 {
+        return;
+    }
+    match v {
+        Value::String(s) => {
+            let t = s.trim();
+            if !t.is_empty() {
+                out.push(t.to_string());
+            }
+        }
+        Value::Number(n) => out.push(n.to_string()),
+        Value::Bool(b) => out.push(b.to_string()),
+        Value::Array(arr) => {
+            for item in arr {
+                collect_text(item, out, depth + 1);
+            }
+        }
+        Value::Object(obj) => {
+            // 有道把纯文本放在 `#text`，其余字段（@action/@href）是跳转元数据
+            if let Some(t) = obj.get("#text") {
+                collect_text(t, out, depth + 1);
+            } else if let Some(t) = obj.get("text") {
+                collect_text(t, out, depth + 1);
+            } else if let Some(t) = obj.get("value") {
+                collect_text(t, out, depth + 1);
+            }
+        }
+        Value::Null => {}
     }
 }
 
@@ -149,6 +204,11 @@ pub fn query_wildcard<'a>(root: &'a Value, path: &str) -> Vec<&'a Value> {
     let mut current: Vec<&Value> = vec![root];
 
     for seg in &segs {
+        // `$` 表示根对象本身（与 `query` 的语义保持一致）。
+        // 少了这一条，`senses: "$"` 之类的映射在 wildcard 模式下会取空。
+        if seg == "$" {
+            continue;
+        }
         let mut next: Vec<&Value> = Vec::new();
         for c in &current {
             if seg.starts_with('[') && seg.ends_with(']') {
@@ -219,6 +279,30 @@ mod tests {
     fn missing_path_returns_none() {
         let v = json!({"a": 1});
         assert!(query(&v, "b.c").is_none());
+    }
+
+    #[test]
+    fn query_text_joins_arrays_and_extracts_hash_text() {
+        // 有道：def 是数组
+        let v = json!({"sense": [{"def": ["心情愉快；高兴"], "cat": "形容词"}]});
+        assert_eq!(query_text(&v, "sense[0].def"), "心情愉快；高兴");
+        // 有道：i 里混着空串与 {"#text": ...}
+        let v2 = json!({"l": {"i": ["", {"#text": "感到快乐"}, " "], "#tran": "情绪愉悦"}});
+        assert_eq!(query_text(&v2, "l.i"), "感到快乐");
+        assert_eq!(query_text(&v2, "l.#tran"), "情绪愉悦");
+        // 普通字符串路径与 query_str 行为一致
+        assert_eq!(query_text(&v2, "l.#tran"), query_str(&v2, "l.#tran"));
+    }
+
+    #[test]
+    fn query_objects_handles_wildcard_and_root() {
+        let v = json!({"ce": {"word": [{"trs": [{"tr": [{"l": 1}, {"l": 2}]}]}]}});
+        let objs = query_objects(&v, "ce.word[0].trs[*].tr[*]");
+        assert_eq!(objs.len(), 2);
+        // `$` 仍返回根对象本身（wiktionary 的 senses 映射依赖这一点）
+        assert_eq!(query_objects(&v, "$").len(), 1);
+        // `a[*]` 展开后逐项返回
+        assert_eq!(query_objects(&json!({"a": [{"x": 1}, {"x": 2}]}), "a[*]").len(), 2);
     }
 
     #[test]

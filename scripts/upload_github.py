@@ -32,6 +32,7 @@ import shutil
 import subprocess
 import sys
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
@@ -263,6 +264,84 @@ def get_user(token):
     return data
 
 
+def read_version():
+    """版本号以 tauri.conf.json 为准，build.ps1 也读同一处，避免脱节。"""
+    cfg = PROJECT_ROOT / "src-tauri" / "tauri.conf.json"
+    try:
+        data = json.loads(cfg.read_text(encoding="utf-8"))
+        v = str(data.get("version", "")).strip()
+        if v:
+            return v
+    except (OSError, json.JSONDecodeError):
+        pass
+    warn("读不到 tauri.conf.json 的版本号，回退为 0.0.0")
+    return "0.0.0"
+
+
+def create_release(token, owner, repo, tag, name, body, prerelease=False):
+    """创建 Release。若 tag 已存在则复用（避免重复创建导致 422）。"""
+    status, data = gh_request("GET", f"/repos/{owner}/{repo}/releases/tags/{tag}", token)
+    if status == 200:
+        info(f"Release {tag} 已存在，复用：{data.get('html_url')}")
+        return data
+
+    info(f"创建 Release {tag} …")
+    status, data = gh_request("POST", f"/repos/{owner}/{repo}/releases", token, {
+        "tag_name": tag,
+        "name": name,
+        "body": body,
+        "draft": False,
+        "prerelease": prerelease,
+    })
+    if status not in (200, 201):
+        raise RuntimeError(f"创建 Release 失败（HTTP {status}）：{data.get('message')}")
+    ok(f"Release 已创建：{data.get('html_url')}")
+    return data
+
+
+def upload_asset(token, owner, repo, release_id, path):
+    """上传一个 Release 附件。走 uploads.github.com，不走 api。"""
+    path = Path(path)
+    if not path.is_file():
+        warn(f"附件不存在，跳过：{path}")
+        return None
+
+    # upload_url 形如 https://uploads.github.com/repos/o/r/releases/1/assets{?name,label}
+    url = f"https://uploads.github.com/repos/{owner}/{repo}/releases/{release_id}/assets"
+    url += "?name=" + urllib.parse.quote(path.name)
+
+    size = path.stat().st_size
+    info(f"上传附件 {path.name}（{size / 1024 / 1024:.2f} MB）…")
+
+    req = urllib.request.Request(url, data=path.read_bytes(), method="POST", headers={
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+        "Content-Type": "application/octet-stream",
+        "User-Agent": "WordWise-Uploader/1.0",
+    })
+    try:
+        with urllib.request.urlopen(req, timeout=300) as resp:
+            data = json.loads(resp.read().decode("utf-8", errors="replace") or "{}")
+    except urllib.error.HTTPError as e:
+        raw = e.read().decode("utf-8", errors="replace")
+        # 同名附件已存在（422）→ 先删再传，保证 Release 里是最新产物
+        if e.code == 422:
+            warn(f"{path.name} 已存在，先删除再重传…")
+            st, rel = gh_request("GET", f"/repos/{owner}/{repo}/releases/{release_id}", token)
+            for a in (rel.get("assets") or []):
+                if a.get("name") == path.name:
+                    gh_request("DELETE",
+                               f"/repos/{owner}/{repo}/releases/assets/{a['id']}", token)
+            with urllib.request.urlopen(req, timeout=300) as resp:
+                data = json.loads(resp.read().decode("utf-8", errors="replace") or "{}")
+        else:
+            raise RuntimeError(f"上传 {path.name} 失败（HTTP {e.code}）：{raw[:300]}")
+
+    ok(f"附件已上传：{data.get('name')} ({data.get('size', 0)} bytes)")
+    return data
+
+
 def ensure_repo(token, owner, repo, private, description):
     status, data = gh_request("GET", f"/repos/{owner}/{repo}", token)
     if status == 200:
@@ -382,6 +461,11 @@ def main():
     ap.add_argument("--no-push", action="store_true", help="只初始化并提交，不推送")
     ap.add_argument("-m", "--message", default=None, help="提交信息")
     ap.add_argument("--token", default=None, help="直接指定 token（覆盖自动读取）")
+    ap.add_argument("--release", action="store_true",
+                    help="推送后创建 GitHub Release 并上传安装包附件")
+    ap.add_argument("--tag", default=None, help="Release 标签，默认 v{tauri.conf.json 的版本}")
+    ap.add_argument("--asset", action="append", default=None,
+                    help="要上传的附件路径，可重复；默认取 installer/output 下的安装包与便携版 zip")
     args = ap.parse_args()
 
     print("=" * 62)
@@ -419,7 +503,7 @@ def main():
 
     # 3) 本地仓库
     init_repo()
-    msg = args.message or "feat: WordWise v1.0.0 初始提交\n\n基于 Rust + Tauri 的背单词与 AI 讲解一体化桌面软件。\n- 双向背诵模式（看英选中 / 看中选英）\n- 联网多源查词 + 本地大模型兜底\n- SM-2 改良记忆调度与遗忘曲线复习计划\n- 常错词自动强化记忆与详情卡\n- 可配置词典源，支持小语种扩展\n- 常驻侧边栏查词\n- Inno Setup 安装程序打包脚本"
+    msg = args.message or "release: WordWise v0.35.0\n\n基于 Rust + Tauri 的背单词与 AI 讲解一体化桌面软件。\n- 双向背诵模式（看英选中 / 看中选英）\n- 联网多源查词 + 本地大模型兜底\n- SM-2 改良记忆调度与遗忘曲线复习计划\n- 常错词自动强化记忆与详情卡\n- 可配置词典源，支持小语种扩展\n- 常驻侧边栏查词\n- Inno Setup 安装程序打包脚本"
     committed, n = commit_all(msg)
 
     if args.no_push:
@@ -450,11 +534,56 @@ def main():
         print("  - 仓库已存在同名内容：可先 git pull --rebase origin main")
         return 1
 
+    # 6) Release（可选）
+    release_url = None
+    if args.release:
+        version = read_version()
+        tag = args.tag or f"v{version}"
+
+        assets = args.asset
+        if not assets:
+            out = PROJECT_ROOT / "installer" / "output"
+            assets = [
+                str(out / f"WordWise-Setup-{version}.exe"),
+                str(out / f"WordWise-{version}-portable.zip"),
+            ]
+
+        body = (
+            f"WordWise {version}\n\n"
+            "基于本地 LM Studio 大模型的可视化背单词与 AI 讲解一体化桌面软件（Rust + Tauri 2）。\n\n"
+            "## 附件\n"
+            "- `WordWise-Setup-<version>.exe` —— 安装程序（推荐，含卸载入口）\n"
+            "- `WordWise-<version>-portable.zip` —— 便携版，解压即用\n\n"
+            "## 本版要点\n"
+            "- AI 讲解语言独立下拉，选择后即时生效并记住上次选择\n"
+            "- 提示词层 + 输出后处理层双层保障：模型没按所选语言输出时自动翻译并替换原文\n"
+            "- 代码 / 命令 / 日志 / 路径等技术内容保持原文不翻译\n"
+            "- 保留「查看原文」入口便于对照\n"
+            "- 查词页合并重复的语言下拉；修复搜索框无法输入与退格\n"
+            "- 在线词库下载按钮修复；单词列表支持跨语言搜索中文释义\n"
+            "- 主窗口改为无边框自绘标题栏，去掉重复的关闭/收起控件\n"
+        ).replace("<version>", version)
+
+        try:
+            rel = create_release(token, owner, args.repo, tag,
+                                 f"WordWise {version}", body)
+            release_url = rel.get("html_url")
+            for a in assets:
+                try:
+                    upload_asset(token, owner, args.repo, rel["id"], a)
+                except RuntimeError as e:
+                    fail(f"附件上传失败：{e}")
+        except RuntimeError as e:
+            fail(f"创建 Release 失败：{e}")
+            print("  提示：代码已推送成功，可稍后在网页端手动创建 Release。")
+
     print()
     print("=" * 62)
     ok("上传完成！")
     print(f"  仓库地址：{repo_info.get('html_url', f'https://github.com/{owner}/{args.repo}')}")
     print(f"  克隆命令：git clone https://github.com/{owner}/{args.repo}.git")
+    if release_url:
+        print(f"  Release：{release_url}")
     print("=" * 62)
     return 0
 

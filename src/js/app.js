@@ -8,9 +8,12 @@ const Pages = (() => {
   let current = 'study';
 
   const loaders = {
-    study: () => refreshStudy(),
+    study: () => { refreshStudy(); window.Study.loadBookOptions(); },
     lookup: () => {},
-    library: () => window.Library.loadList(),
+    library: () => {
+      window.Books.loadBooks();
+      window.Library.loadList();
+    },
     leech: () => window.Leech.load(),
     plan: () => window.Plan.load(),
     stats: () => window.Stats.load(),
@@ -82,6 +85,21 @@ async function refreshStudy() {
   }
 }
 
+/* ---------------- 窗口控制 ---------------- */
+
+/**
+ * 把自绘标题栏的「最大化」图标同步成当前状态：
+ * 已最大化显示「还原」图标（❐），否则显示「最大化」图标（☐）。
+ */
+async function syncMaxIcon(win) {
+  const btn = document.getElementById('btn-maximize');
+  if (!btn || !win) return;
+  let maxed = false;
+  try { maxed = await win.isMaximized(); } catch (e) { return; }
+  btn.innerHTML = maxed ? '&#10098;' : '&#9633;';
+  btn.title = maxed ? '还原' : '最大化';
+}
+
 /* ---------------- 应用主控 ---------------- */
 
 const App = (() => {
@@ -145,6 +163,21 @@ const App = (() => {
         if (w) await w.minimize();
       }
     });
+    // 主窗口已改为无边框（自绘标题栏），系统标题栏的「最大化/还原」没了，
+    // 这里补一个自绘按钮，并把图标在 ☐ / ❐ 之间切换。
+    document.getElementById('btn-maximize')?.addEventListener('click', async () => {
+      if (HAS_TAURI) {
+        const w = window.__TAURI__.window?.getCurrentWindow?.();
+        if (w) { await w.toggleMaximize(); syncMaxIcon(w); }
+      }
+    });
+    // 双击标题栏最大化/还原，符合 Windows 操作习惯
+    document.getElementById('titlebar')?.addEventListener('dblclick', async (e) => {
+      if (e.target.closest('button') || e.target.closest('select')) return;
+      if (!HAS_TAURI) return;
+      const w = window.__TAURI__.window?.getCurrentWindow?.();
+      if (w) { await w.toggleMaximize(); syncMaxIcon(w); }
+    });
     document.getElementById('btn-close-win')?.addEventListener('click', async () => {
       if (HAS_TAURI) {
         const w = window.__TAURI__.window?.getCurrentWindow?.();
@@ -172,6 +205,7 @@ const App = (() => {
     Detail.bind();
     Lookup.bind();
     Library.bind();
+    Books.bind();
     Settings.bind();
 
     // 初始化配置
@@ -199,6 +233,8 @@ const App = (() => {
 
     // 键盘快捷键：Ctrl+1..7 切换页面
     document.addEventListener('keydown', (e) => {
+      // 在输入框里按 Ctrl+数字 不该跳页
+      if (window.WW && window.WW.isTypingTarget && window.WW.isTypingTarget(e.target)) return;
       if ((e.ctrlKey || e.metaKey) && e.key >= '1' && e.key <= '7') {
         const pages = ['study', 'lookup', 'library', 'leech', 'plan', 'stats', 'settings'];
         const p = pages[parseInt(e.key, 10) - 1];

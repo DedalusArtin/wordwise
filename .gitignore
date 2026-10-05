@@ -6,6 +6,7 @@ Cargo.lock.bak
 # 构建产物
 /dist/
 /build/
+/archive/
 *.exe
 *.msi
 installer/output/
@@ -31,3 +32,5 @@ Thumbs.db
 *.tmp
 installer/build_iss.bat
 /tmp/
+*.7z
+/src-tauri/gen/

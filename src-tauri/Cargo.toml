@@ -1,6 +1,6 @@
 [package]
 name = "wordwise"
-version = "1.0.0"
+version = "0.35.0"
 description = "WordWise - LM Studio 驱动的可视化背单词与 AI 讲解一体化桌面软件"
 authors = ["DedalusArtin"]
 edition = "2021"
@@ -21,6 +21,18 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
 # HTTP 客户端（联网查词 / LM Studio 调用）
+#
+# 关于 `system-proxy` / `socks`：
+#   ★ `default-features = false` 本身就会关掉 reqwest 的代理能力，
+#     所以下面**显式**把 `system-proxy` 加回来：它让 reqwest 能读 Windows
+#     注册表（Clash / v2ray 的「系统代理」就写在那里）以及代理环境变量。
+#     缺少它，应用会静默直连 GitHub raw / wiktionary 并全部超时 ——
+#     表现为「明明开了代理，却仍提示网络问题」。
+#   ★ 代价：启用该特性后 reqwest 会**自己**去探测环境变量 / 注册表。
+#     因此 `NetworkConfig.enable_proxy == false` 的直连分支**必须显式
+#     `.no_proxy()`**（见 `net.rs::build_client_with`），否则「默认直连」
+#     这个总开关会被 reqwest 悄悄绕过。
+#   `socks` 用于支持 socks5:// 形式的代理地址。
 reqwest = { version = "0.12", default-features = false, features = [
     "json",
     "rustls-tls-native-roots",
@@ -29,6 +41,8 @@ reqwest = { version = "0.12", default-features = false, features = [
     "stream",
     "charset",
     "http2",
+    "system-proxy",
+    "socks",
 ] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
 futures-util = "0.3"
@@ -57,6 +71,12 @@ log = "0.4"
 # 生产构建默认不开启 devtools
 default = []
 custom-protocol = ["tauri/custom-protocol"]
+
+# Windows 平台专用：读取「Internet 选项」里的系统代理设置。
+# 图形界面启动的应用拿不到 HTTP_PROXY 环境变量，只能从注册表读，
+# 这是「开了代理却依然网络不通」的根因所在。
+[target.'cfg(windows)'.dependencies]
+winreg = "0.55"
 
 [profile.release]
 codegen-units = 1

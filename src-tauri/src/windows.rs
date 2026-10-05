@@ -35,11 +35,16 @@ fn build_invoke_handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync +
         commands::cmd_ai_explain,
         commands::cmd_ai_explain_sync,
         commands::cmd_ai_generate_entry,
+        // AI 讲解语言（需求：选择后即时生效并记住上次语言）
+        commands::cmd_translate_text,
+        commands::cmd_set_explain_lang,
         // 查词与搜索
         commands::cmd_lookup,
         commands::cmd_suggest,
         commands::cmd_search,
         commands::cmd_wiki,
+        commands::cmd_dict_links,
+        commands::cmd_open_url,
         commands::cmd_get_word,
         commands::cmd_search_words,
         commands::cmd_recent_searches,
@@ -50,6 +55,33 @@ fn build_invoke_handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync +
         commands::cmd_delete_word,
         commands::cmd_word_count,
         commands::cmd_seed_demo,
+        // 多级词库管理（需求 3 / 5）
+        commands::books::cmd_list_wordbooks,
+        commands::books::cmd_get_wordbook,
+        commands::books::cmd_create_wordbook,
+        commands::books::cmd_delete_wordbook,
+        commands::books::cmd_import_words_to_book,
+        commands::books::cmd_remote_catalog,
+        commands::books::cmd_download_book,
+        commands::books::cmd_reviewed_words,
+        commands::books::cmd_words_in_book,
+        // 在线搜索 / 方向 / 进阶练习（需求 4 / 6 / 7）
+        commands::extra::cmd_search_engines,
+        commands::extra::cmd_web_search,
+        commands::extra::cmd_lookup_links,
+        // 网络与代理诊断
+        commands::extra::cmd_network_info,
+        commands::extra::cmd_network_report,
+        commands::extra::cmd_reload_network,
+        commands::extra::cmd_set_direction,
+        commands::extra::cmd_get_direction,
+        commands::extra::cmd_example_coverage,
+        commands::extra::cmd_quiz_modes,
+        commands::extra::cmd_start_book_session,
+        commands::extra::cmd_check_spelling,
+        commands::extra::cmd_spell_hint,
+        commands::extra::cmd_mask_example,
+        commands::extra::cmd_build_advanced_card,
         // 背诵与调度
         commands::cmd_start_session,
         commands::cmd_current_question,
@@ -89,8 +121,11 @@ fn create_main_window(app: &AppHandle) -> tauri::Result<()> {
         .inner_size(1180.0, 780.0)
         .min_inner_size(900.0, 620.0)
         .center()
+        // 无边框 + 自绘标题栏（#titlebar）：窗口顶部只保留一套按钮，
+        // 不会出现「系统标题栏一排 + 自绘一排」的重复控件。
+        // 注意：decorations(false) 不会移除 WS_THICKFRAME，拖拽边缘缩放仍然可用。
+        .decorations(false)
         .resizable(true)
-        .decorations(true)
         .visible(true)
         .build()?;
     Ok(())

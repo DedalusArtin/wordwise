@@ -1,0 +1,37 @@
+WordWise 1.0.0 便携版
+=====================
+
+运行
+----
+双击 wordwise.exe 即可。
+无需安装，不写注册表，不向系统目录拷贝文件。
+
+系统要求
+--------
+- Windows 10 / 11（x64）
+- WebView2 运行时。多数系统已自带。
+  若启动后窗口空白或闪退，请到下面地址下载安装：
+  https://developer.microsoft.com/microsoft-edge/webview2/
+- 「AI 单词讲解」需要本机运行 LM Studio，未配置时其余功能不受影响。
+
+数据存放
+--------
+默认：%APPDATA%\WordWise
+  形如 C:\Users\<用户名>\AppData\Roaming\WordWise
+
+想随身携带（例如放在 U 盘），设置环境变量 WORDWISE_DATA_DIR 指向目标目录即可，
+例如：
+  set WORDWISE_DATA_DIR=D:\WordWiseData
+  wordwise.exe
+
+便携版删除后学习数据仍会保留，方便换电脑继续用。
+
+网络行为
+--------
+默认直连，不使用系统代理；无代理环境下查词、在线搜索、词库下载均可正常使用。
+需要代理时到「设置 → 网络与代理」里手动开启（默认关闭）。
+
+卸载
+----
+直接删除整个目录即可。
+学习数据不在本目录内；要彻底清除请一并删除上面的数据目录。

@@ -16,6 +16,7 @@
   </div>
   <div class="tb-right">
     <button class="tb-btn" id="btn-minimize" title="最小化">&#8211;</button>
+    <button class="tb-btn" id="btn-maximize" title="最大化 / 还原">&#9633;</button>
     <button class="tb-btn" id="btn-close-win" title="隐藏到托盘">&#10005;</button>
   </div>
 </div>
@@ -107,9 +108,17 @@
           <p class="sub" id="study-greeting">准备开始今天的学习</p>
         </div>
         <div class="head-actions">
+          <label class="field-inline">
+            <span>词库</span>
+            <select id="study-book" class="inline-select" title="选择要背诵的词库"></select>
+          </label>
           <div class="seg" id="mode-seg">
             <button class="seg-btn active" data-mode="en_to_zh">看英选中</button>
             <button class="seg-btn" data-mode="zh_to_en">看中选英</button>
+            <button class="seg-btn" data-mode="spelling">拼写</button>
+            <button class="seg-btn" data-mode="ex_to_zh">例句选义</button>
+            <button class="seg-btn" data-mode="ex_pick_word">例句识词</button>
+            <button class="seg-btn" data-mode="listen_spell">听音拼写</button>
           </div>
           <button class="primary-btn" id="btn-start">开始背诵</button>
         </div>
@@ -148,6 +157,12 @@
               <label class="check">
                 <input type="checkbox" id="opt-leech-only" />
                 <span>只背强化记忆的常错词</span>
+              </label>
+            </div>
+            <div class="option-row">
+              <label class="field-inline">
+                <span>背诵词库</span>
+                <select id="study-book2" class="inline-select" title="从指定词库出题"></select>
               </label>
             </div>
             <div class="option-row">
@@ -204,6 +219,32 @@
           <h1>查词</h1>
           <p class="sub">联网多源聚合 · 本地大模型兜底 · 自动缓存</p>
         </div>
+        <div class="head-actions dir-actions">
+          <!--
+            只保留一个语言选择：原来「源语言 + ⇄ + 目标语言」两个下拉的选项
+            完全一样，用户反馈「有重复，合并去掉一个」。
+            语义上留「查询语言」——即你要查的是哪种语言的词。
+            中文/日文/韩文（含汉字与假名/谚文）由后端按书写系统自动识别，
+            这个下拉主要决定拉丁字母词按哪种语言查（英/法/德/西/俄…）。
+          -->
+          <label class="field-inline" id="lk-lang-field"
+                 title="要查询的词属于哪种语言。中文、日文、韩文会自动识别；这里主要决定英/法/德/西/俄等拉丁字母词按哪种语言查。">
+            <span>语言</span>
+            <select id="lk-dst-lang" class="inline-select">
+              <option value="en">英语</option>
+              <option value="zh">中文</option>
+              <option value="ja">日语</option>
+              <option value="ko">韩语</option>
+              <option value="fr">法语</option>
+              <option value="de">德语</option>
+              <option value="es">西班牙语</option>
+              <option value="ru">俄语</option>
+            </select>
+          </label>
+          <select id="lk-engine" class="inline-select" title="搜索引擎"></select>
+          <button class="ghost-btn sm" id="lk-ai-toggle"
+                  title="收起右侧 AI 讲解与在线搜索面板，让词条区占满宽度">收起右栏</button>
+        </div>
       </header>
 
       <div class="search-bar">
@@ -222,17 +263,43 @@
           </div>
         </div>
 
-        <div class="panel ai-panel">
-          <div class="ai-head">
-            <h3 class="panel-title">AI 讲解</h3>
-            <span class="ai-model" id="ai-model">本地模型</span>
+        <!-- 拖动条：改左右两栏的宽度比例；双击复位，方向键微调 -->
+        <div class="col-resizer" id="lk-resizer" role="separator" aria-orientation="vertical"
+             tabindex="0" title="拖动调整两栏宽度（双击复位，← → 微调）"></div>
+
+        <div class="ai-panel">
+          <div class="panel ai-panel-inner">
+            <div class="ai-head">
+              <h3 class="panel-title">AI 讲解</h3>
+              <div class="ai-head-right">
+                <!--
+                  AI 讲解语言：独立下拉（需求 1），与上方「语言」（查哪种语言的词）
+                  互不干扰。切换后立即落盘，下次讲解/追问都用这个语言（需求 5）。
+                  收起右栏只保留上方头部那一个按钮，这里不再放重复的「›」图标。
+                -->
+                <label class="field-inline" title="AI 讲解与回复使用的语言，选择后立即生效并记住">
+                  <span>讲解语言</span>
+                  <select id="ai-lang" class="inline-select"></select>
+                </label>
+                <span class="ai-model" id="ai-model">本地模型</span>
+              </div>
+            </div>
+            <div class="ai-body" id="ai-body">
+              <p class="muted">点击下方按钮，让本地大模型讲解当前单词。</p>
+            </div>
+            <div class="ai-ask">
+              <input id="ai-input" type="text" placeholder="追问，例如：这个词和 rely 有什么区别？" />
+              <button class="primary-btn sm" id="ai-send">提问</button>
+            </div>
           </div>
-          <div class="ai-body" id="ai-body">
-            <p class="muted">点击下方按钮，让本地大模型讲解当前单词。</p>
-          </div>
-          <div class="ai-ask">
-            <input id="ai-input" type="text" placeholder="追问，例如：这个词和 rely 有什么区别？" />
-            <button class="primary-btn sm" id="ai-send">提问</button>
+          <div class="panel" id="lk-web-panel">
+            <div class="ai-head">
+              <h3 class="panel-title">在线搜索</h3>
+              <span class="ai-model" id="lk-web-engine">必应</span>
+            </div>
+            <div id="lk-web" class="web-results">
+              <p class="muted">查询后自动检索网络结果，补充背景知识。</p>
+            </div>
           </div>
         </div>
       </div>
@@ -246,19 +313,75 @@
           <p class="sub" id="lib-count">共 0 个单词</p>
         </div>
         <div class="head-actions">
-          <input id="lib-search" class="inline-input" type="text" placeholder="搜索词库…" />
+          <input id="lib-search" class="inline-input" type="text"
+                 placeholder="搜索词库 / 单词…（回车立即生效，Esc 清空）" autocomplete="off" spellcheck="false" />
           <button class="ghost-btn" id="btn-import-dialog">批量导入</button>
           <button class="ghost-btn" id="btn-export">导出备份</button>
           <button class="ghost-btn" id="btn-import-file">导入备份</button>
         </div>
       </header>
-      <div class="panel">
+
+      <!-- 词库管理（需求 3 / 5） -->
+      <div class="lib-tabs">
+        <button class="lib-tab active" data-libtab="books">我的词库</button>
+        <button class="lib-tab" data-libtab="catalog">在线词库</button>
+        <button class="lib-tab" data-libtab="words">单词列表</button>
+        <button class="lib-tab" data-libtab="learned">已背过的词</button>
+      </div>
+
+      <!-- 我的词库 -->
+      <div class="panel lib-pane" id="lib-pane-books">
+        <div class="panel-head-row">
+          <h3 class="panel-title">多级词库</h3>
+          <div>
+            <button class="ghost-btn sm" id="btn-new-book">新建词库</button>
+            <button class="ghost-btn sm" id="btn-import-book-file">从文件导入</button>
+          </div>
+        </div>
+        <div id="lib-books" class="book-tree"></div>
+      </div>
+
+      <!-- 在线下载 -->
+      <div class="panel lib-pane hidden" id="lib-pane-catalog">
+        <div class="panel-head-row">
+          <h3 class="panel-title">在线词库（引用公开词库，标注来源与许可）</h3>
+          <select id="catalog-cat" class="inline-select">
+            <option value="all">全部分类</option>
+            <option value="cet4">四级</option>
+            <option value="cet6">六级</option>
+            <option value="kaoyan">考研</option>
+            <option value="ielts">雅思</option>
+            <option value="toefl">托福</option>
+            <option value="gre">GRE</option>
+            <option value="gaokao">高考 / 高中</option>
+            <option value="jlpt">日语 JLPT</option>
+            <option value="other">其他</option>
+          </select>
+        </div>
+        <p class="muted">
+          下载会自动在多个镜像间切换（jsDelivr → gh-proxy → GitHub 原文），
+          国内直连也有较大概率成功。若全部失败，请到「设置 → 网络与代理」点一次「检测网络」。
+        </p>
+        <div id="lib-catalog" class="catalog-grid"></div>
+      </div>
+
+      <!-- 单词列表 -->
+      <div class="panel lib-pane hidden" id="lib-pane-words">
         <div id="lib-list" class="word-list"></div>
         <div class="list-foot">
           <button class="ghost-btn sm" id="lib-prev">上一页</button>
           <span id="lib-page-info" class="muted">第 1 页</span>
           <button class="ghost-btn sm" id="lib-next">下一页</button>
         </div>
+      </div>
+
+      <!-- 已背过的词 -->
+      <div class="panel lib-pane hidden" id="lib-pane-learned">
+        <div class="panel-head-row">
+          <h3 class="panel-title">已背过的单词</h3>
+          <span class="muted" id="learned-count"></span>
+        </div>
+        <div id="learned-list" class="word-list"></div>
       </div>
     </section>
 
@@ -270,6 +393,8 @@
           <p class="sub">错误率高的词会自动进入强化记忆队列，并按遗忘曲线高频重现</p>
         </div>
         <div class="head-actions">
+          <input id="leech-search" class="inline-input" type="text"
+                 placeholder="搜索错词…（回车立即生效，Esc 清空）" autocomplete="off" spellcheck="false" />
           <button class="primary-btn" id="btn-leech-quiz">强化背诵</button>
         </div>
       </header>
@@ -368,6 +493,76 @@
           </div>
         </div>
 
+        <!-- AI 讲解语言 -->
+        <div class="panel">
+          <h3 class="panel-title">AI 讲解语言</h3>
+          <p class="muted">
+            决定 AI 讲解与追问回复用哪种语言书写，与「查询语言」互相独立。
+            代码、命令、日志、文件路径等技术内容会保持原文不翻译。
+          </p>
+          <div class="option-row">
+            <label class="field-inline" title="对所有 AI 讲解与回复生效，选择后立即记住">
+              <span>讲解语言</span>
+              <select id="set-explain-lang" class="inline-select"></select>
+            </label>
+            <label class="switch" title="模型没按所选语言输出时，自动套翻译模板重译整段并替换原文">
+              <span>不生效时自动翻译</span>
+              <input type="checkbox" id="set-explain-auto" />
+            </label>
+          </div>
+          <label class="field">
+            <span>翻译模板（留空用内置模板）</span>
+            <textarea id="set-explain-tpl" rows="4"
+              placeholder="留空即使用内置模板。可用占位符：{LANG} 目标语言、{CONTENT} 待翻译正文"></textarea>
+          </label>
+          <p class="muted" style="font-size:12px">
+            占位符说明：<code>{LANG}</code> 会替换成目标语言，<code>{CONTENT}</code>
+            会替换成 AI 的原始输出。技术内容会用 <code>⟦n⟧</code> 占位符保护，
+            翻译完成后自动还原，所以不会被误译。
+          </p>
+        </div>
+
+        <!-- 网络与代理 -->
+        <div class="panel span-2">
+          <div class="panel-head-row">
+            <h3 class="panel-title">网络与代理</h3>
+            <div class="btn-row">
+              <button class="primary-btn sm" id="btn-net-detect">检测网络</button>
+              <button class="ghost-btn sm" id="btn-net-apply">应用并重连</button>
+            </div>
+          </div>
+          <p class="muted">
+            默认<strong>直连，不使用代理</strong>。内置的在线词库（jsDelivr 镜像）、
+            中文释义（有道）、英英释义、在线搜索（必应 RSS）在国内都可以直接访问，
+            无需任何代理配置也能正常使用。即使系统里存在 <code>HTTP_PROXY</code>
+            环境变量或代理设置，也不会被自动采用 —— 只有打开下面的开关才会走代理。
+            需要访问被墙资源（如维基词典）时再打开即可。
+          </p>
+          <div id="net-status" class="net-status"></div>
+          <label class="switch" style="align-self:start">
+            <span>启用代理</span>
+            <input type="checkbox" id="set-enable-proxy" />
+          </label>
+          <div id="proxy-fields" class="inline-2">
+            <label class="field"><span>代理地址（留空 = 自动检测）</span>
+              <input type="text" id="set-proxy" placeholder="例如 http://127.0.0.1:7890 或 socks5://127.0.0.1:7891" />
+            </label>
+            <label class="switch" style="align-self:end">
+              <span>自动使用系统代理</span>
+              <input type="checkbox" id="set-use-sys-proxy" />
+            </label>
+          </div>
+          <div class="inline-2">
+            <label class="field"><span>请求超时（秒）</span>
+              <input type="number" id="set-net-timeout" min="5" max="600" />
+            </label>
+            <label class="field"><span>单源查词超时（秒）</span>
+              <input type="number" id="set-lookup-timeout" min="3" max="30" />
+            </label>
+          </div>
+          <div id="net-report" class="net-report"></div>
+        </div>
+
         <!-- 词典源（需求 6） -->
         <div class="panel span-2">
           <div class="panel-head-row">
@@ -387,11 +582,12 @@
 
         <!-- 语言与侧边栏 -->
         <div class="panel span-2">
-          <h3 class="panel-title">语言与侧边栏</h3>
+          <h3 class="panel-title">语言与搜索</h3>
           <div class="inline-2">
-            <label class="field"><span>学习语言</span>
+            <label class="field"><span>查询语言（要学习的语言）</span>
               <select id="set-lang">
                 <option value="en">英语</option>
+                <option value="zh">中文</option>
                 <option value="ja">日语</option>
                 <option value="ko">韩语</option>
                 <option value="fr">法语</option>
@@ -400,11 +596,28 @@
                 <option value="ru">俄语</option>
               </select>
             </label>
+            <label class="field"><span>默认搜索引擎（需求 6）</span>
+              <select id="set-search-engine">
+                <option value="bing">必应（推荐，走 RSS 接口最稳定）</option>
+                <option value="so360">360 搜索</option>
+                <option value="baidu">百度（受反爬限制）</option>
+                <option value="bingintl">必应国际</option>
+                <option value="duckduckgo">DuckDuckGo（需代理）</option>
+              </select>
+            </label>
+          </div>
+          <p class="muted" style="margin-top:8px">
+            词条属于哪种语言由程序按书写系统自动判断：含假名判为日语、含谚文判为韩语、
+            纯汉字判为中文，拉丁字母词才沿用上面选的「查询语言」。
+            所以「选日语查中文词」不会再被当成日语词。
+          </p>
+          <label class="switch"><span>查词时展示在线搜索结果（替代维基百科）</span><input type="checkbox" id="set-websearch" /></label>
+          <div class="inline-2" style="margin-top:10px">
             <label class="field"><span>侧边栏宽度（px）</span>
               <input type="number" id="set-sb-width" min="300" max="700" step="20" />
             </label>
+            <label class="switch" style="align-self:end"><span>侧边栏始终置顶</span><input type="checkbox" id="set-sb-top" /></label>
           </div>
-          <label class="switch"><span>侧边栏始终置顶</span><input type="checkbox" id="set-sb-top" /></label>
         </div>
       </div>
     </section>
@@ -419,7 +632,7 @@
     <div class="dc-head">
       <div class="dc-word-line">
         <h2 id="dc-word">word</h2>
-        <button class="icon-btn" id="dc-audio" title="查看音标">&#128266;</button>
+        <button class="icon-btn speak-btn" id="dc-audio" title="朗读单词" data-speak-accent="us">&#128266;</button>
       </div>
       <div class="dc-phonetic" id="dc-phonetic"></div>
       <div class="dc-tags" id="dc-tags"></div>
@@ -440,6 +653,8 @@
       <div class="dc-pane" data-pane="rel" id="dc-pane-rel"></div>
       <div class="dc-pane" data-pane="ai" id="dc-pane-ai"></div>
     </div>
+
+    <div class="dc-dictlinks" id="dc-dictlinks"></div>
 
     <div class="dc-foot">
       <div class="dc-state" id="dc-state"></div>
@@ -466,10 +681,54 @@
   </div>
 </div>
 
+<!-- ============ 词库导入对话框（需求 3 / 5） ============ -->
+<div id="bookimport-overlay" class="overlay hidden">
+  <div class="modal">
+    <button class="dc-close" id="bookimport-close">&#10005;</button>
+    <h3>导入词库</h3>
+    <p class="muted">支持 JSON / CSV / TSV / 纯文本。字段自动映射（word/单词、translation/释义、phonetic/音标、tag/标签…）。</p>
+    <label class="field-block">
+      <span>词库名称</span>
+      <input id="bi-name" type="text" placeholder="例如：四级核心词汇" />
+    </label>
+    <label class="field-block">
+      <span>归类（考试类型）</span>
+      <select id="bi-category" class="inline-select">
+        <option value="cet4">四级</option>
+      <option value="cet6">六级</option>
+        <option value="kaoyan">考研</option>
+        <option value="ielts">雅思</option>
+        <option value="toefl">托福</option>
+        <option value="gre">GRE</option>
+        <option value="gaokao">高考</option>
+        <option value="other">其他</option>
+      </select>
+    </label>
+    <label class="field-block">
+      <span>来源说明（可选，用于标注引用）</span>
+      <input id="bi-source" type="text" placeholder="例如：https://github.com/..." />
+    </label>
+    <label class="field-block">
+      <span>内容</span>
+      <textarea id="bi-content" rows="9" placeholder="粘贴词库内容，或点击下方「选择文件」"></textarea>
+    </label>
+    <div class="btn-row">
+      <button class="ghost-btn sm" id="bi-pickfile">选择文件…</button>
+      <input type="file" id="bi-file" class="hidden" accept=".json,.csv,.tsv,.txt" />
+      <span class="muted" id="bi-fileinfo"></span>
+    </div>
+    <div class="btn-row right">
+      <button class="ghost-btn" id="bi-cancel">取消</button>
+      <button class="primary-btn" id="bi-confirm">开始导入</button>
+    </div>
+  </div>
+</div>
+
 <!-- ============ 全局提示 ============ -->
 <div id="toast" class="toast hidden"></div>
 
 <script src="js/api.js"></script>
+<script src="js/speak.js"></script>
 <script src="js/ui.js"></script>
 <script src="js/study.js"></script>
 <script src="js/lookup.js"></script>

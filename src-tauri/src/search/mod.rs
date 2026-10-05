@@ -7,6 +7,8 @@
 //!
 //! 全部走 reqwest + rustls，不依赖任何需要 API Key 的服务即可用。
 
+pub mod websearch;
+
 use anyhow::Result;
 use serde_json::Value;
 use std::time::Duration;
@@ -209,6 +211,66 @@ pub async fn wiki_summary(
         });
     }
     None
+}
+
+/// 一条辞书跳转链接——本地词库没有的内容，让用户一键去权威辞书查看。
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct DictLink {
+    /// 辞书名称，如「有道词典」
+    pub name: String,
+    /// 网页地址（已带查询词）
+    pub url: String,
+    /// 说明/特点，如「中文释义·例句」
+    pub note: String,
+    /// 是否国内可直连（用户反馈 wiki 国内能力差，据此排序）
+    pub cn_friendly: bool,
+}
+
+/// 生成辞书跳转链接（需求 14）。
+/// 依语言给出对应辞书，中文友好源排在前面。
+pub fn dict_links(word: &str, lang: &str) -> Vec<DictLink> {
+    let w = word.trim();
+    if w.is_empty() {
+        return Vec::new();
+    }
+    let e = urlencoding::encode(w);
+    let mut out: Vec<DictLink> = Vec::new();
+
+    let cn = |n: &str, u: String, note: &str| DictLink {
+        name: n.into(), url: u, note: note.into(), cn_friendly: true,
+    };
+    let intl = |n: &str, u: String, note: &str| DictLink {
+        name: n.into(), url: u, note: note.into(), cn_friendly: false,
+    };
+
+    match lang {
+        "ja" => {
+            out.push(cn("Moji 辞書", format!("https://www.mojidict.com/search?q={}", e), "日语·中文释义"));
+            out.push(cn("沪江小D 日语", format!("https://dict.hjenglish.com/jp/jc/{}", e), "日语·中日对照"));
+            out.push(cn("有道日语", format!("https://dict.youdao.com/result?word={}&lang=jp", e), "日语释义"));
+            out.push(intl("Jisho", format!("https://jisho.org/search/{}", e), "英日日日英"));
+        }
+        "ko" => {
+            out.push(cn("沪江小D 韩语", format!("https://dict.hjenglish.com/kr/{}", e), "韩语·中韩对照"));
+            out.push(cn("有道韩语", format!("https://dict.youdao.com/result?word={}&lang=kr", e), "韩语释义"));
+            out.push(intl("Naver 词典", format!("https://dict.naver.com/search.nhn?query={}", e), "韩语权威"));
+        }
+        "zh" => {
+            out.push(cn("汉典", format!("https://www.zdic.net/hans/{}", e), "汉字·字源·古义"));
+            out.push(cn("有道汉语", format!("https://dict.youdao.com/result?word={}&lang=zh", e), "汉语释义"));
+            out.push(intl("MDBG", format!("https://www.mdbg.net/chinese/dictionary?page=worddict&wdrst=0&wdqb={}", e), "英汉汉英"));
+        }
+        _ => {
+            // 英语为主
+            out.push(cn("有道词典", format!("https://dict.youdao.com/result?word={}&lang=en", e), "中文释义·例句·发音"));
+            out.push(cn("剑桥词典", format!("https://dictionary.cambridge.org/dictionary/english-chinese-simplified/{}", e), "英汉双解·权威"));
+            out.push(cn("柯林斯", format!("https://www.collinsdictionary.com/dictionary/english-chinese/{}", e), "英语释义·用法"));
+            out.push(intl("牛津学习词典", format!("https://www.oxfordlearnersdictionaries.com/definition/english/{}", e), "牛津·释义与搭配"));
+            out.push(intl("Merriam-Webster", format!("https://www.merriam-webster.com/dictionary/{}", e), "美式英语权威"));
+            out.push(intl("Wiktionary", format!("https://en.wiktionary.org/wiki/{}", e), "词源·多语言"));
+        }
+    }
+    out
 }
 
 /// 综合搜索：给出候选 + 维基知识。

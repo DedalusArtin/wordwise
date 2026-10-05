@@ -146,6 +146,34 @@ impl WordEntry {
             .map(|s| s.definition.clone())
             .unwrap_or_default()
     }
+
+    /// 该词条是否带至少一条可用例句（需求 4：例句模式）。
+    pub fn has_example(&self) -> bool {
+        self.senses
+            .iter()
+            .any(|s| s.examples.iter().any(|e| !e.text.trim().is_empty()))
+    }
+
+    /// 取第一条可用例句 (原句, 译文)。
+    pub fn first_example(&self) -> Option<(String, String)> {
+        for s in &self.senses {
+            for e in &s.examples {
+                if !e.text.trim().is_empty() {
+                    return Some((e.text.clone(), e.translation.clone()));
+                }
+            }
+        }
+        None
+    }
+
+    /// 汇总全部释义文本（用于干扰项与展示）。
+    pub fn all_definitions(&self) -> Vec<String> {
+        self.senses
+            .iter()
+            .map(|s| s.definition.trim().to_string())
+            .filter(|d| !d.is_empty())
+            .collect()
+    }
 }
 
 /// 一个词的学习状态（SM-2 算法所需的全部字段）。
@@ -218,7 +246,7 @@ impl StudyState {
     }
 }
 
-/// 练习模式：双向背诵。
+/// 练习模式（需求 4）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum QuizMode {
@@ -226,12 +254,142 @@ pub enum QuizMode {
     EnToZh,
     /// 看中文选英文
     ZhToEn,
+    /// 看中文释义，手动拼写英文（百词斩式拼写练习）
+    Spelling,
+    /// 看例句选释义（例句中挖空目标词）
+    ExToZh,
+    /// 从例句里找出目标单词（识别题）
+    ExPickWord,
+    /// 听发音拼写（需要 TTS / 音频）
+    ListenSpell,
 }
 
 impl Default for QuizMode {
     fn default() -> Self {
         QuizMode::EnToZh
     }
+}
+
+impl QuizMode {
+    /// 该模式是否需要把例句放进题面。
+    pub fn uses_example(&self) -> bool {
+        matches!(self, QuizMode::ExToZh | QuizMode::ExPickWord)
+    }
+    /// 该模式是否要求用户手动输入（而非四选一）。
+    pub fn is_typing(&self) -> bool {
+        matches!(self, QuizMode::Spelling | QuizMode::ListenSpell)
+    }
+}
+
+/// 一个词库（一本书）的元信息。
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct Wordbook {
+    pub id: String,
+    pub name: String,
+    /// 考试分类：cet4 / cet6 / kaoyan / ielts / toefl / gre / other
+    #[serde(default)]
+    pub category: String,
+    /// 层级：0 根 / 1 大类 / 2 子库
+    #[serde(default)]
+    pub level: i64,
+    #[serde(default)]
+    pub parent_id: String,
+    #[serde(default = "default_lang")]
+    pub lang: String,
+    #[serde(default)]
+    pub description: String,
+    /// 来源地址（GitHub 公开词库 / 有道等）
+    #[serde(default)]
+    pub source_url: String,
+    /// 来源许可（引用说明）
+    #[serde(default)]
+    pub license: String,
+    #[serde(default)]
+    pub word_count: i64,
+    /// 是否随程序内置
+    #[serde(default)]
+    pub builtin: bool,
+    /// 是否已下载可用
+    #[serde(default = "default_true")]
+    pub installed: bool,
+    #[serde(default)]
+    pub ord: i64,
+    #[serde(default)]
+    pub created_at: i64,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+/// 词库列表项：词库信息 + 该库的学习进度，供界面卡片显示。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WordbookProgress {
+    #[serde(flatten)]
+    pub book: Wordbook,
+    /// 该词库中已进入学习状态的词数
+    pub learned: i64,
+    /// 已掌握数
+    pub mastered: i64,
+    /// 今日待复习数
+    pub due_today: i64,
+}
+
+/// 词库导入结果（需求 3 / 5）。
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ImportResult {
+    pub book_id: String,
+    /// 解析出的总词数
+    pub total: i64,
+    /// 成功写入
+    pub imported: i64,
+    /// 去重跳过
+    pub skipped: i64,
+    /// 失败
+    pub failed: i64,
+    /// 人类可读说明
+    pub message: String,
+}
+
+fn default_remote_book_lang() -> String {
+    "en".to_string()
+}
+
+/// AI 讲解语言的默认值：简体中文。
+fn default_explain_lang() -> String {
+    "zh".to_string()
+}
+
+/// 一条可下载的词库候选（内置目录，需求 5）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RemoteBook {
+    pub id: String,
+    pub name: String,
+    pub category: String,
+    /// 词条语言（en / ja …）。
+    ///
+    /// 用途有三：下载后词库按此语言入库（否则日语词会被塞进英语词库、
+    /// 永远背不到）、前端按语言分组与筛选、决定挂到哪个大类节点下。
+    #[serde(default = "default_remote_book_lang")]
+    pub lang: String,
+    pub description: String,
+    /// 主下载地址（优先选择国内可直连的镜像）
+    pub url: String,
+    /// 备用镜像地址，按顺序回退。
+    ///
+    /// 国内访问 `raw.githubusercontent.com` 基本必然失败，
+    /// 所以这里放 jsDelivr / gh-proxy 这类镜像；主地址挂了就依次尝试。
+    #[serde(default)]
+    pub mirrors: Vec<String>,
+    /// 文件格式：json / csv / txt
+    pub format: String,
+    /// 预计词数
+    pub approx_words: i64,
+    /// 来源与许可
+    pub source_url: String,
+    pub license: String,
+    /// 是否已安装
+    pub installed: bool,
 }
 
 /// 单道题的完整载荷，直接送给前端渲染。
@@ -249,6 +407,21 @@ pub struct QuizCard {
     pub mode: QuizMode,
     /// 是否强化记忆词
     pub is_leech: bool,
+    /// 例句模式用：挖空后的例句（目标词已替换为 ____）
+    #[serde(default)]
+    pub example_masked: String,
+    /// 例句模式用：完整例句原文
+    #[serde(default)]
+    pub example_raw: String,
+    /// 例句模式用：例句译文
+    #[serde(default)]
+    pub example_translation: String,
+    /// 拼写模式用：提示长度（明示首字母或字母数）
+    #[serde(default)]
+    pub spell_hint: String,
+    /// 发音用：音频地址（听音模式/AI 讲解）
+    #[serde(default)]
+    pub audio: String,
     /// 当前是第几题（从 1 开始）
     #[serde(default)]
     pub index: usize,
@@ -363,6 +536,12 @@ pub struct DictSourceConfig {
     /// 优先级，小的先试
     #[serde(default)]
     pub priority: i32,
+    /// 该源在中国大陆是否必须走代理才能访问。
+    ///
+    /// 标 true 的源在「当前没有代理」时会被直接跳过，
+    /// 免得用户在直连环境下干等一个必然超时的请求。
+    #[serde(default)]
+    pub needs_proxy: bool,
 }
 
 /// 字段映射规则——让小语种/新词典源无需改代码即可接入。
@@ -442,7 +621,43 @@ impl Default for LlmConfig {
 }
 
 /// 默认的背单词讲解人设。
-pub const DEFAULT_TUTOR_PROMPT: &str = r#"你是一位专业的英语词汇教师，擅长为中文母语学习者讲解单词。
+///
+/// ★ 这里**刻意不写死输出语言**（老版本写死了「只用简体中文」），
+/// 语言要求由 `llm::with_lang_constraint` 在运行时按
+/// [`AppConfig::explain_lang`] 追加。原因有两个：
+///   1. 写死之后，用户把讲解语言改成日语/英语也不会生效 ——
+///      模型会看到「只用简体中文」这句更硬的指令，直接忽略后面的要求；
+///   2. 这份 prompt 是**持久化**的，改了默认值也追不到老用户的配置，
+///      所以必须在迁移里做一次订正（见 `CONFIG_VERSION` 的 v4 说明）。
+pub const DEFAULT_TUTOR_PROMPT: &str = r#"你是一位专业的词汇教师，为用户讲解单词，输出风格参照有道词典的「AI 讲解」。
+
+【格式规范（务必严格遵守）】
+1. 正文不要出现任何 Markdown 之外的符号装饰（如 ★、◆、●、==、~~~）。
+2. 结构固定为以下五个二级标题（用 ## 开头），标题文字一字不差：
+   ## 核心含义
+   ## 记忆方法
+   ## 常见搭配
+   ## 例句
+   ## 易混辨析
+3. 「核心含义」用无序列表，每条格式为：`- **词性** 释义`。词性用 n. / v. / adj. / adv. / prep. 等标准缩写。
+4. 「记忆方法」用一段话说明词根词缀或联想记忆，不要用列表。
+5. 「常见搭配」用无序列表，每条为 `- **搭配** —— 说明`。
+6. 「例句」给出 2 条，每条原句单独一行，紧随其后的译文以 `> ` 引用块的形式写在下一行。
+7. 「易混辨析」用一个两列表格（| 词 | 区别 |），最多 3 行，没有易混词时写「暂无」。
+8. 若该词常见于四六级/考研/雅思/托福，在「核心含义」末尾加一行：`- *考点*：四级` 这样的标注。
+9. 不要输出开场白、结语、免责声明或任何「好的」「以下是」之类的过渡语，直接从「## 核心含义」开始。
+10. 禁止输出 HTML 标签、禁止使用三级以上标题、禁止嵌套列表。
+11. 若用户拼写可能有误，在最开头用一行 `> 提示：你是否想查「xxx」？` 指正，然后正常讲解。
+
+【输出语言】
+严格按本轮对话末尾给出的《输出语言》要求书写，不要自行决定语言。"#;
+
+/// v1.0.0 发布时的默认人设。**只用于迁移比对**，不要再改这个常量。
+///
+/// 它把「使用简体中文讲解」写死在 prompt 里，是与「讲解语言」下拉冲突的根源，
+/// 但又因为 prompt 会持久化到用户配置里，光改 `DEFAULT_TUTOR_PROMPT` 追不到
+/// 老用户 —— 所以 `migrate_config` 需要拿它来判断「用户到底改没改过」。
+pub const LEGACY_TUTOR_PROMPT_V1: &str = r#"你是一位专业的英语词汇教师，擅长为中文母语学习者讲解单词。
 回答要求：
 1. 使用简体中文讲解，语言精炼、结构清晰，可使用 Markdown 小标题与列表。
 2. 讲解顺序：① 核心含义（按词性分组）② 词根词缀或记忆技巧 ③ 常见搭配与用法差异 ④ 两个地道例句并附中文翻译 ⑤ 易混淆词辨析。
@@ -450,13 +665,223 @@ pub const DEFAULT_TUTOR_PROMPT: &str = r#"你是一位专业的英语词汇教�
 4. 不要输出与单词无关的寒暄或免责声明，直接进入讲解。
 5. 若用户提供的单词拼写可能有误，先温和指出最可能的正确拼写再讲解。"#;
 
-/// 应用全局配置。
+/// 是否属于「内置默认人设」（用户没有自定义过）。
+///
+/// 比对时统一把 CRLF 归一成 LF 并去掉首尾空白：
+/// 配置是 JSON 落盘的，Windows 上一旦被别的工具编辑过就可能带上 `\r`。
+pub fn is_builtin_prompt(p: &str) -> bool {
+    let norm = |s: &str| s.replace("\r\n", "\n").trim().to_string();
+    let p = norm(p);
+    p.is_empty() || p == norm(LEGACY_TUTOR_PROMPT_V1) || p == norm(DEFAULT_TUTOR_PROMPT)
+}
+
+/// 提示词层的语言约束块（运行时追加到 system prompt 末尾）。
+///
+/// 为什么放在 system 而不是 user：本地小模型对 system 里的硬约束遵循度更高，
+/// 而且它必须**盖过**用户自定义 prompt 里可能残留的语言要求。
+pub const EXPLAIN_LANG_CONSTRAINT: &str = r#"【输出语言（最高优先级，覆盖上面所有冲突的要求）】
+1. 所有解释性文字——标题、说明、辨析、例句译文、提示——都必须用 {LANG} 书写。
+2. 以下内容一律保持原文，**不要翻译**：被讲解的词本身、代码标识符、函数/变量/类名、命令行与参数、日志、文件路径、URL、配置键名、以及通常不翻译的专有名词缩写。
+3. 外语例句保留原句，其译文用 {LANG}。
+4. 不要输出任何关于「我用了哪种语言」的说明，也不要翻译 Markdown 的语法标记。"#;
+
+/// **输出后处理层**的翻译模板（需求 2）。
+///
+/// 用途：本地小模型经常不完全遵守提示词里的语言要求。此时由后处理层
+/// 拿模型已经产出的整段讲解，套用本模板重译一遍，再整体替换原文 ——
+/// 用户不需要二次点击，也不会看到「模型偷懒」的半英文结果。
+///
+/// 模板里两个占位符：`{LANG}` 目标语言名、`{CONTENT}` 待翻译正文。
+/// 正文里的技术片段已在上游被替换成 `⟦0⟧` `⟦1⟧` 形式的安全占位符，
+/// 所以这里的第 3 条是「保结构」的关键。
+pub const DEFAULT_TRANSLATE_TEMPLATE: &str = r#"你是专业译者兼 Markdown 排版工程师。把下面这段「单词讲解」翻译成 {LANG}。
+
+【铁律】
+1. 只输出译文本身。不要前言、结语、解释、免责声明，也不要用代码围栏把整段包起来。
+2. 完整保留 Markdown 结构：## 标题、- 无序列表、| 表格 |、> 引用块、**加粗**、
+   `行内代码` 的数量、顺序和层级都不能变；表格的列数与分隔行保持原样。
+3. 形如 ⟦0⟧ ⟦1⟧ 的占位符必须**原样保留在原来的位置**，不得改动、删除、翻译或增删编号。
+4. 以下内容保持原文不翻译：代码、命令与参数、日志、文件路径、URL、包名/类名/函数名、
+   配置键名、以及通常不翻译的专有名词缩写。
+5. 外语例句保留原句不翻译；紧随其后的译文行照常翻译成 {LANG}。
+6. 被讲解的词条本身不翻译。
+7. 不要新增任何小标题、示例、备注或总结。
+
+待翻译内容（以 <<< 与 >>> 为界）：
+<<<
+{CONTENT}
+>>>"#;
+
+/// 网络与代理配置。
+///
+/// **默认直连，不启用代理。** 这是刻意选的默认值，原因有二：
+///
+/// 1. 内置的在线资源全部保证在国内可直连——在线词库走 jsDelivr 镜像、
+///    中文释义走有道、在线搜索走必应 RSS、英英释义走 freedictionaryapi。
+///    用户装好即可用，不需要先有一个代理。
+/// 2. 代理是「可选加速/解锁手段」而不是运行前提。默认去探测系统代理
+///    会带来不可预期的行为：机器上残留一个 `HTTP_PROXY` 环境变量，
+///    或在别的软件里开过一次系统代理，都会悄悄改变应用的联网路径。
+///
+/// 因此 `enable_proxy` 默认为 `false`：此时代理解析整体短路，
+/// 既不读环境变量也不读注册表，一律直连。需要代理（例如要启用
+/// Wiktionary 这类被墙的源）时，用户在设置页显式打开即可。
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NetworkConfig {
+    /// 是否启用代理。默认 `false`（直连）。
+    ///
+    /// 关闭时 `resolve_proxy` 直接返回「直连」，连 `HTTP_PROXY`
+    /// 环境变量也不会被采纳——否则「默认直连」在部分机器上会失效。
+    #[serde(default)]
+    pub enable_proxy: bool,
+    /// 启用代理时是否自动探测代理地址（环境变量 → Windows「Internet 选项」）。
+    ///
+    /// 仅在 `enable_proxy` 为 `true` 时有意义，并且只在 `proxy` 留空时生效。
+    /// 关掉它就是「只用手动填写的地址」，行为最可预期。
+    #[serde(default = "default_true")]
+    pub use_system_proxy: bool,
+    /// 手动指定的代理地址；留空表示按「环境变量 → 系统代理」自动判断。
+    /// 支持 http:// / https:// / socks5:// 三种写法，也接受 `127.0.0.1:7890`。
+    #[serde(default)]
+    pub proxy: String,
+    /// 不走代理的地址（逗号分隔）。本机地址始终直连，无需在这里重复填写。
+    #[serde(default = "default_no_proxy")]
+    pub no_proxy: String,
+    /// 单个请求总超时（秒）
+    #[serde(default = "default_http_timeout")]
+    pub timeout_secs: u64,
+    /// 建立连接的超时（秒）
+    #[serde(default = "default_connect_timeout")]
+    pub connect_timeout_secs: u64,
+    /// 词典查询的单源超时（秒）。这个值直接决定查词「卡多久」，
+    /// 所以刻意比全局超时短：宁可判某个源失败，也不能让整体卡住。
+    #[serde(default = "default_lookup_timeout")]
+    pub lookup_timeout_secs: u64,
+}
+
+fn default_no_proxy() -> String {
+    "localhost,127.0.0.1,::1".to_string()
+}
+fn default_http_timeout() -> u64 {
+    30
+}
+fn default_connect_timeout() -> u64 {
+    10
+}
+fn default_lookup_timeout() -> u64 {
+    8
+}
+
+impl Default for NetworkConfig {
+    fn default() -> Self {
+        Self {
+            // 默认直连：不启用代理。见结构体文档。
+            enable_proxy: false,
+            use_system_proxy: true,
+            proxy: String::new(),
+            no_proxy: default_no_proxy(),
+            timeout_secs: default_http_timeout(),
+            connect_timeout_secs: default_connect_timeout(),
+            lookup_timeout_secs: default_lookup_timeout(),
+        }
+    }
+}
+
+/// 网络连通性诊断结果（设置页「诊断网络」用）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NetProbeItem {
+    /// 站点名称
+    pub name: String,
+    pub url: String,
+    pub ok: bool,
+    /// 耗时（毫秒）
+    pub elapsed_ms: i64,
+    /// 失败原因 / 说明
+    pub detail: String,
+}
+
+/// 网络诊断总报告。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NetReport {
+    /// 当前生效的代理（人类可读）
+    pub proxy: String,
+    pub proxy_url: Option<String>,
+    /// 是否使用代理
+    pub using_proxy: bool,
+    /// 命中代理的来源
+    pub proxy_origin: String,
+    /// 各站点探测结果
+    pub items: Vec<NetProbeItem>,
+}
+
+/// 配置结构版本号。
+///
+/// 每次需要「对已持久化的配置做一次性订正」时把它 +1，
+/// 由 `dict::builtin::migrate_config` 负责执行。
+///
+/// v2：内置词典源刷新（`dictionaryapi.dev` 已失效 → freedictionaryapi），
+///     并把需要代理的内置源在未启用代理时关掉。
+/// v3：新增 `youdao-jsonapi` / `youdao-newhh` 两个有道源。它们负责
+///     **非英语词的中文释义**——原先中文词在直连环境下一个可用源都没有，
+///     日语词则被 `youdao-suggest` 给出英文解释。
+/// v4：新增「AI 讲解语言」（`explain_lang`）。同时把老配置里那份**写死了
+///     「只用简体中文」**的默认人设换成新的语言中性人设 —— 否则用户把讲解
+///     语言改成日语/英语后，模型仍被旧人设按中文输出（这正是用户报的
+///     「选了目标语言但 AI 讲解没变」）。
+pub const CONFIG_VERSION: u32 = 4;
+
+/// 应用全局配置。
+///
+/// 结构体级别的 `#[serde(default)]`：任何**缺失**的字段都退回该字段的默认值，
+/// 而不是让整份配置反序列化失败。没有它的话，只要新旧版本差一个字段，
+/// `load_config` 就会整份回退成默认值 —— 用户的语言、模型地址、词典源全部被静默清空。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct AppConfig {
     pub llm: LlmConfig,
     pub study: StudyOptions,
+    /// 网络与代理
+    #[serde(default)]
+    pub network: NetworkConfig,
+    /// 配置结构版本。`None` / 低于 [`CONFIG_VERSION`] 表示是旧配置，
+    /// 需要跑一次迁移（见 `dict::builtin::migrate_config`）。
+    ///
+    /// 注意 `Default` 里这里刻意也是 `None`：新装用户和旧配置都会走一次
+    /// 迁移，迁移完写回具体版本号，之后就不再重复执行。
+    #[serde(default)]
+    pub config_version: Option<u32>,
     /// 当前学习的目标语言
     pub target_lang: String,
+    /// 查询时的源语言（「语言转换方向」需求 7）。
+    /// 空字符串表示自动识别。
+    #[serde(default)]
+    pub source_lang: String,
+    /// **AI 讲解语言**：所有 AI 讲解、追问回答、例句译文的输出语言。
+    ///
+    /// 与 [`AppConfig::target_lang`] 彻底解耦，这是刻意的：
+    /// `target_lang` 回答的是「我要学哪种语言的词」，而讲解语言回答的是
+    /// 「解释性文字用哪种语言写」。用户在学日语，但希望讲解用中文说 ——
+    /// 这是最常见的组合，所以两个下拉必须独立。
+    #[serde(default = "default_explain_lang")]
+    pub explain_lang: String,
+    /// 讲解语言是否启用**输出后处理兜底翻译**（默认开）。
+    ///
+    /// 本地小模型（4B 级）经常不完全遵守提示词里的语言要求，此时由后处理层
+    /// 用翻译模板把整段讲解重译一遍再替换原文，保证「选了就一定生效」。
+    /// 关掉它的唯一理由是省一次模型调用。
+    #[serde(default = "default_true")]
+    pub explain_auto_translate: bool,
+    /// 自定义翻译模板。留空则使用内置的 [`DEFAULT_TRANSLATE_TEMPLATE`]。
+    ///
+    /// 模板里可用两个占位符：`{LANG}`（目标语言名）与 `{CONTENT}`（待翻译正文）。
+    #[serde(default)]
+    pub explain_translate_template: String,
+    /// 默认搜索引擎（需求 6）：bing / baidu / bingintl
+    #[serde(default)]
+    pub search_engine: String,
+    /// 是否把在线搜索结果与词条一起展示
+    #[serde(default = "default_true")]
+    pub web_search_enabled: bool,
     /// 界面语言（预留小语种扩展）
     pub ui_lang: String,
     /// 是否启用侧边栏常驻
@@ -474,7 +899,17 @@ impl Default for AppConfig {
         Self {
             llm: LlmConfig::default(),
             study: StudyOptions::default(),
+            network: NetworkConfig::default(),
+            // 刻意留空：新装用户也会走一次迁移，由迁移负责写入具体版本号。
+            config_version: None,
             target_lang: "en".to_string(),
+            source_lang: String::new(),
+            // 默认中文：本软件的用户界面是中文，讲解默认也用中文最省心。
+            explain_lang: default_explain_lang(),
+            explain_auto_translate: true,
+            explain_translate_template: String::new(),
+            search_engine: "bing".to_string(),
+            web_search_enabled: true,
             ui_lang: "zh-CN".to_string(),
             sidebar_always_on_top: true,
             sidebar_width: 380,

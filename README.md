@@ -108,7 +108,7 @@ WordWise 把「背单词」和「AI 讲解」放进同一个窗口：左边是�
 
 ### 1. 安装
 
-下载 `WordWise-Setup-1.0.0.exe` 运行即可（安装向导支持中英文）。
+下载 `WordWise-Setup-0.35.0.exe` 运行即可（安装向导支持中英文）。
 
 若从源码构建，见 [构建与打包](#构建与打包)。
 
@@ -286,7 +286,7 @@ WordWise 使用 **SM-2 改良算法**，核心是两条：
 | 后端 | Rust 1.77+ | 性能与内存安全，单二进制分发 |
 | 存储 | SQLite (rusqlite bundled) | 无需外部依赖，单文件，随包分发 |
 | 网络 | reqwest + rustls | 不依赖系统 schannel，规避证书吊销列表离线问题 |
-| 打包 | Inno Setup 6 | 中文安装向导、自定义任务、卸载保留数据 |
+| 打包 | Inno Setup 7 | 中文安装向导、自定义任务、卸载保留数据 |
 
 ### 分层设计
 
@@ -343,7 +343,7 @@ wordwise/
 ├── README.md                    本文档
 ├── BUILD.md                     构建与运行指南
 ├── LICENSE                      MIT
-├── build.ps1 / build.sh         一键构建脚本
+├── build.ps1 / 构建.ps1          一键构建脚本（旧版 build.sh 等已移入 archive/）
 │
 ├── src/                         前端（无构建步骤）
 │   ├── index.html               主界面 + 侧边栏共用入口（按 ?view=sidebar 分流）
@@ -419,16 +419,36 @@ cd src-tauri && cargo build --release
 # 一键（PowerShell）
 .\build.ps1
 
-# 一键（Git Bash）
-./build.sh
+# 交互式菜单（双击运行即可）
+.\构建.ps1
 
-# 或直接用 Inno Setup 编译
-"C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer\wordwise.iss
-# 产物：installer\output\WordWise-Setup-1.0.0.exe
+# 或直接用 Inno Setup 编译（ISCC.exe 不在 PATH，必须写完整路径）
+"G:\Programming\07-utils\Inno Setup 7\ISCC.exe" installer\wordwise.iss
+# 产物：installer\output\WordWise-Setup-0.35.0.exe
 ```
+
+> ISCC.exe 未加入系统 PATH。装在其他位置时：
+> `.\build.ps1 -IsccPath "<你的路径>\ISCC.exe"`，或改 `build.ps1` 的 `$DefaultIscc`。
 
 安装程序特性：中英文双语向导 · 自定义安装目录 · 桌面/快速启动图标 ·
 开机自启（侧边栏）· 安装后引导配置 LM Studio · **卸载时可选保留学习数据**。
+
+### 便携版（免安装）
+
+前端资源已内嵌进 exe，`wordwise.exe` 是**单文件绿色版**，拷到任何地方双击即可运行，
+不写注册表、不往系统目录拷文件。
+
+```
+dist\wordwise.exe            直接双击运行
+installer\output\WordWise-0.35.0-portable.zip    便携版压缩包（解压即用）
+```
+
+运行一次 `.\build.ps1` 会同时产出**便携版**和**安装程序**两种形式。
+
+- 系统要求：Windows 10/11（x64）+ WebView2 运行时（多数系统已自带）
+- 学习数据默认放 `%APPDATA%\WordWise`；设 `WORDWISE_DATA_DIR` 可改到别处
+  （例如放 U 盘随身携带）
+- 删除目录即卸载；学习数据不在目录内，会保留
 
 ### 上传到 GitHub
 

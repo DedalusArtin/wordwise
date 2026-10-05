@@ -1,18 +1,22 @@
 ; ============================================================
-;  WordWise 安装程序脚本（Inno Setup 6）
+;  WordWise 安装程序脚本（Inno Setup 7）
 ;
-;  构建方式：
-;    "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer\wordwise.iss
+;  构建方式（ISCC.exe 不在系统 PATH 里，必须写完整路径）：
+;    "G:\Programming\07-utils\Inno Setup 7\ISCC.exe" installer\wordwise.iss
+;
+;  或用构建脚本（自动定位并校验版本）：
+;    .\build.ps1
+;    .\build.ps1 -IsccPath "<你的路径>\ISCC.exe"      ; 装在别处时
 ;
 ;  产物：
-;    installer\output\WordWise-Setup-1.0.0.exe
+;    installer\output\WordWise-Setup-0.35.0.exe
 ;
 ;  前置条件：
 ;    先执行 cargo build --release，确保 wordwise.exe 已生成
 ; ============================================================
 
 #define MyAppName "WordWise"
-#define MyAppVersion "1.0.0"
+#define MyAppVersion "0.35.0"
 #define MyAppPublisher "DedalusArtin"
 #define MyAppURL "https://github.com/DedalusArtin/wordwise"
 #define MyAppExeName "wordwise.exe"

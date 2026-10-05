@@ -153,6 +153,22 @@ pub async fn chat(
     system: &str,
     user: &str,
 ) -> Result<String> {
+    chat_ex(client, cfg, system, user, cfg.temperature, cfg.max_tokens).await
+}
+
+/// 同上，但可覆盖采样参数。
+///
+/// 翻译（输出后处理层）必须用更高的 `max_tokens`：讲解正文可能有上千 token，
+/// 沿用默认的 1024 会把译文**拦腰截断**，而截断后的译文看起来「翻了一半」，
+/// 比不翻还糟。
+pub async fn chat_ex(
+    client: &reqwest::Client,
+    cfg: &LlmConfig,
+    system: &str,
+    user: &str,
+    temperature: f64,
+    max_tokens: i64,
+) -> Result<String> {
     let model = resolve_model(client, cfg).await?;
     let url = endpoint(&cfg.base_url, "/chat/completions");
 
@@ -165,8 +181,8 @@ pub async fn chat(
     let body = json!({
         "model": model,
         "messages": messages,
-        "temperature": cfg.temperature,
-        "max_tokens": cfg.max_tokens,
+        "temperature": temperature,
+        "max_tokens": max_tokens,
         "stream": false,
     });
 
@@ -532,6 +548,320 @@ pub fn explain_prompt(entry: &WordEntry, mode_hint: &str) -> String {
     }
 }
 
+/// 讲解语言代码 → **目标语言的自称**。
+///
+/// 为什么不用「日语」「英语」这种中文名：实测本地小模型对
+/// 「用 日本語 回答」的遵循度明显高于「用日语回答」—— 后者被当成
+/// 「一句关于日语的要求」，前者才是明确的语言标签。
+pub fn explain_lang_name(code: &str) -> &'static str {
+    match code {
+        "zh" => "简体中文",
+        "en" => "English",
+        "ja" => "日本語",
+        "ko" => "한국어",
+        "fr" => "Français",
+        "de" => "Deutsch",
+        "es" => "Español",
+        "ru" => "Русский",
+        "it" => "Italiano",
+        "pt" => "Português",
+        _ => "简体中文",
+    }
+}
+
+/// 把《输出语言》约束追加到 system prompt 末尾。
+///
+/// 这是**提示词层**的落点：语言要求写进 system，代价为零（没有额外请求），
+/// 还能顺带保住 Markdown 结构；小模型不吃这套时再由
+/// [`translate_markdown`] 在输出后处理层兜底。
+pub fn with_lang_constraint(system_prompt: &str, explain_lang: &str) -> String {
+    let lang = explain_lang_name(explain_lang);
+    let block = crate::models::EXPLAIN_LANG_CONSTRAINT.replace("{LANG}", lang);
+    format!("{}\n\n{}", system_prompt.trim_end(), block)
+}
+
+/* ---------------- 输出后处理层：语言检测 + 技术内容保护 + 翻译模板 ---------------- */
+
+fn is_han(c: char) -> bool {
+    ('\u{4e00}'..='\u{9fff}').contains(&c)
+}
+fn is_kana(c: char) -> bool {
+    ('\u{3040}'..='\u{30ff}').contains(&c)
+}
+fn is_hangul(c: char) -> bool {
+    ('\u{ac00}'..='\u{d7af}').contains(&c)
+}
+fn is_cyrillic(c: char) -> bool {
+    ('\u{0400}'..='\u{04ff}').contains(&c)
+}
+fn is_arabic(c: char) -> bool {
+    ('\u{0600}'..='\u{06ff}').contains(&c)
+}
+fn is_thai(c: char) -> bool {
+    ('\u{0e00}'..='\u{0e7f}').contains(&c)
+}
+
+/// 判断一段讲解**是否已经是**目标语言，用来决定要不要走后处理翻译兜底。
+///
+/// 只对「书写系统可区分」的语言做强判定（中/日/韩/俄/阿/泰/希腊）；
+/// 英/法/德/西/葡/意 都是拉丁字母，靠字符分布判不准，一律返回 `true`
+/// （即不触发兜底）—— 宁可偶尔漏翻，也不能把一段正确的外语讲解
+/// 反复丢给模型重译，那是纯粹的浪费与风险。
+pub fn text_matches_lang(text: &str, code: &str) -> bool {
+    let letters = text.chars().filter(|c| c.is_alphabetic()).count();
+    // 太短的文本（「暂无」/「N/A」）比例噪声太大，别据此下判断
+    if letters < 12 {
+        return true;
+    }
+    let n = letters as f64;
+    let count = |f: fn(char) -> bool| { text.chars().filter(|&c| f(c)).count() as f64 };
+    let ratio = |f: fn(char) -> bool| count(f) / n;
+
+    let han = ratio(is_han);
+    let kana = ratio(is_kana);
+    let hangul = ratio(is_hangul);
+
+    match code {
+        // 中文里必然夹着英文单词/例句，汉字阈值不能太高；
+        // 但一旦出现成规模的假名/谚文，就说明这是日语/韩语而非中文。
+        "zh" => han >= 0.25 && kana < 0.05 && hangul < 0.05,
+        // 日语与中文共用汉字，唯一的可靠区分标志是假名（助词、送假名必有）。
+        "ja" => kana >= 0.05 && (kana + han) >= 0.25,
+        "ko" => hangul >= 0.25,
+        "ru" => ratio(is_cyrillic) >= 0.25,
+        "ar" => ratio(is_arabic) >= 0.25,
+        "th" => ratio(is_thai) >= 0.25,
+        "el" => ratio(|c| ('\u{0370}'..='\u{03ff}').contains(&c)) >= 0.25,
+        _ => true,
+    }
+}
+
+/// 占位符包裹符（U+27E6 / U+27E7 数学白方括号）。
+///
+/// 特意选这两个生僻字符：普通方括号 `[]` 在 Markdown 里太常见
+/// （链接、引用、音标），容易被模型顺手改写或与语法混淆。
+const SPAN_OPEN: char = '\u{27e6}';
+const SPAN_CLOSE: char = '\u{27e7}';
+
+fn push_span(out: &mut String, spans: &mut Vec<String>, seg: &str) {
+    let idx = spans.len();
+    spans.push(seg.to_string());
+    out.push(SPAN_OPEN);
+    out.push_str(&idx.to_string());
+    out.push(SPAN_CLOSE);
+}
+
+fn starts_with_at(buf: &[char], i: usize, pat: &str) -> bool {
+    let p: Vec<char> = pat.chars().collect();
+    if i + p.len() > buf.len() {
+        return false;
+    }
+    buf[i..i + p.len()] == p[..]
+}
+
+/// 行内技术片段的保护：`` `code` ``、URL、Windows/Unix 路径。
+///
+/// 只做这几类**形制明确**的片段，不做「看起来像标识符就保护」的激进猜测 ——
+/// 那是把中文词也误伤的常见来源。其余的靠提示词约束。
+fn protect_inline(line: &str, spans: &mut Vec<String>) -> String {
+    let b: Vec<char> = line.chars().collect();
+    let mut out = String::with_capacity(line.len());
+    let mut i = 0usize;
+    while i < b.len() {
+        let c = b[i];
+        // 行内代码
+        if c == '`' {
+            if let Some(j) = b[i + 1..].iter().position(|&x| x == '`') {
+                let end = i + 1 + j;
+                let seg: String = b[i..=end].iter().collect();
+                push_span(&mut out, spans, &seg);
+                i = end + 1;
+                continue;
+            }
+        }
+        // URL
+        if c == 'h' && (starts_with_at(&b, i, "http://") || starts_with_at(&b, i, "https://")) {
+            let mut j = i;
+            while j < b.len()
+                && !b[j].is_whitespace()
+                && !matches!(b[j], ')' | '>' | '）' | '，' | '。' | '、' | '"' | '\'')
+            {
+                j += 1;
+            }
+            let seg: String = b[i..j].iter().collect();
+            push_span(&mut out, spans, &seg);
+            i = j;
+            continue;
+        }
+        // Windows 盘符路径（C:\… / D:/…）
+        if c.is_ascii_alphabetic()
+            && i + 2 < b.len()
+            && b[i + 1] == ':'
+            && (b[i + 2] == '\\' || b[i + 2] == '/')
+        {
+            let mut j = i;
+            while j < b.len()
+                && !b[j].is_whitespace()
+                && !matches!(b[j], '`' | ')' | '（' | '，' | '。' | '、' | '"')
+            {
+                j += 1;
+            }
+            let seg: String = b[i..j].iter().collect();
+            push_span(&mut out, spans, &seg);
+            i = j;
+            continue;
+        }
+        out.push(c);
+        i += 1;
+    }
+    out
+}
+
+/// 把讲解正文里的技术片段抽成占位符，返回 `(带占位符的文本, 片段表)`。
+///
+/// 保护的粒度是「整块代码围栏」和「行内代码 / URL / 路径」：
+/// 这些是最容易被模型好心翻译坏的东西（`fn main()` → 「主函数」、
+/// `C:\Users\a` → 被拆成句子）。
+pub fn protect_technical_spans(text: &str) -> (String, Vec<String>) {
+    let mut spans: Vec<String> = Vec::new();
+    let mut out = String::with_capacity(text.len());
+    let mut in_fence = false;
+    let mut fence = String::new();
+
+    for line in text.split_inclusive('\n') {
+        let is_fence_marker = line.trim_start().starts_with("```");
+        if in_fence {
+            fence.push_str(line);
+            if is_fence_marker {
+                in_fence = false;
+                let block = std::mem::take(&mut fence);
+                let kept_nl = block.ends_with('\n');
+                push_span(&mut out, &mut spans, block.trim_end_matches('\n'));
+                if kept_nl {
+                    out.push('\n');
+                }
+            }
+            continue;
+        }
+        if is_fence_marker {
+            in_fence = true;
+            fence.clear();
+            fence.push_str(line);
+            continue;
+        }
+        out.push_str(&protect_inline(line, &mut spans));
+    }
+    // 未闭合的围栏：整块保护，别让它泄漏进译文
+    if !fence.is_empty() {
+        let block = std::mem::take(&mut fence);
+        push_span(&mut out, &mut spans, block.trim_end_matches('\n'));
+    }
+    (out, spans)
+}
+
+/// [`protect_technical_spans`] 的逆操作：把占位符换回原文。
+///
+/// 容错：模型偶尔会把 `⟦12⟧` 写成 `⟦ 12 ⟧` 或漏掉半个符号。
+/// 编号越界/残缺时原样保留占位符文本（总比丢内容好）。
+pub fn restore_technical_spans(text: &str, spans: &[String]) -> String {
+    if spans.is_empty() {
+        return text.to_string();
+    }
+    let b: Vec<char> = text.chars().collect();
+    let mut out = String::with_capacity(text.len());
+    let mut i = 0usize;
+    while i < b.len() {
+        if b[i] == SPAN_OPEN {
+            let mut j = i + 1;
+            let mut num = String::new();
+            while j < b.len() && (b[j].is_ascii_digit() || b[j] == ' ') {
+                if b[j].is_ascii_digit() {
+                    num.push(b[j]);
+                }
+                j += 1;
+            }
+            if !num.is_empty() && j < b.len() && b[j] == SPAN_CLOSE {
+                if let Ok(k) = num.parse::<usize>() {
+                    if let Some(s) = spans.get(k) {
+                        out.push_str(s);
+                        i = j + 1;
+                        continue;
+                    }
+                }
+            }
+        }
+        out.push(b[i]);
+        i += 1;
+    }
+    out
+}
+
+/// 模型有时会把整段答案再套一层 ``` 围栏，这里剥掉。
+fn strip_outer_fence(s: &str) -> String {
+    let t = s.trim();
+    if !t.starts_with("```") {
+        return t.to_string();
+    }
+    let mut lines = t.lines();
+    let first = lines.next().unwrap_or("").trim().to_string();
+    // 第一行必须是「```」或「```md」这种纯围栏：
+    // 若后面还跟着正文（` ``` 这是代码 `），说明不是外层包裹，原样返回。
+    let lang_ok = first[3..]
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '#' | '-' | '_'));
+    if !lang_ok {
+        return t.to_string();
+    }
+    let mut body: Vec<&str> = lines.collect();
+    if let Some(last) = body.last() {
+        if last.trim_start().starts_with("```") {
+            body.pop();
+        }
+    }
+    body.join("\n").trim().to_string()
+}
+
+/// **输出后处理层的翻译模板**：把整段讲解重译成目标语言。
+///
+/// 流程：抽出技术片段 → 占位符化 → 套模板让模型翻译 → 回填占位符。
+/// 任何一步失败都返回 `Err`，由调用方决定降级（本项目选择保留原文 + 提示）。
+pub async fn translate_markdown(
+    client: &reqwest::Client,
+    cfg: &LlmConfig,
+    template: &str,
+    text: &str,
+    explain_lang: &str,
+) -> Result<String> {
+    if text.trim().is_empty() {
+        return Ok(text.to_string());
+    }
+    let (masked, spans) = protect_technical_spans(text);
+    let lang = explain_lang_name(explain_lang);
+    let tmpl = if template.trim().is_empty() {
+        crate::models::DEFAULT_TRANSLATE_TEMPLATE
+    } else {
+        template
+    };
+    let user = tmpl.replace("{LANG}", lang).replace("{CONTENT}", &masked);
+
+    // 温度压低：翻译要的是稳定复述，不是创作。
+    // max_tokens 至少 2048，防止长讲解的译文被拦腰截断。
+    let raw = chat_ex(
+        client,
+        cfg,
+        "",
+        &user,
+        0.2,
+        cfg.max_tokens.max(2048),
+    )
+    .await?;
+    let cleaned = strip_outer_fence(&raw);
+    if cleaned.trim().is_empty() {
+        return Err(anyhow!("模型返回了空译文"));
+    }
+    Ok(restore_technical_spans(&cleaned, &spans))
+}
+
 /// 语言代码 → 中文名。
 pub fn lang_display_name(code: &str) -> &'static str {
     match code {
@@ -639,5 +969,91 @@ mod tests {
         let p = explain_prompt(&e, "");
         assert!(p.contains("apple"));
         assert!(p.contains("苹果"));
+    }
+
+    /* ---- 讲解语言：提示词层 ---- */
+
+    /// 语言约束必须被追加到 system prompt，且指名道姓写清目标语言。
+    #[test]
+    fn lang_constraint_is_appended() {
+        let s = with_lang_constraint("你是词汇老师。", "ja");
+        assert!(s.starts_with("你是词汇老师。"));
+        assert!(s.contains("【输出语言"));
+        assert!(s.contains("日本語"), "要写目标语言的自称：{}", s);
+        // 技术内容保原文这条不能丢
+        assert!(s.contains("代码标识符") || s.contains("文件路径"));
+    }
+
+    /// 未收录的语言代码兜底成中文，不能出现空约束。
+    #[test]
+    fn lang_constraint_falls_back() {
+        let s = with_lang_constraint("x", "xx");
+        assert!(s.contains("简体中文"));
+    }
+
+    /* ---- 讲解语言：输出后处理层 ---- */
+
+    /// 语言检测：中文讲解里夹英文单词/例句不算「不是中文」。
+    #[test]
+    fn detect_explanation_language() {
+        let zh = "## 核心含义\n- **n.** 苹果；一种落叶乔木的果实，常见于温带地区。\n\n例句：An apple a day keeps the doctor away.";
+        assert!(text_matches_lang(zh, "zh"), "含大量汉字应判定为中文");
+        assert!(!text_matches_lang(zh, "ja"), "没有假名，不该判成日语");
+
+        // 日中共享汉字，靠假名区分：有假名才算日语，且不再算中文
+        let ja = "## 核心意味\n- **n.** りんご。バラ科の落葉高木の果実で、温帯で広く栽培される。\n\n例文：An apple a day keeps the doctor away.";
+        assert!(text_matches_lang(ja, "ja"), "有假名应判定为日语");
+        assert!(!text_matches_lang(ja, "zh"), "有假名就不该当成中文，否则不会触发翻译");
+
+        let en = "## Core meaning\n- **n.** a round fruit with red or green skin and firm white flesh, growing on a tree.";
+        assert!(!text_matches_lang(en, "zh"), "全英文应触发中文兜底翻译");
+        assert!(!text_matches_lang(en, "ja"));
+
+        // 拉丁字母语言之间无法可靠区分 → 一律不触发兜底（避免无意义重译）
+        assert!(text_matches_lang(en, "fr"));
+        assert!(text_matches_lang(en, "de"));
+
+        // 太短的文本不下判断
+        assert!(text_matches_lang("暂无", "zh"));
+    }
+
+    /// 技术片段必须被抽成占位符，且能一模一样还原。
+    #[test]
+    fn technical_spans_roundtrip() {
+        let src = "运行 `cargo test --lib` 即可。\n\n```rust\nfn main() { println!(\"hi\"); }\n```\n\n详见 https://example.com/a?b=1 与 D:\\Projects\\wordwise\\src\\js\\ui.js\n";
+        let (masked, spans) = protect_technical_spans(src);
+        assert!(!masked.contains("cargo test"), "行内代码应被保护：{}", masked);
+        assert!(!masked.contains("fn main"), "代码围栏应被保护：{}", masked);
+        assert!(!masked.contains("example.com"), "URL 应被保护：{}", masked);
+        assert!(!masked.contains("ui.js"), "Windows 路径应被保护：{}", masked);
+        assert!(masked.contains('\u{27e6}'));
+        assert_eq!(restore_technical_spans(&masked, &spans), src);
+    }
+
+    /// 模型把占位符写成 `⟦ 0 ⟧` 也要能还原；编号越界则原样保留。
+    #[test]
+    fn restore_tolerates_malformed_placeholders() {
+        let spans = vec!["`code`".to_string()];
+        assert_eq!(restore_technical_spans("见 ⟦ 0 ⟧ 处", &spans), "见 `code` 处");
+        assert_eq!(restore_technical_spans("见 ⟦9⟧ 处", &spans), "见 ⟦9⟧ 处");
+    }
+
+    /// 译文被模型套了一层 ``` 时要剥掉（否则前端会把整段当代码块渲染）。
+    #[test]
+    fn outer_fence_is_stripped() {
+        assert_eq!(strip_outer_fence("```md\n## 标题\n正文\n```"), "## 标题\n正文");
+        assert_eq!(strip_outer_fence("```\n只有一行\n```"), "只有一行");
+        // 正常内容不动
+        assert_eq!(strip_outer_fence("## 标题\n正文"), "## 标题\n正文");
+        // 首行是「``` + 正文」→ 不是外层包裹
+        assert_eq!(strip_outer_fence("``` 这是代码"), "``` 这是代码");
+    }
+
+    /// 翻译模板要带上目标语言与正文，且正文里的占位符原样传入。
+    #[test]
+    fn translate_template_placeholders() {
+        let t = crate::models::DEFAULT_TRANSLATE_TEMPLATE;
+        assert!(t.contains("{LANG}") && t.contains("{CONTENT}"));
+        assert!(t.contains("⟦0⟧"), "模板要显式要求保留占位符");
     }
 }
