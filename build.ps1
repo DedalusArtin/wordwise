@@ -56,7 +56,10 @@ Set-Location $Root
 # 必须写完整路径。下面这个位置是本机实测可用的 Inno Setup 7。
 # 若你装在别处，改这一行，或用 -IsccPath 覆盖。
 $DefaultIscc      = "G:\Programming\07-utils\Inno Setup 7\ISCC.exe"
-$ExpectedIsccMajor = 7
+# 6 和 7 都支持（BUILD.md 里写的要求就是「Inno Setup 6.2+」）。
+# 本机装的是 7，CI（windows runner 用 choco 装）拿到的是 6 —— 两者都能出包，
+# 所以这里不能只认 7，否则 CI 日志里每次都要多一条没意义的警告。
+$SupportedIsccMajors = @(6, 7)
 
 # 版本号统一从 tauri.conf.json 读，避免与安装包、界面显示的版本脱节
 $AppVersion = "0.41.0"
@@ -583,8 +586,8 @@ if ($null -eq $IsccVer) {
     exit 1
 }
 
-if ($IsccVer -ne $ExpectedIsccMajor) {
-    Write-Warn2 "ISCC 版本 $IsccVer，与脚本预期的 Inno Setup $ExpectedIsccMajor 不一致"
+if ($SupportedIsccMajors -notcontains $IsccVer) {
+    Write-Warn2 "ISCC 版本 $IsccVer，不在脚本支持的 Inno Setup $($SupportedIsccMajors -join ' / ') 之内"
     Write-Host "  若确认该版本可用可忽略此提示；否则用 -IsccPath 指定正确版本："
     Write-Host '    .\build.ps1 -IsccPath "<你的路径>\ISCC.exe"'
     Write-Host ""
@@ -592,8 +595,10 @@ if ($IsccVer -ne $ExpectedIsccMajor) {
 
 Write-Ok "ISCC: $Iscc（Inno Setup $IsccVer）"
 
-# 传实际的 release 绝对路径，避免 .iss 内相对路径失配
-& $Iscc "/DMySourceDir=$exeDir" (Join-Path $Root "installer\wordwise.iss")
+# 传实际的 release 绝对路径，避免 .iss 内相对路径失配。
+# 版本号也一并传进去（.iss 里的 MyAppVersion 已改成可被 /D 覆盖）：这样
+# 「安装包文件名 / 程序属性 / 界面显示」三处版本号同源，都来自 tauri.conf.json。
+& $Iscc "/DMySourceDir=$exeDir" "/DMyAppVersion=$AppVersion" (Join-Path $Root "installer\wordwise.iss")
 if ($LASTEXITCODE -ne 0) {
     Write-Err2 "Inno Setup 打包失败，请查看上方输出"
     exit 1

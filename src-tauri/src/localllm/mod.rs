@@ -56,11 +56,14 @@ pub const ENGINE_MIRRORS: [&str; 3] = [
 /// 只用 **Vulkan 版**：它的压缩包里**同时带了全部 CPU 后端**
 /// （`ggml-cpu-*.dll` 一整套），有 Vulkan 设备就自动加速、没有就回落 CPU。
 /// 换句话说一份包覆盖两种情况，比同时分发 CPU 版 + Vulkan 版省一半体积。
-pub fn engine_asset() -> &'static str {
+pub fn engine_asset() -> String {
+    // ★ 版本号必须从 ENGINE_TAG 派生，不要在这里再写一遍字面量：
+    //   否则升级 llama.cpp 时会出现「常量改了、包名没改」的漂移，
+    //   表现为一键部署去下载一个不存在的资产（404），而日志里显示的版本是对的。
     if cfg!(target_arch = "aarch64") {
-        "llama-b11414-bin-win-vulkan-arm64.zip"
+        format!("llama-{ENGINE_TAG}-bin-win-vulkan-arm64.zip")
     } else {
-        "llama-b11414-bin-win-vulkan-x64.zip"
+        format!("llama-{ENGINE_TAG}-bin-win-vulkan-x64.zip")
     }
 }
 
@@ -651,6 +654,13 @@ mod tests {
         let a = engine_asset();
         assert!(a.starts_with("llama-b"));
         assert!(a.ends_with(".zip"));
+        // ★ 这条才是真正的回归守卫：包名里的版本号必须和 ENGINE_TAG 一致。
+        //   少了它，engine_asset() 里写死一个旧版本号也能通过测试，
+        //   而线上会去下载一个 404 的资产。
+        assert!(
+            a.contains(ENGINE_TAG),
+            "引擎包名 {a} 里没有当前的 ENGINE_TAG（{ENGINE_TAG}），两者已经漂移"
+        );
         if cfg!(target_arch = "aarch64") {
             assert!(a.contains("arm64"));
         } else {

@@ -177,6 +177,56 @@ src-tauri\target\release\wordwise.exe    ← 直接双击即可运行
 > `编译.cmd` 已移入 `archive/legacy-build-scripts/`，不再维护。
 > 当前唯一受支持的构建入口是 `build.ps1`（原生 Windows，不依赖 WSL）。
 
+### 4.5 补齐 llama.cpp 引擎（干净 clone 必做）
+
+`vendor\llama`（约 118 MB 的第三方二进制）**不进 git**，所以刚 clone 下来的
+仓库里没有它。缺了不会编译失败，而是便携版静默退化成「一键部署时联网下载引擎」——
+那条路在国内被限速到约 40 KB/s，33 MB 要下十几分钟。
+
+```powershell
+.\scripts\fetch_engine.ps1              # 版本号自动从 localllm\mod.rs 的 ENGINE_TAG 读
+.\scripts\fetch_engine.ps1 -UseMirror   # 直连 GitHub 不通时走镜像
+.\scripts\fetch_engine.ps1 -ZipPath D:\llama-b11414-bin-win-vulkan-x64.zip   # 完全离线
+```
+
+引擎版本只在 **一处** 定义：`src-tauri/src/localllm/mod.rs` 的 `ENGINE_TAG`。
+脚本读它来拼包名，不重复写死版本号。
+
+### 4.6 自动打包与发版（GitHub Actions）
+
+推送一个 `v*` 形式的 tag，就会自动构建并发布 Release：
+
+```bash
+git tag v0.42.0
+git push origin v0.42.0
+```
+
+流水线（`.github/workflows/release.yml`）做的事：
+
+1. 从 tag 取版本号，写回 `tauri.conf.json` 与 `Cargo.toml`
+   （`wordwise.iss` 的版本由 `build.ps1` 用 `/DMyAppVersion` 注入，
+   所以「包名 / exe 文件属性 / 界面显示 / 安装程序」四处版本号始终同源）
+2. 装 Rust / Node / MSVC / Inno Setup，`fetch_engine.ps1` 补引擎
+3. `cargo test --lib --release` 作为门禁 —— **测试不过就不出包**
+4. `build.ps1 -SkipModelsZip` 出安装程序与便携包
+5. 核对产物（存在性、体积、SHA256、便携包里不含 `wordwise.db`）
+6. 创建 Release，附件即上面两个包
+
+也可以在 **Actions → Release → Run workflow** 手动触发，`publish` 不勾选时
+只构建、上传为工作流产物（artifact），方便先验证再发。
+
+**发版说明**：流水线优先使用仓库里的 `docs/releases/v<版本>.md`
+（例如 `docs/releases/v0.41.0.md`）；文件不存在时退回 GitHub 自动生成的
+变更列表（`--generate-notes`）。想写正式的更新日志，就按这个命名加一个文件。
+
+**本地构建与 CI 的差异**：
+
+| | 本地 `build.ps1` | CI |
+|---|---|---|
+| Inno Setup | 7（本机安装位置） | 6（runner 自带或 choco 装） |
+| 含模型便携包 | 可用 `-ModelsDir` 出 | 不出（runner 上没有 `.gguf`） |
+| 引擎来源 | `vendor\llama`（本机已有） | 每次 `fetch_engine.ps1` 下载 |
+
 ---
 
 ## 五、项目结构

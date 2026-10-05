@@ -608,6 +608,10 @@ cd src-tauri && cargo build --release
 # 产物：src-tauri/target/release/wordwise.exe
 ```
 
+> **干净 clone 请先补引擎**：`vendor\llama`（约 118 MB 的 llama.cpp 二进制）不进 git。
+> 跑 `.\scripts\fetch_engine.ps1` 补上。缺了**不会**构建失败，但便携版的
+> 「一键部署」会退化成联网下载引擎——那条路在国内被限速到约 40 KB/s。
+
 ### 打包安装程序
 
 ```bash
@@ -662,9 +666,38 @@ installer\output\WordWise-0.41.0-portable-with-models.zip  便携包，含已下
 - 想换成「数据不在程序目录里」，删掉 `portable.txt` 即可（或改用下面的
   环境变量 / 设置页）
 
+### 自动发版（GitHub Actions）
+
+推一个 tag 就自动构建并发布 Release，不用再手工打包上传：
+
+```bash
+git tag v0.42.0
+git push origin v0.42.0
+```
+
+流水线会读 tag 当版本号（同步写回 `tauri.conf.json` 与 `Cargo.toml`，
+安装程序的版本由 `build.ps1` 注入，四处版本号同源）→ 补引擎 → 跑单元测试
+（**不过就不出包**）→ `build.ps1 -SkipModelsZip` → 核对产物 → 发布 Release。
+
+也可以在 **Actions → Release → Run workflow** 手动跑一次，不勾 `publish`
+就只构建、把包留在工作流产物里，方便先验证。
+
+想给某个版本写正经的更新日志，加一个 `docs/releases/v<版本>.md` 即可
+（例如 [docs/releases/v0.41.0.md](docs/releases/v0.41.0.md)）；
+没有这个文件时自动用 GitHub 生成的变更列表。
+
+细节见 [BUILD.md](BUILD.md) 第 4.6 节。
+
 ### 上传到 GitHub
 
 ```bash
+# 推荐：用 gh CLI（已认证后一条命令即可）
+gh release create v0.42.0 --title "WordWise v0.42.0" \
+  --notes-file docs/releases/v0.42.0.md \
+  installer/output/WordWise-Setup-0.42.0.exe \
+  installer/output/WordWise-0.42.0-portable.zip
+
+# 或者用仓库自带的脚本
 python scripts/upload_github.py --public
 ```
 

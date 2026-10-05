@@ -23,11 +23,18 @@
 ; ============================================================
 
 #define MyAppName "WordWise"
-#define MyAppVersion "0.41.0"
 #define MyAppPublisher "DedalusArtin"
 #define MyAppURL "https://github.com/DedalusArtin/wordwise"
 #define MyAppExeName "wordwise.exe"
 #define MyAppId "{{8F3C2A41-7B5E-4D9A-A1C6-2E8D4F6B9C03}"
+
+; 版本号：由 build.ps1 读 src-tauri\tauri.conf.json 后用 /DMyAppVersion=... 传进来
+; （CI 里则来自 git tag）。保留一个兜底默认值，方便直接用 ISCC 编译本脚本。
+; ★ 要改版本号请改 tauri.conf.json —— 两处各写一个版本号必然会漂移，
+;   表现是「安装包文件名 / 界面显示 / 程序属性」三个版本号对不上。
+#ifndef MyAppVersion
+  #define MyAppVersion "0.41.0"
+#endif
 
 ; 相对本 .iss 文件定位构建产物；若使用自定义 target 目录，
 ; 可通过 /DMySourceDir=... 覆盖
