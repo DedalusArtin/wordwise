@@ -94,6 +94,12 @@ fn default_lang() -> String {
     "en".to_string()
 }
 
+/// 文本里是否含汉字（CJK 统一表意文字）。用于区分「中文释义」与「原文释义」。
+fn contains_han(s: &str) -> bool {
+    s.chars()
+        .any(|c| matches!(c as u32, 0x3400..=0x4DBF | 0x4E00..=0x9FFF | 0xF900..=0xFAFF))
+}
+
 impl WordEntry {
     pub fn new(word: impl Into<String>) -> Self {
         Self {
@@ -145,6 +151,35 @@ impl WordEntry {
             .first()
             .map(|s| s.definition.clone())
             .unwrap_or_default()
+    }
+
+    /// 按偏好挑一条释义文本。
+    ///
+    /// 背景：同一个词条可能同时拿到「中文释义」（有道系源）和
+    /// 「英文/原文释义」（freedictionaryapi 等）。背日语时把英文释义
+    /// 摆在题面上是没意义的 —— 该显示中文。所以释义语言要可切换：
+    ///
+    /// - `"zh"`  → 优先含汉字的义项；
+    /// - `"src"` → 优先**不含**汉字的义项（词典给出的原文释义）；
+    /// - 其它（`"auto"` / 空）→ 第一条，保持历史行为。
+    ///
+    /// 找不到对应语种时一律回退到第一条，绝不返回空串把题面搞没。
+    pub fn definition_in(&self, pref: &str) -> String {
+        let all: Vec<&Sense> = self
+            .senses
+            .iter()
+            .filter(|s| !s.definition.trim().is_empty())
+            .collect();
+        let Some(first) = all.first() else {
+            return String::new();
+        };
+        let pick = match pref {
+            "zh" => all.iter().find(|s| contains_han(&s.definition)),
+            "src" => all.iter().find(|s| !contains_han(&s.definition)),
+            _ => None,
+        };
+        pick.map(|s| s.definition.clone())
+            .unwrap_or_else(|| first.definition.clone())
     }
 
     /// 该词条是否带至少一条可用例句（需求 4：例句模式）。
@@ -358,6 +393,14 @@ fn default_remote_book_lang() -> String {
 /// AI 讲解语言的默认值：简体中文。
 fn default_explain_lang() -> String {
     "zh".to_string()
+}
+
+/// 互译方向的源语言默认值：自动检测。
+///
+/// 用户输入什么语言是不可预知的（中文母语者既会查英文词也会查日语词），
+/// 让用户每次先手动指定源语言是反直觉的，所以默认交给检测。
+fn default_source_lang() -> String {
+    crate::translate::AUTO.to_string()
 }
 
 /// 一条可下载的词库候选（内置目录，需求 5）。
@@ -589,6 +632,13 @@ pub struct FieldMapping {
     pub mnemonic: String,
 }
 
+/// 默认的本地大模型服务地址（LM Studio 的出厂端口）。
+///
+/// 抽成常量是因为它有两个用途，必须始终一致：
+///   1. [`LlmConfig::default`] 的初值；
+///   2. 「一键部署」停止后 / 检测到托管服务已不在时，把地址还回这里。
+pub const LLM_BASE_DEFAULT: &str = "http://127.0.0.1:1234/v1";
+
 /// LM Studio 连接配置。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LlmConfig {
@@ -609,7 +659,7 @@ pub struct LlmConfig {
 impl Default for LlmConfig {
     fn default() -> Self {
         Self {
-            base_url: "http://127.0.0.1:1234/v1".to_string(),
+            base_url: LLM_BASE_DEFAULT.to_string(),
             model: String::new(),
             api_key: "lm-studio".to_string(),
             temperature: 0.6,
@@ -828,7 +878,28 @@ pub struct NetReport {
 ///     「只用简体中文」**的默认人设换成新的语言中性人设 —— 否则用户把讲解
 ///     语言改成日语/英语后，模型仍被旧人设按中文输出（这正是用户报的
 ///     「选了目标语言但 AI 讲解没变」）。
-pub const CONFIG_VERSION: u32 = 4;
+/// v5：把 `source_lang` 由空串明确成 `auto`（自动检测），顶部语言控件
+///     升级为「源语言 ⇄ 目标语言」的互译方向选择器。
+pub const CONFIG_VERSION: u32 = 5;
+
+/// 一条翻译历史记录（需求 5：历史记录与收藏）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TransRecord {
+    pub id: i64,
+    /// 源语言（自动检测后会写成检测结果）
+    pub source_lang: String,
+    /// 目标语言
+    pub target_lang: String,
+    /// 原文
+    pub src_text: String,
+    /// 译文
+    pub dst_text: String,
+    /// 产出译文的引擎：youdao / llm
+    pub engine: String,
+    /// 是否被收藏
+    pub favorite: bool,
+    pub created_at: i64,
+}
 
 /// 应用全局配置。
 ///
@@ -850,11 +921,16 @@ pub struct AppConfig {
     /// 迁移，迁移完写回具体版本号，之后就不再重复执行。
     #[serde(default)]
     pub config_version: Option<u32>,
-    /// 当前学习的目标语言
+    /// 当前学习的目标语言，同时也是**互译方向的目标语言**。
     pub target_lang: String,
-    /// 查询时的源语言（「语言转换方向」需求 7）。
-    /// 空字符串表示自动识别。
-    #[serde(default)]
+    /// **互译方向的源语言**（需求 1）。取 [`crate::translate::AUTO`]（`"auto"`）
+    /// 表示自动检测，否则是一个具体语言码。
+    ///
+    /// 与 [`AppConfig::target_lang`] 一起构成顶部那个「源语言 ⇄ 目标语言」
+    /// 方向选择器。查词页与翻译页共用同一份，切换即时落盘。
+    ///
+    /// 老配置里这个字段是空串（当时唯一的语言下拉已被合并），迁移时补成 `auto`。
+    #[serde(default = "default_source_lang")]
     pub source_lang: String,
     /// **AI 讲解语言**：所有 AI 讲解、追问回答、例句译文的输出语言。
     ///
@@ -892,6 +968,15 @@ pub struct AppConfig {
     pub srs: SrsConfig,
     /// 词典源
     pub dict_sources: Vec<DictSourceConfig>,
+    /// 启动 WordWise 时**自动拉起**托管的 llama-server（默认关）。
+    ///
+    /// 为什么默认关：1.7B Q4 跑起来常驻约 1.5GB 内存。很多用户只是来查个词，
+    /// 为这个常驻一个大模型进程不值得。所以把选择权交给用户 ——
+    /// 用内置服务用得多的人打开它，之后就不用再管启动的事。
+    ///
+    /// 关掉它也不等于「不能用」：左下角状态条上随时可以一键启停。
+    #[serde(default)]
+    pub auto_start_local_llm: bool,
 }
 
 impl Default for AppConfig {
@@ -903,7 +988,7 @@ impl Default for AppConfig {
             // 刻意留空：新装用户也会走一次迁移，由迁移负责写入具体版本号。
             config_version: None,
             target_lang: "en".to_string(),
-            source_lang: String::new(),
+            source_lang: default_source_lang(),
             // 默认中文：本软件的用户界面是中文，讲解默认也用中文最省心。
             explain_lang: default_explain_lang(),
             explain_auto_translate: true,
@@ -915,6 +1000,8 @@ impl Default for AppConfig {
             sidebar_width: 380,
             srs: SrsConfig::default(),
             dict_sources: crate::dict::builtin::default_sources(),
+            // 默认不自动启动，见字段注释
+            auto_start_local_llm: false,
         }
     }
 }
@@ -956,5 +1043,62 @@ impl Default for SrsConfig {
             leech_min_reviews: 3,
             mastered_repetitions: 6,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn entry_with(defs: &[(&str, &str)]) -> WordEntry {
+        WordEntry {
+            word: "hello".into(),
+            lang: "en".into(),
+            senses: defs
+                .iter()
+                .map(|(pos, d)| Sense {
+                    pos: (*pos).into(),
+                    definition: (*d).into(),
+                    examples: vec![],
+                })
+                .collect(),
+            ..Default::default()
+        }
+    }
+
+    /// 默认行为必须保持：不指定偏好时取第一条，历史题面不受影响。
+    #[test]
+    fn definition_defaults_to_first_sense() {
+        let e = entry_with(&[("n.", "你好"), ("int.", "喂")]);
+        assert_eq!(e.definition_in(""), "你好");
+        assert_eq!(e.definition_in("auto"), "你好");
+        assert_eq!(e.primary_definition(), "你好");
+    }
+
+    /// 背日语/英语教材要中文释义：即使词典先给的是英文解释，也要挑出中文那条。
+    #[test]
+    fn definition_prefers_chinese_when_requested() {
+        let e = entry_with(&[("n.", "a greeting"), ("n.", "你好；问候")]);
+        assert_eq!(e.definition_in("zh"), "你好；问候");
+    }
+
+    /// 想练英英释义时反过来：优先不含汉字的那条。
+    #[test]
+    fn definition_prefers_source_language_when_requested() {
+        let e = entry_with(&[("n.", "你好；问候"), ("n.", "a greeting")]);
+        assert_eq!(e.definition_in("src"), "a greeting");
+    }
+
+    /// 找不到对应语种时要回退到第一条，绝不能返回空串把题面搞没。
+    #[test]
+    fn definition_falls_back_instead_of_empty() {
+        let only_en = entry_with(&[("n.", "a greeting")]);
+        assert_eq!(only_en.definition_in("zh"), "a greeting");
+
+        let only_zh = entry_with(&[("n.", "你好")]);
+        assert_eq!(only_zh.definition_in("src"), "你好");
+
+        let none = entry_with(&[("n.", "   ")]);
+        assert_eq!(none.definition_in("zh"), "");
     }
 }

@@ -10,10 +10,19 @@
 #    .\build.ps1 -Clean          先清理再编译
 #    .\build.ps1 -Run            编译完自动启动程序
 #    .\build.ps1 -IsccPath "..." 手工指定 ISCC.exe 路径
+#    .\build.ps1 -ModelsDir "D:\WordWise\data\models"   指定「含模型」便携包的模型来源
+#    .\build.ps1 -SkipModelsZip  只出「不带模型」的便携包
+#
+#  产物（installer\output\）：
+#    WordWise-Setup-<版本>.exe                     安装程序
+#    WordWise-<版本>-portable.zip                  便携包，不含模型（小）
+#    WordWise-<版本>-portable-with-models.zip      便携包，含已下载的模型（大，解压就能用 AI）
 #
 #  说明：
 #    - 前端资源（src/index.html、src/js、src/css）在编译时嵌入 exe，
 #      改了前端必须重新编译才生效。
+#    - 便携包里会写一个空的 portable.txt，运行时据此把数据放在
+#      exe 同级 data\，不写 C 盘；代价是删掉便携目录会连词库一起删。
 #    - 脚本自动定位 Rust 工具链与 Inno Setup，无需手工设环境变量。
 #    - 本文件必须保存为「UTF-8 with BOM」，否则 Windows PowerShell 5.1
 #      会把中文按 ANSI 解码导致语法错误。
@@ -27,7 +36,11 @@ param(
     [switch]$Upload,
     [switch]$Run,
     [string]$IsccPath = "",
-    [string]$TargetDir = ""
+    [string]$TargetDir = "",
+    # 带模型便携包要从哪里取 .gguf；不填则自动探测本机数据目录
+    [string]$ModelsDir = "",
+    # 只出「不带模型」的便携包（模型动辄 1GB+，CI 上没必要出两份）
+    [switch]$SkipModelsZip
 )
 
 $ErrorActionPreference = "Stop"
@@ -46,7 +59,7 @@ $DefaultIscc      = "G:\Programming\07-utils\Inno Setup 7\ISCC.exe"
 $ExpectedIsccMajor = 7
 
 # 版本号统一从 tauri.conf.json 读，避免与安装包、界面显示的版本脱节
-$AppVersion = "0.35.0"
+$AppVersion = "0.41.0"
 try {
     $cfgPath = Join-Path $Root "src-tauri\tauri.conf.json"
     $cfg = Get-Content $cfgPath -Raw -ErrorAction Stop | ConvertFrom-Json
@@ -285,6 +298,34 @@ Write-Step "便携版输出"
 $distDir = Join-Path $Root "dist"
 New-Item -ItemType Directory -Path $distDir -Force | Out-Null
 Copy-Item $exe (Join-Path $distDir "wordwise.exe") -Force
+
+# ---- 随包分发 llama.cpp 引擎（本地大模型一键部署用）----
+#
+# 为什么必须随包：运行时从 GitHub Release 下载引擎，实测 gh-proxy 被限速到
+# ~40KB/s，33MB 要下 14 分钟 —— 这个等待没有任何产品能接受。
+# 随包后「一键部署」只剩下载模型（走魔搭 14.5MB/s，1.1GB 约 80 秒）。
+#
+# 只拷 exe + dll，不拷源 zip（那是给想自己解包的人留的）。
+# 引擎缺失时不影响主程序，只是「一键部署」回退到联网下载。
+$engineSrc = Join-Path $Root "vendor\llama"
+$engineExe = Join-Path $engineSrc "llama-server.exe"
+if (Test-Path $engineExe) {
+    $engineDst = Join-Path $distDir "vendor\llama"
+    New-Item -ItemType Directory -Path $engineDst -Force | Out-Null
+    # ★ 不能用 `-Include @("*.exe","*.dll")`：
+    #   Get-ChildItem 的 -Include 只在路径带通配符或加了 -Recurse 时才生效，
+    #   否则静默返回空 → 引擎一个文件都没拷，便携版里「一键部署」会回退到
+    #   联网下载（14 分钟）。用 Where-Object 过滤扩展名才稳。
+    Get-ChildItem $engineSrc -File -ErrorAction SilentlyContinue |
+        Where-Object { $_.Extension -in @('.exe', '.dll') } |
+        ForEach-Object { Copy-Item $_.FullName $engineDst -Force }
+    $engMB = [math]::Round(((Get-ChildItem $engineDst -File | Measure-Object -Property Length -Sum).Sum) / 1MB, 1)
+    Write-Ok "已随包 llama.cpp 引擎 → dist\vendor\llama（$engMB MB）"
+} else {
+    Write-Warn2 "未找到 vendor\llama\llama-server.exe，便携版不带引擎"
+    Write-Dim "「一键部署」将回退到联网下载（gh-proxy 限速，约 14 分钟）"
+}
+
 if (Test-Path (Join-Path $Root "README.md")) {
     Copy-Item (Join-Path $Root "README.md") (Join-Path $distDir "README.md") -Force
 }
@@ -298,23 +339,49 @@ $portableNote = Join-Path $Root "installer\便携版说明.txt"
 if (Test-Path $portableNote) {
     Copy-Item $portableNote (Join-Path $distDir "便携版说明.txt") -Force
 }
+
+# ---- ★ 便携标记：让数据跟着程序目录走（自包含）----
+#
+# 空内容的 portable.txt 就是「这是便携模式」的约定，运行时据此把数据
+# 放到 exe 同级 data\。好处：整个文件夹拷到 U 盘就能带着走，不写 C 盘。
+# 代价：删掉这个文件夹会连词库一起删 —— 说明文件里已经写清楚。
+#
+# 用 .NET 直接写空文件（不用 Set-Content，避免带 BOM）。
+$portableMark = Join-Path $distDir "portable.txt"
+[System.IO.File]::WriteAllText($portableMark, "", (New-Object System.Text.UTF8Encoding($false)))
+Write-Ok "已写入便携标记 portable.txt（数据将落在 exe 同级 data\）"
 Write-Ok "便携版目录：$distDir（双击 wordwise.exe 即可运行）"
 
-# 便携版压缩包，与安装包并列放在 installer\output
-$portableZip = Join-Path $Root "installer\output\WordWise-$AppVersion-portable.zip"
-New-Item -ItemType Directory -Path (Split-Path $portableZip) -Force | Out-Null
+# ---- 生成 zip 的公共实现 ----
+#
 # ★ 不要用 Remove-Item 删旧 zip，也不要用 Compress-Archive -Force：
 #   两者内部都会先删目标文件，而删除会被安全策略 fail-closed 拦截
 #   （[safe-delete][SAFE_DELETE_FAIL_CLOSED]），zip 一存在就再也生成不出来。
 #   改用 .NET 的 FileMode::Create —— 原地截断覆盖，全程不删除。
-try {
-    Add-Type -AssemblyName System.IO.Compression.FileSystem -ErrorAction SilentlyContinue
-    $base = (Resolve-Path $distDir).Path
-    $fs = [System.IO.File]::Open($portableZip, [System.IO.FileMode]::Create, [System.IO.FileAccess]::Write)
+Add-Type -AssemblyName System.IO.Compression.FileSystem -ErrorAction SilentlyContinue
+
+function New-DirZip {
+    param(
+        [string]$BaseDir,
+        [string]$ZipPath,
+        # 顶层目录名：命中的整棵子树都不打包。
+        # ★ 用它排除运行期产生的 data\：只要在 dist\ 下双击过一次 wordwise.exe，
+        #   那里就会多出 wordwise.db / -wal / -shm。不排除的话，下一次构建
+        #   打出来的便携包里就带着一份**别人的**学习数据（还可能是演示数据），
+        #   用户解压就「继承了」一份不该有的词库。
+        [string[]]$SkipTopLevel = @()
+    )
+    New-Item -ItemType Directory -Path (Split-Path $ZipPath) -Force | Out-Null
+    $base = (Resolve-Path $BaseDir).Path
+    $fs = [System.IO.File]::Open($ZipPath, [System.IO.FileMode]::Create, [System.IO.FileAccess]::Write)
     try {
         $zip = New-Object System.IO.Compression.ZipArchive($fs, [System.IO.Compression.ZipArchiveMode]::Create)
         try {
-            Get-ChildItem $base -Recurse -File | ForEach-Object {
+            Get-ChildItem $base -Recurse -File | Where-Object {
+                $rel = $_.FullName.Substring($base.Length + 1)
+                $top = $rel.Split('\')[0]
+                $SkipTopLevel -notcontains $top
+            } | ForEach-Object {
                 $rel = $_.FullName.Substring($base.Length + 1).Replace('\', '/')
                 [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile(
                     $zip, $_.FullName, $rel,
@@ -322,10 +389,105 @@ try {
             }
         } finally { $zip.Dispose() }
     } finally { $fs.Close() }
-    $zipMB = [math]::Round((Get-Item $portableZip).Length / 1MB, 2)
-    Write-Ok "便携版压缩包：$portableZip（$zipMB MB）"
+    return [math]::Round((Get-Item $ZipPath).Length / 1MB, 2)
+}
+
+$portableZip = Join-Path $Root "installer\output\WordWise-$AppVersion-portable.zip"
+try {
+    $zipMB = New-DirZip -BaseDir $distDir -ZipPath $portableZip -SkipTopLevel @('data')
+    Write-Ok "便携版压缩包（不含模型）：$portableZip（$zipMB MB）"
 } catch {
     Write-Warn2 "便携版压缩包生成失败：$($_.Exception.Message)"
+}
+
+# ---- 便携版第二形态：带上已下载的模型 ----
+#
+# 为什么要有这一份：模型单档 400MB~1.1GB，走网下载对用户是实打实的等待。
+# 给一个「解压就能用 AI」的包，比让他下完程序再下模型友好得多。
+# 代价是包很大，所以做成**可选**的第二份，不覆盖那份小的。
+if (-not $SkipModelsZip) {
+    Write-Step "便携版（含模型）"
+
+    # 找本机的模型目录：显式参数优先，否则按运行时同样的优先级探测
+    $srcModels = $null
+    if ($ModelsDir) {
+        if (Test-Path $ModelsDir) { $srcModels = (Resolve-Path $ModelsDir).Path }
+        else { Write-Warn2 "指定的 -ModelsDir 不存在：$ModelsDir" }
+    } else {
+        $cands = @()
+        if ($env:WORDWISE_DATA_DIR) { $cands += (Join-Path $env:WORDWISE_DATA_DIR "models") }
+        $cands += (Join-Path $Root "data\models")
+        if ($env:APPDATA) { $cands += (Join-Path $env:APPDATA "WordWise\models") }
+        foreach ($c in $cands) {
+            if ($c -and (Test-Path $c)) {
+                $found = Get-ChildItem $c -Filter *.gguf -File -ErrorAction SilentlyContinue
+                if ($found) { $srcModels = (Resolve-Path $c).Path; break }
+            }
+        }
+    }
+
+    $ggufs = @()
+    if ($srcModels) {
+        $ggufs = @(Get-ChildItem $srcModels -Filter *.gguf -File -ErrorAction SilentlyContinue)
+    }
+
+    if ($ggufs.Count -eq 0) {
+        Write-Warn2 "本机没有已下载的模型（.gguf），跳过「含模型」便携包"
+        Write-Dim "相关候选目录："
+        Write-Dim ("  " + (Join-Path $env:APPDATA "WordWise\models"))
+        Write-Dim ("  " + (Join-Path $Root "data\models"))
+        Write-Dim "想出一个带模型的包：先在程序里下好模型，或用 -ModelsDir 指定目录"
+    } else {
+        # 用独立的 staging 目录，避免把 GB 级模型塞进 dist\ 污染那份小包。
+        #
+        # ★ 必须先清干净再建：PowerShell 的 `Copy-Item $src $dst -Recurse` 在
+        #   **$dst 已存在**时会把 $src 整个塞进 $dst 里面（变成 dst\dist\...），
+        #   而不是把内容合并过去 —— 这是最容易在「第二次构建」时才炸的坑。
+        #   所以这里显式「先删 → 重建 → 只拷内容」。
+        $distModelsDir = Join-Path $Root "dist-models"
+        $stale = $false
+        if (Test-Path $distModelsDir) {
+            try { Remove-Item $distModelsDir -Recurse -Force -ErrorAction Stop }
+            catch { $stale = $true; Write-Warn2 "旧的 dist-models 清不掉：$($_.Exception.Message)" }
+        }
+
+        if ($stale) {
+            # 宁可不出这份包，也不要打出一个混着上次残留的包
+            Write-Warn2 "跳过「含模型」便携包（staging 目录不干净，免得把残留文件打进去）"
+        } else {
+            New-Item -ItemType Directory -Path $distModelsDir -Force | Out-Null
+            # 只拷「程序文件」：跳过 dist\data（那是本机跑过以后留下的运行期数据）。
+            # 用逐个 Get-ChildItem 而不是 `Copy-Item $src $dst -Recurse`，
+            # 后者在 $dst 已存在时会把 $src 塞进 $dst 里面，多出一层目录。
+            Get-ChildItem $distDir -Force | Where-Object { $_.Name -ne 'data' } | ForEach-Object {
+                Copy-Item $_.FullName $distModelsDir -Recurse -Force
+            }
+
+            # 这一份的 data\ 是我们**自己造**的：里面只有模型，没有数据库
+            $modelsDst = Join-Path $distModelsDir "data\models"
+            New-Item -ItemType Directory -Path $modelsDst -Force | Out-Null
+            $totalMB = 0.0
+            foreach ($g in $ggufs) {
+                Copy-Item $g.FullName $modelsDst -Force
+                $totalMB += $g.Length / 1MB
+            }
+            Write-Ok "已放入 $($ggufs.Count) 个模型 → dist-models\data\models（$([math]::Round($totalMB, 1)) MB）"
+            foreach ($g in $ggufs) { Write-Dim "  $($g.Name)" }
+
+            # 顺手校验一下 staging 里自包含性真的成立
+            if (-not (Test-Path (Join-Path $distModelsDir "portable.txt"))) {
+                Write-Warn2 "dist-models 里没有 portable.txt，解压后数据不会落在程序目录"
+            }
+
+            $modelsZip = Join-Path $Root "installer\output\WordWise-$AppVersion-portable-with-models.zip"
+            try {
+                $mzMB = New-DirZip -BaseDir $distModelsDir -ZipPath $modelsZip
+                Write-Ok "便携版压缩包（含模型）：$modelsZip（$mzMB MB）"
+            } catch {
+                Write-Warn2 "含模型便携包生成失败：$($_.Exception.Message)"
+            }
+        }
+    }
 }
 
 if ($SkipInstaller) {
@@ -468,7 +630,9 @@ Write-Host "  构建完成" -ForegroundColor Green
 Write-Host ("=" * 60) -ForegroundColor DarkGray
 if ($setup) { Write-Host "  安装程序：$($setup.FullName)" -ForegroundColor White }
 Write-Host "  便携版目录：$distDir" -ForegroundColor White
-if (Test-Path $portableZip) { Write-Host "  便携版压缩包：$portableZip" -ForegroundColor White }
+if (Test-Path $portableZip) { Write-Host "  便携包（不带模型）：$portableZip" -ForegroundColor White }
+$modelsZipFinal = Join-Path $Root "installer\output\WordWise-$AppVersion-portable-with-models.zip"
+if (Test-Path $modelsZipFinal) { Write-Host "  便携包（含模型）：$modelsZipFinal" -ForegroundColor White }
 Write-Host "  可执行文件：$exe" -ForegroundColor White
 Write-Host ""
 Write-Host "提示：修改前端（src/js、src/css、src/index.html）后必须重跑本脚本，" -ForegroundColor DarkGray

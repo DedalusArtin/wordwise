@@ -1,7 +1,101 @@
 /* ============================================================
    settings.js —— 设置面板
-   记忆辅助开关（需求 3）、本地模型、词典源配置（需求 6）
+   记忆辅助开关（需求 3）、AI 服务（本地模型 / 在线 API）、词典源配置（需求 6）
    ============================================================ */
+
+/* ------------------------------------------------------------
+   AI 服务来源预设。
+
+   为什么只放「OpenAI 兼容」的服务：后端 llm 客户端只会说这一套协议
+   （/chat/completions + Bearer Key）。收窄到这个范围，用户点一下就能用，
+   不用自己拼地址，也不用担心选了个程序不支持的。
+
+   地址一律写到「版本号那一段」为止（`.../v1`、`.../v4`）：
+   后端 endpoint() 见到版本号后缀就直接接 `/chat/completions`，
+   见到别的才补 `/v1`。多写一段会拼成 `/v1/v1/...`。
+   ------------------------------------------------------------ */
+const AI_PRESETS = [
+  {
+    id: 'local-managed', name: '本机一键部署（免费离线）',
+    base: '', model: '', local: true,
+    hint: '用下载到本机的 Qwen 模型。不需要 API Key，不联网，数据不出机器。' +
+          '先在下个面板「本地大模型一键部署」里下好模型，再点左下角状态条启动。',
+  },
+  {
+    id: 'lm-studio', name: '本机 LM Studio（免费离线）',
+    base: 'http://127.0.0.1:1234/v1', model: '', local: true,
+    hint: '先在 LM Studio 里加载模型，再到 Developer 标签点 Start Server，' +
+          '然后回来点「测试连接」。地址栏保持默认的 1234 端口即可。',
+  },
+  {
+    id: 'deepseek', name: 'DeepSeek（深度求索）',
+    base: 'https://api.deepseek.com/v1', model: 'deepseek-chat',
+    keyUrl: 'https://platform.deepseek.com/api_keys',
+    hint: '国内直连可用，中文讲解质量好、价格便宜，是最推荐的在线选择。',
+  },
+  {
+    id: 'dashscope', name: '阿里云通义千问',
+    base: 'https://dashscope.aliyuncs.com/compatible-mode/v1', model: 'qwen-plus',
+    keyUrl: 'https://bailian.console.aliyun.com/',
+    hint: '用「兼容模式」地址（带 compatible-mode）。国内直连可用。',
+  },
+  {
+    id: 'moonshot', name: '月之暗面 Kimi',
+    base: 'https://api.moonshot.cn/v1', model: 'moonshot-v1-8k',
+    keyUrl: 'https://platform.moonshot.cn/console/api-keys',
+    hint: '国内直连可用，长文本见长。',
+  },
+  {
+    id: 'zhipu', name: '智谱 GLM',
+    base: 'https://open.bigmodel.cn/api/paas/v4', model: 'glm-4-flash',
+    keyUrl: 'https://bigmodel.cn/usercenter/apikeys',
+    hint: 'glm-4-flash 目前免费额度较大。注意它的地址结尾是 v4 而不是 v1。',
+  },
+  {
+    id: 'siliconflow', name: '硅基流动 SiliconFlow',
+    base: 'https://api.siliconflow.cn/v1', model: 'Qwen/Qwen2.5-7B-Instruct',
+    keyUrl: 'https://cloud.siliconflow.cn/account/ak',
+    hint: '一家聚合服务，一个 Key 能调很多开源模型，模型名要写全（带 `组织/模型`）。',
+  },
+  {
+    id: 'openrouter', name: 'OpenRouter（聚合，需代理）',
+    base: 'https://openrouter.ai/api/v1', model: '',
+    keyUrl: 'https://openrouter.ai/keys',
+    hint: '聚合了各家模型，一个 Key 通用。服务器在境外，' +
+          '一般要在「设置 → 网络与代理」里打开代理才连得上。',
+  },
+  {
+    id: 'openai', name: 'OpenAI（需代理）',
+    base: 'https://api.openai.com/v1', model: 'gpt-4o-mini',
+    keyUrl: 'https://platform.openai.com/api-keys',
+    hint: '服务器在境外，一般要在「网络 → 代理」里打开代理才连得上。',
+  },
+  {
+    id: 'custom', name: '自定义（任意 OpenAI 兼容服务）',
+    base: '', model: '',
+    hint: '填其它 OpenAI 兼容服务的地址即可。地址写到版本号那段为止；' +
+          '如果服务不带版本号（如自建网关），直接填到根路径也行。',
+  },
+];
+
+/** 一键部署托管的端口段，必须与后端 localllm::pick_port 保持一致。 */
+const MANAGED_PORT_MIN = 18080;
+const MANAGED_PORT_MAX = 18180;
+
+/** 从地址反推属于哪个预设，让下拉框跟着手填的地址走。 */
+function detectPreset(base) {
+  const b = String(base || '').trim().replace(/\/+$/, '');
+  if (!b) return 'custom';
+  const lower = b.toLowerCase();
+  // 托管服务端口不固定（18080 起找一个空的），只能按段认
+  const m = lower.match(/(?:127\.0\.0\.1|localhost|\[::1\]):(\d+)/);
+  if (m) {
+    const p = parseInt(m[1], 10);
+    if (p >= MANAGED_PORT_MIN && p < MANAGED_PORT_MAX) return 'local-managed';
+  }
+  const hit = AI_PRESETS.find((p) => p.base && p.base.replace(/\/+$/, '') === b);
+  return hit ? hit.id : 'custom';
+}
 
 const Settings = (() => {
   const { API } = window.WordWiseAPI;
@@ -31,11 +125,13 @@ const Settings = (() => {
     setVal('set-batch', config.study.batch_size);
     setVal('set-daily', config.study.daily_limit);
 
-    // 本地模型
+    // AI 服务：地址 / 模型 / Key
     setVal('set-llm-url', config.llm.base_url);
     setVal('set-llm-model', config.llm.model);
+    setVal('set-llm-key', config.llm.api_key || '');
     setVal('set-llm-temp', config.llm.temperature);
     setVal('set-llm-maxtok', config.llm.max_tokens);
+    syncPresetUI();
 
     // 网络与代理
     const net = config.network || {};
@@ -79,6 +175,9 @@ const Settings = (() => {
       sources = config.dict_sources || [];
     }
     renderSources();
+
+    // 朗读音色/语速（存在 localStorage，不属于后端配置）
+    loadSpeak();
   }
 
   function setVal(id, v) {
@@ -107,6 +206,10 @@ const Settings = (() => {
 
     config.llm.base_url = getVal('set-llm-url') || 'http://127.0.0.1:1234/v1';
     config.llm.model = getVal('set-llm-model');
+    // Key 留空就写空串（请求时不带 Authorization 头）。不能「留空则保持原值」：
+    // 用户清掉 Key 就是想停用它，偷偷留着旧的反而会拿废弃 Key 去请求，
+    // 收到 401 还找不到原因。
+    config.llm.api_key = getVal('set-llm-key').trim();
     config.llm.temperature = getNum('set-llm-temp', 0.6);
     config.llm.max_tokens = getNum('set-llm-maxtok', 1024);
 
@@ -492,6 +595,9 @@ const Settings = (() => {
       if (config) {
         config.llm.base_url = getVal('set-llm-url') || config.llm.base_url;
         config.llm.model = getVal('set-llm-model');
+        // 测连接必须带上当前填的 Key，否则在线 API 必然测出 401，
+        // 用户会以为「地址填对了却连不上」
+        config.llm.api_key = getVal('set-llm-key').trim();
         await API.saveConfig(config);
       }
       const st = await API.llmStatus();
@@ -507,11 +613,185 @@ const Settings = (() => {
     }
   }
 
+  /* ---------------- AI 服务来源 ---------------- */
+
+  /** 按当前地址刷新「服务来源」下拉与提示文案。 */
+  function syncPresetUI() {
+    const sel = document.getElementById('set-llm-preset');
+    if (!sel) return;
+    // 只在第一次建 option：每次同步都重造会闪，还会把用户当前的选择冲掉
+    if (!sel.options || !sel.options.length) {
+      sel.innerHTML = AI_PRESETS
+        .map((p) => `<option value="${U().esc(p.id)}">${U().esc(p.name)}</option>`)
+        .join('');
+    }
+    const base = getVal('set-llm-url') || (config && config.llm.base_url) || '';
+    const id = detectPreset(base);
+    sel.value = id;
+    renderPresetHint(id);
+  }
+
+  function renderPresetHint(id) {
+    const p = AI_PRESETS.find((x) => x.id === id) || AI_PRESETS[AI_PRESETS.length - 1];
+    const hint = document.getElementById('llm-preset-hint');
+    if (hint) hint.textContent = p.hint || '';
+    // 「申请 API Key」只在需要 Key 的来源下露面，本机模型点了也没意义
+    const btn = document.getElementById('btn-llm-getkey');
+    if (btn) {
+      btn.classList.toggle('hidden', !p.keyUrl);
+      if (p.keyUrl) btn.dataset.url = p.keyUrl;
+    }
+  }
+
+  /**
+   * 选一个来源：带出地址和推荐模型。
+   *
+   * 刻意**不动 API Key**：很多人会在几家中来回试，一把一清会逼着反复粘贴。
+   */
+  async function applyPreset(id) {
+    const p = AI_PRESETS.find((x) => x.id === id);
+    if (!p) return;
+    renderPresetHint(id);
+
+    // 自定义：地址和模型都留给用户自己填
+    if (id === 'custom') return;
+
+    if (id === 'local-managed') {
+      // 托管服务的端口是运行时挑的（18080 起找一个空闲的），没有静态地址可填，
+      // 只能问后端实际监听在哪。没启动就什么都别改 —— 填个死端口更误导。
+      try {
+        const s = await API.localLlmStatus();
+        const sv = (s && s.server) || {};
+        if (sv.running && sv.port) {
+          setVal('set-llm-url', `http://127.0.0.1:${sv.port}/v1`);
+        } else {
+          U().toast('本机服务还没启动：点左下角状态条启动后，地址会自动填上', 'err');
+        }
+      } catch (e) { /* 读不到就保持原样 */ }
+      setVal('set-llm-model', '');
+      return;
+    }
+
+    if (p.base) setVal('set-llm-url', p.base);
+    // 本机来源把模型清空，让后端走「自动选第一个已加载模型」
+    setVal('set-llm-model', p.model || '');
+  }
+
+  function toggleKeyVisible() {
+    const inp = document.getElementById('set-llm-key');
+    const btn = document.getElementById('btn-llm-key-eye');
+    if (!inp) return;
+    const show = inp.type === 'password';
+    inp.type = show ? 'text' : 'password';
+    if (btn) btn.textContent = show ? '隐藏' : '显示';
+  }
+
+  /* ---- 朗读与发音（离线系统语音） ---- */
+
+  /**
+   * 填充音色下拉。
+   *
+   * 音色列表来自 WebView 的 `speechSynthesis`，**首次调用常常是空的**
+   * （引擎异步加载），所以这里在 `voiceschanged` 时再刷一次；一直为空就
+   * 如实告诉用户「系统里没装语音包」，而不是给一个永远空的下拉。
+   */
+  function renderSpeakVoices() {
+    const sel = document.getElementById('set-speak-voice');
+    if (!sel) return;
+    const S = window.Speak;
+    const list = (S && S.voices) ? S.voices() : [];
+    const pref = (S && S.voicePref) ? S.voicePref() : '';
+    const prefName = pref.includes('|') ? pref.slice(pref.indexOf('|') + 1) : '';
+
+    if (!list.length) {
+      sel.innerHTML = '<option value="">（系统未提供可用语音）</option>';
+      const hint = document.getElementById('set-speak-voices-hint');
+      if (hint) {
+        hint.textContent = '这台机器上暂时读不到系统语音。可在「Windows 设置 → 时间和语言 → 语音」'
+          + '安装语音包后重开本程序；朗读按钮届时会自动可用。';
+      }
+      return;
+    }
+
+    // 按语言分组，方便在几十个音色里找
+    const byLang = {};
+    list.forEach(v => { (byLang[v.lang] = byLang[v.lang] || []).push(v); });
+    const langs = Object.keys(byLang).sort();
+    sel.innerHTML = '<option value="">自动（按语言挑最好的音色）</option>'
+      + langs.map(l => `<optgroup label="${U().esc(l)}">`
+        + byLang[l].map(v => `<option value="${U().esc(v.lang + '|' + v.name)}"${v.name === prefName ? ' selected' : ''}>`
+          + `${U().esc(v.name)}${v.local ? '' : '（在线）'}</option>`).join('')
+        + '</optgroup>').join('');
+
+    const hint = document.getElementById('set-speak-voices-hint');
+    if (hint) {
+      const natural = list.filter(v => /natural|neural|online/i.test(v.name)).length;
+      hint.textContent = `检测到 ${list.length} 个系统音色，其中 ${natural} 个是神经网络音色（更自然）。`
+        + ' 选「自动」时会优先使用神经网络音色。';
+    }
+  }
+
+  function loadSpeak() {
+    const S = window.Speak;
+    if (!S) return;
+    const rate = S.ratePref ? S.ratePref() : 0.95;
+    const slider = document.getElementById('set-speak-rate');
+    if (slider) slider.value = String(rate);
+    const label = document.getElementById('set-speak-rate-val');
+    if (label) label.textContent = `${Number(rate).toFixed(2)}×`;
+    renderSpeakVoices();
+  }
+
+  function bindSpeak() {
+    const S = () => window.Speak;
+
+    document.getElementById('set-speak-voice')?.addEventListener('change', (e) => {
+      const v = e.target.value || '';
+      const i = v.indexOf('|');
+      if (i > 0) S().setVoicePref(v.slice(0, i), v.slice(i + 1));
+      else S().setVoicePref('', '');
+      U().toast('音色已保存，点「试听」确认', 'ok');
+    });
+
+    document.getElementById('set-speak-rate')?.addEventListener('input', (e) => {
+      const r = parseFloat(e.target.value) || 0.95;
+      const label = document.getElementById('set-speak-rate-val');
+      if (label) label.textContent = `${r.toFixed(2)}×`;
+      S().setRatePref(r);   // 拖动即生效，不用再点保存
+    });
+
+    document.getElementById('btn-speak-test')?.addEventListener('click', () => {
+      S().preview('Hello, this is how I read. 你好，这是朗读效果。', 'en');
+    });
+
+    document.getElementById('btn-speak-reset')?.addEventListener('click', () => {
+      S().resetPrefs();
+      loadSpeak();
+      U().toast('朗读设置已恢复默认', 'ok');
+    });
+
+    // 引擎异步加载完音色后会触发一次（首次进设置页常常还没就绪）
+    if (window.speechSynthesis) {
+      try {
+        window.speechSynthesis.onvoiceschanged = () => renderSpeakVoices();
+      } catch (e) { /* 忽略 */ }
+    }
+  }
+
   function bind() {
     document.getElementById('btn-save-settings')?.addEventListener('click', save);
     document.getElementById('btn-add-source')?.addEventListener('click', addSource);
     document.getElementById('btn-reset-sources')?.addEventListener('click', resetSources);
     document.getElementById('btn-llm-test')?.addEventListener('click', testLlm);
+    document.getElementById('set-llm-preset')?.addEventListener('change', (e) => applyPreset(e.target.value));
+    // 手填地址时让下拉跟着走，免得「下拉显示 DeepSeek、地址却是别家」
+    document.getElementById('set-llm-url')?.addEventListener('input', syncPresetUI);
+    document.getElementById('btn-llm-key-eye')?.addEventListener('click', toggleKeyVisible);
+    document.getElementById('btn-llm-getkey')?.addEventListener('click', async (e) => {
+      const url = e.currentTarget.dataset.url;
+      if (!url) return;
+      try { await API.openUrl(url); } catch (err) { U().toast(err.message, 'err'); }
+    });
     document.getElementById('btn-net-detect')?.addEventListener('click', detectNetwork);
     document.getElementById('btn-net-apply')?.addEventListener('click', applyNetwork);
     document.getElementById('set-proxy')?.addEventListener('keydown', (e) => {
@@ -536,9 +816,22 @@ const Settings = (() => {
         try { await API.setStudyOptions(config.study); } catch (e) {}
       });
     });
+
+    bindSpeak();
   }
 
-  return { bind, load, save, get config() { return config; } };
+  return {
+    bind, load, save,
+    renderSpeakVoices, loadSpeak,
+    // 预设表与识别函数也导出：冒烟测试要能直接断言「选某家带出什么地址」，
+    // 而不是靠解析 DOM 里的 option 文本去猜
+    presets: AI_PRESETS,
+    detectPreset,
+    applyPreset,
+    syncPresetUI,
+    toggleKeyVisible,
+    get config() { return config; },
+  };
 })();
 
 window.Settings = Settings;

@@ -10,6 +10,8 @@ const Pages = (() => {
   const loaders = {
     study: () => { refreshStudy(); window.Study.loadBookOptions(); },
     lookup: () => {},
+    translate: () => window.Translate.load(),
+    graph: () => window.Graph.load(),
     library: () => {
       window.Books.loadBooks();
       window.Library.loadList();
@@ -17,7 +19,7 @@ const Pages = (() => {
     leech: () => window.Leech.load(),
     plan: () => window.Plan.load(),
     stats: () => window.Stats.load(),
-    settings: () => window.Settings.load(),
+    settings: () => { window.Settings.load(); window.Maint.load(); },
   };
 
   function go(name) {
@@ -90,20 +92,42 @@ async function refreshStudy() {
 /**
  * 把自绘标题栏的「最大化」图标同步成当前状态：
  * 已最大化显示「还原」图标（❐），否则显示「最大化」图标（☐）。
+ *
+ * 注意这里是 IIFE 外的顶层函数，拿不到 App 里解构出来的 WIN / U，
+ * 只能从 window 上取。
  */
-async function syncMaxIcon(win) {
+async function syncMaxIcon() {
   const btn = document.getElementById('btn-maximize');
-  if (!btn || !win) return;
+  if (!btn) return;
+  const W = window.WordWiseAPI && window.WordWiseAPI.WIN;
+  if (!W) return;
   let maxed = false;
-  try { maxed = await win.isMaximized(); } catch (e) { return; }
+  try { maxed = await W.isMaximized(); } catch (e) { return; }
   btn.innerHTML = maxed ? '&#10098;' : '&#9633;';
   btn.title = maxed ? '还原' : '最大化';
+}
+
+/**
+ * 包一层：窗口操作失败必须说出来。
+ *
+ * 之前这四个动作直接把异常丢在 async 回调里，一旦底层不可用（比如
+ * window.__TAURI__ 不存在）就彻底静默 —— 用户看到的是「按钮点了没反应」，
+ * 我们这边一点线索都没有。宁可弹个 toast 难看，也不要这种哑失败。
+ */
+async function winAction(label, fn) {
+  if (!(window.WordWiseAPI && window.WordWiseAPI.HAS_TAURI)) return;
+  try {
+    await fn();
+  } catch (e) {
+    const msg = (e && e.message) ? e.message : String(e);
+    if (window.WW && window.WW.toast) window.WW.toast(`${label}失败：${msg}`, 'err');
+  }
 }
 
 /* ---------------- 应用主控 ---------------- */
 
 const App = (() => {
-  const { API, HAS_TAURI } = window.WordWiseAPI;
+  const { API, HAS_TAURI, WIN } = window.WordWiseAPI;
   const U = () => window.WW;
 
   let info = null;
@@ -157,33 +181,34 @@ const App = (() => {
     });
 
     // 窗口控制
-    document.getElementById('btn-minimize')?.addEventListener('click', async () => {
-      if (HAS_TAURI) {
-        const w = window.__TAURI__.window?.getCurrentWindow?.();
-        if (w) await w.minimize();
-      }
-    });
+    //
+    // ★ 一律走 WIN.*（内部是 invoke），不要用 window.__TAURI__.window ——
+    //   本项目没开 withGlobalTauri，那个全局对象根本不存在，写成它会抛
+    //   TypeError 并被 async 回调吞掉，按钮表现为「点了没反应」。
+    document.getElementById('btn-minimize')?.addEventListener('click', () =>
+      winAction('最小化', () => WIN.minimize()));
+
     // 主窗口已改为无边框（自绘标题栏），系统标题栏的「最大化/还原」没了，
     // 这里补一个自绘按钮，并把图标在 ☐ / ❐ 之间切换。
-    document.getElementById('btn-maximize')?.addEventListener('click', async () => {
-      if (HAS_TAURI) {
-        const w = window.__TAURI__.window?.getCurrentWindow?.();
-        if (w) { await w.toggleMaximize(); syncMaxIcon(w); }
-      }
-    });
+    document.getElementById('btn-maximize')?.addEventListener('click', () =>
+      winAction('最大化', async () => {
+        await WIN.toggleMaximize();
+        await syncMaxIcon();
+      }));
+
     // 双击标题栏最大化/还原，符合 Windows 操作习惯
-    document.getElementById('titlebar')?.addEventListener('dblclick', async (e) => {
+    document.getElementById('titlebar')?.addEventListener('dblclick', (e) => {
       if (e.target.closest('button') || e.target.closest('select')) return;
-      if (!HAS_TAURI) return;
-      const w = window.__TAURI__.window?.getCurrentWindow?.();
-      if (w) { await w.toggleMaximize(); syncMaxIcon(w); }
+      winAction('最大化', async () => {
+        await WIN.toggleMaximize();
+        await syncMaxIcon();
+      });
     });
-    document.getElementById('btn-close-win')?.addEventListener('click', async () => {
-      if (HAS_TAURI) {
-        const w = window.__TAURI__.window?.getCurrentWindow?.();
-        if (w) await w.hide();
-      }
-    });
+
+    // 关闭 = 隐藏到托盘（不是退出程序）。退出请用托盘菜单。
+    document.getElementById('btn-close-win')?.addEventListener('click', () =>
+      winAction('隐藏窗口', () => WIN.hide()));
+
     document.getElementById('btn-open-sidebar')?.addEventListener('click', async () => {
       try {
         await API.sidebarShow();
@@ -200,6 +225,10 @@ const App = (() => {
       } catch (e) { U().toast(e.message, 'err'); }
     });
 
+    // 互译方向选择器要先于各页面绑定：查词页与翻译页都靠它驱动
+    await window.DirPicker.loadLangs();
+    window.DirPicker.bind();
+
     // 模块初始化
     Study.bind();
     Detail.bind();
@@ -207,6 +236,12 @@ const App = (() => {
     Library.bind();
     Books.bind();
     Settings.bind();
+    window.Translate.bind();
+    window.Leech.bind();
+    window.Plan.bind();
+    window.Graph.bind();
+    window.Demo.bind();
+    window.Maint.bind();
 
     // 初始化配置
     try {
@@ -235,8 +270,10 @@ const App = (() => {
     document.addEventListener('keydown', (e) => {
       // 在输入框里按 Ctrl+数字 不该跳页
       if (window.WW && window.WW.isTypingTarget && window.WW.isTypingTarget(e.target)) return;
-      if ((e.ctrlKey || e.metaKey) && e.key >= '1' && e.key <= '7') {
-        const pages = ['study', 'lookup', 'library', 'leech', 'plan', 'stats', 'settings'];
+      // 1..9 对应导航栏顺序；新增栏目时记得同步这里，否则会按不到
+      if ((e.ctrlKey || e.metaKey) && e.key >= '1' && e.key <= '9') {
+        const pages = ['study', 'lookup', 'translate', 'graph', 'library',
+                       'leech', 'plan', 'stats', 'settings'];
         const p = pages[parseInt(e.key, 10) - 1];
         if (p) { e.preventDefault(); Pages.go(p); }
       }
@@ -282,17 +319,23 @@ const App = (() => {
       text.textContent = '检测中…';
       return;
     }
+    // 说「本地模型未连接」而用户配的是在线 API，会让人去 LM Studio 里白找一圈。
+    // 按后端给的 endpoint_kind 分开措辞。
+    const cloud = st.endpoint_kind === 'cloud';
+    const label = cloud ? '在线 API' : '本地模型';
     if (st.online) {
       dot.classList.add('online');
-      text.textContent = st.active_model
-        ? '本地模型已就绪'
-        : '已连接（无模型）';
+      text.textContent = st.active_model ? `${label}已就绪` : '已连接（无模型）';
     } else {
       dot.classList.add('offline');
-      text.textContent = '本地模型未连接';
+      text.textContent = `${label}未连接`;
     }
     const chip = document.getElementById('llm-chip');
-    if (chip) chip.title = st.message || '';
+    // ★ 别用 `chip.title = st.message` 直接覆盖：那会把 HTML 里那句
+    //   「点击查看 AI 服务」抹掉，用户就再也看不出这块是可以点的。
+    if (chip) {
+      chip.title = (st.message ? st.message + '　·　' : '') + '点击查看 AI 服务';
+    }
   }
 
   function refreshConfig() {
@@ -311,9 +354,9 @@ const App = (() => {
 
 document.addEventListener('DOMContentLoaded', () => {
   App.init();
-
-  // 点击 LLM 状态条重新检测
-  document.getElementById('llm-chip')?.addEventListener('click', () => App.checkLlm());
+  // 左下角状态条的点击行为（展开本地模型弹层）由 Maint.chip 负责，
+  // 这里只做绑定；两者都挂在同一个元素上会互相打架，所以别再单独加监听。
+  window.Maint?.bind?.();
 });
 
 window.Pages = Pages;

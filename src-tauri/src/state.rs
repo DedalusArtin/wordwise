@@ -7,6 +7,7 @@ use crate::db::Db;
 use crate::models::{AppConfig, QuizMode};
 use anyhow::Result;
 use parking_lot::RwLock;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 /// 当前正在进行的答题会话。
@@ -26,6 +27,11 @@ pub struct Session {
     pub started_at: i64,
     /// 是否仅强化记忆词
     pub leech_only: bool,
+    /// 题面释义使用哪种语言：`"zh"` 中文 / `"src"` 原文 / 空 = 不限
+    ///
+    /// 由前端按**所选词库的语言**下发（背日语教材时就该给中文释义），
+    /// 会话期间保持不变，避免同一轮里题面语种忽中忽英。
+    pub def_lang: String,
 }
 
 impl Session {
@@ -52,12 +58,20 @@ pub struct AppState {
     /// 当前生效的代理解析结果，供界面如实展示
     proxy: RwLock<crate::net::ProxyResolution>,
     pub session: RwLock<Session>,
-    /// 导出目录（打包后指向用户可写目录）
-    pub data_dir: std::path::PathBuf,
+    /// 学习数据、模型、备份的落点
+    pub data_dir: PathBuf,
+    /// 上面这个目录是**怎么选出来的**（设置页要如实说明，
+    /// 否则用户看到「我的数据怎么在 C 盘」时无从判断该改哪里）
+    pub data_dir_source: DataDirSource,
 }
 
 impl AppState {
-    pub fn new(data_dir: std::path::PathBuf) -> Result<Arc<Self>> {
+    pub fn new(data_dir: PathBuf) -> Result<Arc<Self>> {
+        Self::with_source(data_dir, DataDirSource::Fallback)
+    }
+
+    /// 带上「目录是怎么来的」一起构造（正常启动路径走这个）。
+    pub fn with_source(data_dir: PathBuf, data_dir_source: DataDirSource) -> Result<Arc<Self>> {
         let db_path = data_dir.join("wordwise.db");
         let db = Db::open(&db_path)?;
 
@@ -100,6 +114,7 @@ impl AppState {
             proxy: RwLock::new(proxy),
             session: RwLock::new(Session::default()),
             data_dir,
+            data_dir_source,
         }))
     }
 
@@ -139,25 +154,222 @@ impl AppState {
     }
 }
 
-/// 应用数据目录：优先用传入的 workspace 目录，否则退回系统 AppData。
-pub fn resolve_data_dir() -> std::path::PathBuf {
-    if let Ok(dir) = std::env::var("WORDWISE_DATA_DIR") {
-        let p = std::path::PathBuf::from(dir);
-        if !p.as_os_str().is_empty() {
-            return p;
+/* ============================================================
+   数据目录解析
+   ============================================================
+
+   历史包袱：早期版本**无条件**把数据放 `%APPDATA%\WordWise`（C 盘）。
+   后果是「把软件装到 D 盘」也拦不住模型（最大 1.1 GB / 个）写进 C 盘，
+   用户明明有盘却看着系统盘被塞满 —— 而且他没有任何入口能改。
+
+   现在改成「**跟着软件走**」为主、老用户原地不动为辅：
+
+     ① `WORDWISE_DATA_DIR` 环境变量      显式指定，最高优先
+     ② exe 同级 `portable.txt`           便携模式：自包含，拷走即走
+     ③ exe 同级 `location.txt`           用户在设置页改过目录（指针文件）
+     ④ 系统用户目录里已有 wordwise.db     ★ 老用户护城河：绝不搬家
+     ⑤ exe 同级 `data\`                   ★ 新装默认：装到哪，数据就在哪
+     ⑥ 系统用户目录                       兜底（exe 目录不可写，如 Program Files）
+
+   ④ 必须排在 ⑤ 前面：否则老用户升级后数据目录会从 `%APPDATA%` 变成
+   `<exe>\data`，新目录没有 `wordwise.db`，应用会当成新装 → 词库、进度、
+   错词本全部「凭空消失」。这条比「默认不写 C 盘」重要得多。
+*/
+
+/// exe 同级、用于「锁定数据位置」的标记文件。
+///
+/// - `portable.txt`：**存在即表示便携模式**（数据跟程序走）。文件内容为
+///   绝对路径时用它；空文件 = exe 同级 `data\`。
+/// - `location.txt`：设置页改过数据目录时写下的指针。内容为空或
+///   `default` 视为「没指定」，继续往下走。
+pub const PORTABLE_FILE: &str = "portable.txt";
+/// 见 `PORTABLE_FILE` 说明。
+pub const LOCATION_FILE: &str = "location.txt";
+
+/// 数据目录落在哪一级 —— 设置页要如实告诉用户「为什么是这个目录」。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DataDirSource {
+    /// ① 环境变量 `WORDWISE_DATA_DIR`
+    Env,
+    /// ② exe 同级 `portable.txt`（便携模式，自包含）
+    Portable,
+    /// ③ exe 同级 `location.txt`（设置页改过）
+    Pointer,
+    /// ④ 系统用户目录里已有学习数据（老用户，原地不动）
+    Existing,
+    /// ⑤ exe 同级 `data\`（新装默认）
+    BesideExe,
+    /// ⑥ 系统用户目录（兜底）
+    Fallback,
+}
+
+impl DataDirSource {
+    /// 给用户看的一句话说明。
+    pub fn label(self) -> &'static str {
+        match self {
+            DataDirSource::Env => "环境变量 WORDWISE_DATA_DIR 指定",
+            DataDirSource::Portable => "便携模式（exe 同级有 portable.txt）",
+            DataDirSource::Pointer => "你在设置页指定的目录",
+            DataDirSource::Existing => "沿用系统用户目录里已有的学习数据",
+            DataDirSource::BesideExe => "软件所在目录（默认，跟着程序走）",
+            DataDirSource::Fallback => "系统用户目录（兜底）",
         }
     }
-    // Windows: %APPDATA%\WordWise
-    if let Some(base) = dirs::data_dir() {
-        return base.join("WordWise");
+
+    /// 数据是不是**跟着软件目录**走的。
+    ///
+    /// 界面据此给出「删掉软件目录会连数据一起删掉」的提醒 —— 这正是
+    /// 「默认不写 C 盘」的代价，必须说清楚，不能只享受好处。
+    pub fn travels_with_app(self) -> bool {
+        matches!(self, DataDirSource::Portable | DataDirSource::BesideExe)
     }
-    std::path::PathBuf::from(".").join("wordwise-data")
+}
+
+/// 读一个指针文件里写的绝对路径。空内容 / `default` / 读不到 → `None`。
+///
+/// 做成 `pub` 是因为模型目录也用同一套指针文件机制
+/// （`localllm::models_dir` 读数据目录里的 `models_dir.txt`）。
+pub fn read_pointer(path: &Path) -> Option<PathBuf> {
+    let raw = std::fs::read_to_string(path).ok()?;
+    parse_pointer_text(&raw)
+}
+
+/// 指针文件内容的解析规则（抽出来单独测，不用碰文件系统）。
+fn parse_pointer_text(raw: &str) -> Option<PathBuf> {
+    // 用户可能用记事本存成带 BOM 的 UTF-8，也可能顺手写了个 `default`
+    let s = raw.trim_start_matches('\u{feff}').trim();
+    if s.is_empty() || s.eq_ignore_ascii_case("default") {
+        return None;
+    }
+    let p = PathBuf::from(s);
+    if p.as_os_str().is_empty() {
+        None
+    } else {
+        Some(p)
+    }
+}
+
+/// 便携标记：exe 同级有 `portable.txt` 就是便携模式。
+///
+/// 返回 `(目标目录, 是否是用户显式写的路径)`：
+/// - **空文件 / `default`** → `(exe 同级 data\, false)`。便携包解压出来就是
+///   靠这个空文件把数据钉在程序目录里的，所以「空」必须算有效。
+/// - **写了绝对路径** → `(那个路径, true)`。
+///
+/// 那个 `bool` 决定「不可写时怎么办」：用户显式指定的路径要**照做**
+/// （否则他指定的位置被静默忽略，比报错更难排查）；而 `exe\data` 只是
+/// 我们定的约定，装到 `Program Files` 这类只读位置时应当直接放弃它、
+/// 继续往下找可写的地方。
+fn portable_target(exe_dir: &Path) -> Option<(PathBuf, bool)> {
+    let marker = exe_dir.join(PORTABLE_FILE);
+    if !marker.is_file() {
+        return None;
+    }
+    match read_pointer(&marker) {
+        Some(p) => Some((p, true)),
+        None => Some((exe_dir.join("data"), false)),
+    }
+}
+
+/// 目录能不能写。
+///
+/// 会顺手把目录建出来（反正紧接着就要用），然后写一个探针文件再删掉。
+/// 只判断「目录存在」是不够的：`C:\Program Files\...` 目录存在但只读，
+/// 那样会在第一次存词时抛出一个很晚、很难懂的错误。
+fn is_writable(dir: &Path) -> bool {
+    if std::fs::create_dir_all(dir).is_err() {
+        return false;
+    }
+    let probe = dir.join(".wordwise-write-test");
+    match std::fs::write(&probe, b"ok") {
+        Ok(_) => {
+            let _ = std::fs::remove_file(&probe);
+            true
+        }
+        Err(_) => false,
+    }
+}
+
+/// 数据目录解析的**纯函数**版本：环境变量 / exe 位置 / 系统数据目录
+/// 全部做成入参，这样单测能在临时目录里确定性地覆盖每一条分支。
+pub fn resolve_data_dir_with(
+    exe_dir: Option<&Path>,
+    env_dir: Option<&Path>,
+    appdata_base: Option<&Path>,
+) -> (PathBuf, DataDirSource) {
+    // ① 环境变量：脚本 / 高级用户显式指定
+    if let Some(p) = env_dir {
+        if !p.as_os_str().is_empty() {
+            return (p.to_path_buf(), DataDirSource::Env);
+        }
+    }
+
+    // ② 便携标记（隐式约定要先确认目录可写，见 `portable_target` 的说明）
+    if let Some(exe) = exe_dir {
+        if let Some((p, explicit)) = portable_target(exe) {
+            if explicit || is_writable(&p) {
+                return (p, DataDirSource::Portable);
+            }
+        }
+    }
+
+    // ③ 设置页留下的指针
+    if let Some(exe) = exe_dir {
+        if let Some(p) = read_pointer(&exe.join(LOCATION_FILE)) {
+            return (p, DataDirSource::Pointer);
+        }
+    }
+
+    let appdata = appdata_base.map(|b| b.join("WordWise"));
+
+    // ④ 老用户护城河 —— 必须在 ⑤ 之前，见本段开头的说明
+    if let Some(ad) = &appdata {
+        if ad.join("wordwise.db").is_file() {
+            return (ad.clone(), DataDirSource::Existing);
+        }
+    }
+
+    // ⑤ 新装默认：exe 同级 data\（装到 D 盘，数据就落 D 盘）
+    if let Some(exe) = exe_dir {
+        let beside = exe.join("data");
+        if is_writable(&beside) {
+            return (beside, DataDirSource::BesideExe);
+        }
+    }
+
+    // ⑥ 兜底
+    if let Some(ad) = appdata {
+        return (ad, DataDirSource::Fallback);
+    }
+    (PathBuf::from(".").join("wordwise-data"), DataDirSource::Fallback)
+}
+
+/// 当前进程的可执行文件所在目录。
+pub fn exe_dir() -> Option<PathBuf> {
+    std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|x| x.to_path_buf()))
+}
+
+/// 应用数据目录（只关心路径的场景用这个）。
+pub fn resolve_data_dir() -> PathBuf {
+    resolve_data_dir_ex().0
+}
+
+/// 应用数据目录 + 它的来源（设置页要展示「为什么是这个目录」）。
+pub fn resolve_data_dir_ex() -> (PathBuf, DataDirSource) {
+    let env_dir = std::env::var_os("WORDWISE_DATA_DIR").map(PathBuf::from);
+    let exe = exe_dir();
+    let appdata = dirs::data_dir();
+    resolve_data_dir_with(exe.as_deref(), env_dir.as_deref(), appdata.as_deref())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::models::WordEntry;
+    use std::fs;
 
     #[test]
     fn session_lifecycle() {
@@ -169,5 +381,212 @@ mod tests {
         assert_eq!(s.current().unwrap().word, "apple");
         s.index = 1;
         assert!(!s.is_active());
+    }
+
+    /* ---------------- 数据目录解析 ---------------- */
+
+    /// 每个用例一个独立临时目录（并行跑测试不会互相踩）。
+    fn tmp(tag: &str) -> PathBuf {
+        let p = std::env::temp_dir().join(format!(
+            "wordwise-statedir-{}-{}",
+            tag,
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&p);
+        fs::create_dir_all(&p).unwrap();
+        p
+    }
+
+    #[test]
+    fn pointer_text_ignores_blank_and_default() {
+        assert_eq!(parse_pointer_text(""), None);
+        assert_eq!(parse_pointer_text("   \r\n\t "), None);
+        assert_eq!(parse_pointer_text("default"), None);
+        assert_eq!(parse_pointer_text("DEFAULT"), None);
+        // 记事本存的 UTF-8 会带 BOM
+        assert_eq!(
+            parse_pointer_text("\u{feff}D:\\Data"),
+            Some(PathBuf::from("D:\\Data"))
+        );
+        assert_eq!(parse_pointer_text("  D:\\Data  "), Some(PathBuf::from("D:\\Data")));
+    }
+
+    #[test]
+    fn env_var_wins_over_everything() {
+        let base = tmp("env-wins");
+        let exe = base.join("exe");
+        let appdata = base.join("appdata");
+        fs::create_dir_all(&exe).unwrap();
+        // 同时存在便携标记 + 老数据 + 环境变量，环境变量必须赢
+        fs::write(exe.join(PORTABLE_FILE), "").unwrap();
+        fs::create_dir_all(appdata.join("WordWise")).unwrap();
+        fs::write(appdata.join("WordWise").join("wordwise.db"), b"x").unwrap();
+
+        let want = base.join("from-env");
+        let (got, src) = resolve_data_dir_with(
+            Some(&exe),
+            Some(&want),
+            Some(&appdata),
+        );
+        assert_eq!(got, want);
+        assert_eq!(src, DataDirSource::Env);
+
+        // 空字符串的环境变量等于没设，不能把数据目录解析成「当前目录」
+        let (got2, src2) = resolve_data_dir_with(Some(&exe), Some(Path::new("")), Some(&appdata));
+        assert_eq!(src2, DataDirSource::Portable);
+        assert_eq!(got2, exe.join("data"));
+    }
+
+    #[test]
+    fn portable_marker_pins_data_next_to_exe() {
+        let base = tmp("portable");
+        let exe = base.join("exe");
+        fs::create_dir_all(&exe).unwrap();
+        let appdata = base.join("appdata");
+        // 即使系统目录里已经有学习数据，便携标记也要赢：那是用户**明确**的选择
+        fs::create_dir_all(appdata.join("WordWise")).unwrap();
+        fs::write(appdata.join("WordWise").join("wordwise.db"), b"x").unwrap();
+
+        // 空文件 = 「就是便携模式」，数据放 exe 同级 data\
+        fs::write(exe.join(PORTABLE_FILE), "\r\n").unwrap();
+        let (got, src) = resolve_data_dir_with(Some(&exe), None, Some(&appdata));
+        assert_eq!(src, DataDirSource::Portable);
+        assert_eq!(got, exe.join("data"));
+        assert!(src.travels_with_app(), "便携模式的数据是跟着软件走的");
+
+        // 文件里写了绝对路径就用它
+        fs::write(exe.join(PORTABLE_FILE), "D:\\WordWiseData").unwrap();
+        let (got2, src2) = resolve_data_dir_with(Some(&exe), None, Some(&appdata));
+        assert_eq!(src2, DataDirSource::Portable);
+        assert_eq!(got2, PathBuf::from("D:\\WordWiseData"));
+    }
+
+    #[test]
+    fn portable_marker_falls_through_when_exe_data_cannot_be_written() {
+        // 模拟「装到 Program Files 这类只读位置」：exe 同级 `data` 这个位置
+        // 被一个同名文件占着，目录建不出来。此时不能硬用它 ——
+        // 否则会在第一次打开数据库时抛出一个很晚、很难懂的错误。
+        let base = tmp("portable-blocked");
+        let exe = base.join("exe");
+        fs::create_dir_all(&exe).unwrap();
+        fs::write(exe.join(PORTABLE_FILE), "").unwrap();
+        fs::write(exe.join("data"), b"I am a file, not a directory").unwrap();
+        let appdata = base.join("appdata");
+
+        let (got, src) = resolve_data_dir_with(Some(&exe), None, Some(&appdata));
+        assert_eq!(src, DataDirSource::Fallback);
+        assert_eq!(got, appdata.join("WordWise"));
+    }
+
+    #[test]
+    fn explicit_portable_path_is_honoured_even_before_it_exists() {
+        // 用户/构建脚本明确写了路径 → 照做，不因为「目录还不存在」就忽略
+        let base = tmp("portable-explicit");
+        let exe = base.join("exe");
+        fs::create_dir_all(&exe).unwrap();
+        let want = base.join("elsewhere");
+        fs::write(exe.join(PORTABLE_FILE), want.display().to_string()).unwrap();
+        let appdata = base.join("appdata");
+
+        let (got, src) = resolve_data_dir_with(Some(&exe), None, Some(&appdata));
+        assert_eq!(src, DataDirSource::Portable);
+        assert_eq!(got, want);
+    }
+
+    #[test]
+    fn location_pointer_is_used_when_present() {
+        let base = tmp("pointer");
+        let exe = base.join("exe");
+        fs::create_dir_all(&exe).unwrap();
+        let appdata = base.join("appdata");
+
+        fs::write(exe.join(LOCATION_FILE), "E:\\WW-Data\n").unwrap();
+        let (got, src) = resolve_data_dir_with(Some(&exe), None, Some(&appdata));
+        assert_eq!(src, DataDirSource::Pointer);
+        assert_eq!(got, PathBuf::from("E:\\WW-Data"));
+
+        // 「恢复默认」后指针文件里是 default → 不能把数据目录变成一个字面量目录名
+        fs::write(exe.join(LOCATION_FILE), "default").unwrap();
+        let (got2, src2) = resolve_data_dir_with(Some(&exe), None, Some(&appdata));
+        assert_ne!(src2, DataDirSource::Pointer);
+        assert_ne!(got2, PathBuf::from("default"));
+    }
+
+    #[test]
+    fn fresh_install_prefers_beside_exe() {
+        let base = tmp("fresh");
+        let exe = base.join("exe");
+        fs::create_dir_all(&exe).unwrap();
+        // 系统目录里**没有**学习数据 = 新装
+        let appdata = base.join("appdata");
+        fs::create_dir_all(&appdata).unwrap();
+
+        let (got, src) = resolve_data_dir_with(Some(&exe), None, Some(&appdata));
+        assert_eq!(src, DataDirSource::BesideExe);
+        assert_eq!(got, exe.join("data"), "新装默认跟着软件走，不写 C 盘");
+        assert!(src.travels_with_app());
+        assert!(got.is_dir(), "判可写时会把目录建出来");
+    }
+
+    #[test]
+    fn existing_appdata_data_is_never_moved() {
+        // ★ 这条是「老用户升级后词库凭空消失」的守卫。
+        let base = tmp("existing");
+        let exe = base.join("exe");
+        fs::create_dir_all(&exe).unwrap();
+        let appdata = base.join("appdata");
+        let ad = appdata.join("WordWise");
+        fs::create_dir_all(&ad).unwrap();
+        fs::write(ad.join("wordwise.db"), b"sqlite").unwrap();
+
+        let (got, src) = resolve_data_dir_with(Some(&exe), None, Some(&appdata));
+        assert_eq!(src, DataDirSource::Existing);
+        assert_eq!(got, ad, "老用户沿用 %APPDATA%\\WordWise，不搬家");
+        assert!(!src.travels_with_app());
+        assert!(
+            !exe.join("data").exists(),
+            "既然沿用了老目录，就不该顺手在 exe 旁边建 data\\"
+        );
+    }
+
+    #[test]
+    fn empty_appdata_dir_does_not_count_as_existing_data() {
+        // 目录存在但没有 wordwise.db ≠ 有学习数据，不能据此把新装用户钉在 C 盘
+        let base = tmp("empty-appdata");
+        let exe = base.join("exe");
+        fs::create_dir_all(&exe).unwrap();
+        let appdata = base.join("appdata");
+        fs::create_dir_all(appdata.join("WordWise")).unwrap();
+
+        let (_, src) = resolve_data_dir_with(Some(&exe), None, Some(&appdata));
+        assert_eq!(src, DataDirSource::BesideExe);
+    }
+
+    #[test]
+    fn falls_back_when_there_is_no_exe_dir() {
+        let base = tmp("no-exe");
+        let appdata = base.join("appdata");
+        fs::create_dir_all(&appdata).unwrap();
+        let (got, src) = resolve_data_dir_with(None, None, Some(&appdata));
+        assert_eq!(src, DataDirSource::Fallback);
+        assert_eq!(got, appdata.join("WordWise"));
+
+        let (got2, src2) = resolve_data_dir_with(None, None, None);
+        assert_eq!(src2, DataDirSource::Fallback);
+        assert_eq!(got2, PathBuf::from(".").join("wordwise-data"));
+    }
+
+    #[test]
+    fn every_source_has_a_human_label() {
+        for s in [
+            DataDirSource::Env,
+            DataDirSource::Portable,
+            DataDirSource::Pointer,
+            DataDirSource::Existing,
+            DataDirSource::BesideExe,
+            DataDirSource::Fallback,
+        ] {
+            assert!(!s.label().is_empty(), "{s:?} 必须给用户一句人话");
+        }
     }
 }

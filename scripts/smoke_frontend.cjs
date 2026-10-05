@@ -19,8 +19,13 @@ const path = require('path');
 const vm = require('vm');
 
 const ROOT = path.resolve(__dirname, '..');
-const ORDER = ['api.js', 'speak.js', 'ui.js', 'study.js', 'lookup.js',
-               'library.js', 'settings.js', 'sidebar.js', 'app.js'];
+// 顺序必须与 src/index.html 末尾的 <script> 顺序一致，否则「新模块根本没被
+// 加载」这类问题会被漏掉（dir.js / translate.js 就是为此加进来的）。
+// 必须与 src/index.html 里的 <script> 顺序一致：前端没有模块系统，
+// 靠加载顺序决定谁先挂到 window 上。顺序错了，冒烟测试会报「undefined.bind」。
+const ORDER = ['api.js', 'demo.js', 'dir.js', 'speak.js', 'ui.js', 'study.js', 'lookup.js',
+               'translate.js', 'graph.js', 'library.js', 'maint.js', 'settings.js',
+               'sidebar.js', 'app.js'];
 
 /** 假 style：支持 setProperty / removeProperty（分栏比例就走这两个）。 */
 function fakeStyle() {
@@ -37,7 +42,7 @@ function fakeStyle() {
 function fakeEl(tag) {
   const el = {
     tagName: tag || 'div',
-    id: '', className: '', innerHTML: '', textContent: '', value: '',
+    id: '', className: '', innerHTML: '', textContent: '',
     disabled: false, dataset: {}, style: fakeStyle(),
     getBoundingClientRect: () => ({ width: 1000, height: 600, top: 0, left: 0, right: 1000, bottom: 600 }),
     setPointerCapture() {}, releasePointerCapture() {}, hasPointerCapture() { return false; },
@@ -74,6 +79,17 @@ function fakeEl(tag) {
     setAttribute() {}, getAttribute() { return null; }, removeAttribute() {},
     focus() {}, blur() {}, click() {}, scrollTo() {}, scrollIntoView() {},
   };
+
+  // 真实 DOM 里 input.value 永远是字符串：赋 0.6 读回来是 '0.6'。
+  // 假 DOM 如果不转，settings.save() 里 getVal() 的 .trim() 就会炸，
+  // 报出的却是一个跟产品无关的假故障，很容易把人带到错误的方向去查。
+  let _value = '';
+  Object.defineProperty(el, 'value', {
+    get() { return _value; },
+    set(v) { _value = (v === undefined || v === null) ? '' : String(v); },
+    enumerable: true, configurable: true,
+  });
+
   return el;
 }
 
@@ -98,6 +114,16 @@ sandbox.innerWidth = 1440;
 sandbox.innerHeight = 900;
 
 const selCache = new Map();
+// 学习页的模式按钮：applyLangUI / setMode 会遍历改写它们的文案与禁用态，
+// 返回空数组的话这两条逻辑就完全测不到。
+const STUDY_MODES = ['en_to_zh', 'zh_to_en', 'spelling', 'ex_to_zh', 'ex_pick_word', 'listen_spell'];
+const segBtns = STUDY_MODES.map((m) => {
+  const b = fakeEl('button');
+  b.className = 'seg-btn';
+  b.dataset.mode = m;
+  b.title = '';
+  return b;
+});
 sandbox.document = {
   getElementById: elById,
   // 让 querySelector 也返回元素（而不是 null），这样「布局初始化」这类
@@ -106,7 +132,7 @@ sandbox.document = {
     if (!selCache.has(sel)) selCache.set(sel, fakeEl());
     return selCache.get(sel);
   },
-  querySelectorAll: () => [],
+  querySelectorAll: (sel) => (sel === '#mode-seg .seg-btn' ? segBtns : []),
   createElement: (t) => fakeEl(t),
   addEventListener() {},
   body: fakeEl('body'),
@@ -127,6 +153,12 @@ sandbox.Audio = function () {
 };
 sandbox.SpeechSynthesisUtterance = function () {};
 sandbox.speechSynthesis = { speak() {}, cancel() {}, getVoices: () => [] };
+// 知识图谱用力导向布局，靠 rAF 一帧帧收敛。沙箱里给一个立即回掉的实现，
+// 否则 startLayout 排不上队，draw() 永远不会被调用。
+sandbox.requestAnimationFrame = (fn) => setTimeout(() => fn(performance.now()), 0);
+sandbox.cancelAnimationFrame = (id) => clearTimeout(id);
+// 批量移出错词等破坏性操作会 confirm；冒烟里一律放行
+sandbox.confirm = () => true;
 sandbox.fetch = () => Promise.reject(new Error('sandbox 内不发起真实请求'));
 
 vm.createContext(sandbox);
@@ -168,6 +200,23 @@ const cases = [
   ['renderEntry（空词条）', () => WW.renderEntry(null)],
   ['renderMarkdown', () => WW.renderMarkdown('# 标题\n\n- 一\n- 二\n\n| a | b |\n| - | - |\n| 1 | 2 |')],
   ['speakBtn', () => WW.speakBtn(entry, 'us', '发音')],
+  ['splitRelated：把词典源塞成一串的同义词拆成一个个可点的词', () => {
+    const got = WW.splitRelated(['desert, abandon, leave', 'desert abandon', '高兴、愉快；快乐', 'n. (见 also)']);
+    const want = ['desert', 'abandon', 'leave', '高兴', '愉快', '快乐'];
+    for (const w of want) {
+      if (!got.includes(w)) throw new Error(`没拆出「${w}」，实际 ${JSON.stringify(got)}`);
+    }
+    if (got.includes('n.')) throw new Error('噪声「n.」没被滤掉：' + JSON.stringify(got));
+    if (got.filter(x => x === 'desert').length !== 1) throw new Error('重复项没去重');
+    return JSON.stringify(got);
+  }],
+  ['renderEntry：旧缓存里的整串 related 也能画成多个 chip', () => {
+    const html = WW.renderEntry({ ...entry, related: ['desert, abandon'] }, { showRelated: true });
+    const n = (html.match(/rel-chip/g) || []).length;
+    if (n !== 2) throw new Error(`应画出 2 个相关词 chip，实际 ${n}`);
+    if (html.includes('desert, abandon')) throw new Error('整串没被拆开，仍作为一个 chip 显示');
+    return '';
+  }],
   ['attachListSearch（元素缺失时降级）', () => WW.attachListSearch({ input: 'nope', list: 'nope' })],
   ['attachListSearch（正常挂载）', () => WW.attachListSearch({ input: 'lib-search', list: 'lib-list' }).apply()],
 
@@ -255,6 +304,11 @@ const cases = [
   ['Books.bind()', () => sandbox.Books.bind()],
   ['Settings.bind()', () => sandbox.Settings.bind()],
   ['Sidebar.bind()', () => sandbox.Sidebar.bind()],
+  ['Leech.bind()', () => sandbox.Leech.bind()],
+  ['Plan.bind()', () => sandbox.Plan.bind()],
+  ['Graph.bind()', () => sandbox.Graph.bind()],
+  ['Demo.bind()', () => sandbox.Demo.bind()],
+  ['Maint.bind()', () => sandbox.Maint.bind()],
 
   // ---- 在线词库「下载并导入」：点下去必须立刻有反应 ----
   //
@@ -314,6 +368,1138 @@ const cases = [
     sandbox.Detail.renderExplain(box, res, true);
     if (!box.innerHTML.includes('give up')) throw new Error('切到原文后仍显示译文');
     if (!box.innerHTML.includes('返回译文')) throw new Error('切换后按钮文案没变');
+  }],
+
+  // ================= 第十五轮：翻译 / 查词语言链路 =================
+  //
+  // 这一组守的是用户提的五条需求中最容易回归的两条：
+  //   需求 2 —— 选日语必须拿到日文文字，而不是只有罗马音；
+  //   需求 3 —— 语言码要能从 UI 一路贯通到渲染结果。
+
+  // ---- 方向选择器（需求 1） ----
+  ['方向选择器：语言清单来自后端 + 中文名可读', async () => {
+    await sandbox.DirPicker.loadLangs();
+    const n = sandbox.DirPicker.langName('ja');
+    if (n !== '日语') throw new Error('语言名应是「日语」，实际 ' + n);
+    if (sandbox.DirPicker.langName('auto') !== '自动检测') throw new Error('auto 应有中文名');
+  }],
+
+  ['方向选择器：源=目标时自动挪开目标语言', () => {
+    sandbox.DirPicker.set('zh', 'zh');
+    if (sandbox.DirPicker.to === 'zh') throw new Error('同语言没被纠正，仍为 zh');
+    if (sandbox.DirPicker.from !== 'zh') throw new Error('源语言被误改：' + sandbox.DirPicker.from);
+  }],
+
+  ['方向选择器：目标语言不允许是「自动检测」', () => {
+    sandbox.DirPicker.set('auto', 'auto');
+    if (sandbox.DirPicker.to === 'auto') throw new Error('目标语言竟是 auto');
+  }],
+
+  ['方向选择器：⇄ 互换并落盘到配置', async () => {
+    sandbox.DirPicker.set('zh', 'ja');
+    const before = sandbox.DirPicker.current;
+    if (before.from !== 'zh' || before.to !== 'ja') throw new Error('set 未生效');
+
+    await sandbox.DirPicker.swap();
+    const cfg = await sandbox.WordWiseAPI.API.getConfig();
+    if (cfg.source_lang !== 'ja' || cfg.target_lang !== 'zh') {
+      throw new Error(`互换后配置应为 ja→zh，实际 ${cfg.source_lang}→${cfg.target_lang}`);
+    }
+    if (sandbox.DirPicker.from !== 'ja' || sandbox.DirPicker.to !== 'zh') {
+      throw new Error('界面方向没跟着互换');
+    }
+  }],
+
+  ['方向选择器：变化会广播给订阅方（三个面板据此刷新）', () => {
+    let got = null;
+    const off = sandbox.DirPicker.onChange((info) => { got = info; });
+    sandbox.DirPicker.set('en', 'ja');
+    off();
+    if (!got) throw new Error('订阅方没收到通知');
+    if (got.from !== 'en' || got.to !== 'ja') throw new Error('广播的方向不对');
+  }],
+
+  // ---- 翻译页（需求 2 / 5） ----
+  ['翻译页 bind()：所有按钮与 tab 都能挂上', () => sandbox.Translate.bind()],
+
+  ['翻译：选日语必须返回日文文字本身，而不是只有读音', async () => {
+    sandbox.DirPicker.set('zh', 'ja');
+    await sandbox.Translate.run('你好', false);
+    const box = elById('tr-dst');
+    if (!box.innerHTML.includes('こんにちは')) {
+      throw new Error('译文主体不是日文：' + box.innerHTML);
+    }
+    // 读音只能作为附属标注单独一行，绝不能顶替译文主体
+    const ph = elById('tr-phonetic');
+    if (!ph.textContent) throw new Error('读音行是空的');
+    if (!ph.classList.contains('hidden') === false) { /* 只要不是 hidden 即可 */ }
+    if (ph.classList.contains('hidden')) throw new Error('读音行被隐藏了');
+    if (box.innerHTML.includes('konnichiwa')) {
+      throw new Error('罗马音混进了译文主体');
+    }
+  }],
+
+  ['翻译：结果区标注了引擎与目标语言（一眼可查语言是否跟对）', () => {
+    const eng = elById('tr-engine').textContent;
+    if (!eng.includes('日语')) throw new Error('引擎标注没写目标语言：' + eng);
+  }],
+
+  ['翻译：历史记录落库 + 收藏按钮随之可用', async () => {
+    // run() 内部会刷新历史；这里再显式拉一次确认能读回
+    await sandbox.Translate.run('你好', false);
+    // 有 record_id 就说明这条翻译已经入库，收藏才有意义
+    if (elById('tr-fav').disabled) throw new Error('已有 record_id，收藏按钮不该禁用');
+
+    await sandbox.Translate.load();
+    const list = elById('tr-hist-list');
+    if (!list.innerHTML.includes('你好')) {
+      throw new Error('历史里没有刚翻的那条：' + list.innerHTML);
+    }
+    if (!list.innerHTML.includes('こんにちは')) throw new Error('历史里没有译文');
+  }],
+
+  ['翻译：换个方向重译，结果语言必须跟着变', async () => {
+    sandbox.DirPicker.set('zh', 'en');
+    await sandbox.Translate.run('你好', true);
+    const box = elById('tr-dst');
+    if (!box.innerHTML.includes('Hello')) {
+      throw new Error('切成英语后译文没变：' + box.innerHTML);
+    }
+    if (elById('tr-engine').textContent.includes('日语')) {
+      throw new Error('引擎标注还停在旧语言');
+    }
+  }],
+
+  ['翻译：AI 增强四个动作都能调用', async () => {
+    for (const a of ['explain', 'variants', 'polish', 'examples']) {
+      const md = await sandbox.WordWiseAPI.API.translateAi(a, '你好', 'Hello', 'zh', 'en');
+      if (typeof md !== 'string' || !md.length) throw new Error(a + ' 返回空');
+    }
+  }],
+
+  // ---- 查词页联动（需求 4） ----
+  ['查词页：占位提示跟随方向变化', () => {
+    sandbox.DirPicker.set('auto', 'ja');
+    sandbox.Lookup.syncLookupPlaceholder();
+    const p = elById('lk-input').placeholder;
+    if (!p.includes('日语')) throw new Error('占位提示没跟到目标语言：' + p);
+    if (!p.includes('自动识别')) throw new Error('源语言为 auto 时应提示自动识别：' + p);
+  }],
+
+  ['查词页：词级译文独立渲染，语言跟着方向走', async () => {
+    sandbox.DirPicker.set('auto', 'ja');
+    const res = { word: '你好', lang: 'zh' };
+    await sandbox.Lookup.loadWordTranslation(res);
+    const box = elById('lk-trans');
+    if (box.classList.contains('hidden')) throw new Error('译文区被隐藏');
+    if (!box.innerHTML.includes('こんにちは')) throw new Error('词级译文不是日文：' + box.innerHTML);
+    if (!box.innerHTML.includes('lk-trans-phonetic')) throw new Error('读音没有单独成行');
+  }],
+
+  ['查词页：目标语言与词条语言相同时不浪费一次翻译', async () => {
+    sandbox.DirPicker.set('auto', 'zh');
+    await sandbox.Lookup.loadWordTranslation({ word: '你好', lang: 'zh' });
+    if (!elById('lk-trans').classList.contains('hidden')) {
+      throw new Error('同语言时译文区应隐藏');
+    }
+  }],
+
+  // ---- 语言链路一致性（需求 3） ----
+  ['语言链路：UI 选择 → 查询参数 → 后端返回 → 渲染，全程同一个语言码', async () => {
+    sandbox.DirPicker.set('zh', 'ko');
+    const r = await sandbox.WordWiseAPI.API.translate('你好', 'zh', 'ko', true);
+    if (r.to !== 'ko') throw new Error('后端返回的语言码与请求不一致：' + r.to);
+    if (r.from !== 'zh') throw new Error('源语言码被改写：' + r.from);
+    if (r.text !== '안녕하세요') throw new Error('译文不是韩文：' + r.text);
+    sandbox.Translate.renderResult(r);
+    const box = elById('tr-dst');
+    if (!box.innerHTML.includes('안녕하세요')) throw new Error('渲染丢掉了韩文译文');
+    if (elById('tr-engine').textContent.indexOf('韩语') < 0) {
+      throw new Error('渲染标注的语言不对：' + elById('tr-engine').textContent);
+    }
+  }],
+
+  ['语言链路：源语言为 auto 时后端要回报真实检测到的语言', async () => {
+    const r = await sandbox.WordWiseAPI.API.translate('こんにちは', 'auto', 'zh', true);
+    if (r.from === 'auto') throw new Error('auto 没被解析成真实语言码');
+    if (r.from !== 'ja') throw new Error('日文被检测成 ' + r.from);
+  }],
+
+  // ---- 音标标签按语言分派（需求 3 的连带修复） ----
+  ['音标标签：中文词条标「拼音」而不是「英」', () => {
+    const h = WW.renderEntry({
+      word: '你好', lang: 'zh', senses: [{ pos: 'int.', definition: '问候语' }],
+      phonetic: { uk: 'nǐ hǎo', us: '' },
+    });
+    if (!h.includes('拼音')) throw new Error('中文词条的音标标签不是「拼音」：' + h.slice(0, 120));
+    if (h.includes('英')) throw new Error('中文词条不该出现「英」标签');
+  }],
+
+  ['音标标签：日文词条标「读音」', () => {
+    const h = WW.renderEntry({
+      word: 'こんにちは', lang: 'ja', senses: [{ pos: 'int.', definition: '你好' }],
+      phonetic: { uk: 'konnichiwa', us: '' },
+    });
+    if (!h.includes('读音')) throw new Error('日文词条的音标标签不是「读音」');
+  }],
+
+  ['renderPlainText：保留段落并转义 HTML', () => {
+    const h = WW.renderPlainText('第一段 <b>x</b>\n\n第二段');
+    if (h.includes('<b>')) throw new Error('没有转义 HTML');
+    if (!h.includes('&lt;b&gt;')) throw new Error('转义结果不对：' + h);
+    if (!h.includes('第二段')) throw new Error('丢内容');
+  }],
+
+  // ============================================================
+  // 第十六轮：知识图谱 / 三页增强 / 演示模式 / 导出 / 数据库 / 本地大模型
+  // ============================================================
+
+  ['知识图谱：图例渲染出全部 6 类关系', async () => {
+    await sandbox.Graph.load(true);
+    const html = elById('graph-legend').innerHTML;
+    for (const r of ['同义', '反义', '派生', '相关', '上义', '下义']) {
+      if (!html.includes(r)) throw new Error('图例里少了「' + r + '」');
+    }
+  }],
+
+  ['知识图谱：词库关系画实线，AI 发散的关系画虚线', async () => {
+    // 后端只会在有模型时才产出 llm 边，冒烟里直接造一条来验渲染分支
+    const orig = sandbox.WordWiseAPI.API.graphView;
+    sandbox.WordWiseAPI.API.graphView = async () => ({
+      nodes: [
+        { word: 'abandon', lang: 'en', degree: 2, in_dict: true, gloss: '放弃', mastery: null },
+        { word: 'reluctant', lang: 'en', degree: 1, in_dict: true, gloss: '不情愿的', mastery: null },
+        { word: 'zzghost', lang: 'en', degree: 1, in_dict: false, gloss: '', mastery: null },
+      ],
+      edges: [
+        { src: 'abandon', dst: 'reluctant', rel: 'related', weight: 1, source: 'local' },
+        { src: 'abandon', dst: 'zzghost', rel: 'synonym', weight: 0.8, source: 'llm' },
+      ],
+      center: 'abandon', total_nodes: 3, total_edges: 2,
+    });
+    try {
+      await sandbox.Graph.load(true);
+      // 力导向靠 rAF 推进，等它画完
+      await new Promise((r) => setTimeout(r, 120));
+      const svg = elById('graph-svg').innerHTML;
+      if (!svg.includes('<line')) throw new Error('没画出连线');
+      if (!svg.includes('g-node')) throw new Error('没画出节点');
+      if (!svg.includes('stroke-dasharray')) {
+        throw new Error('AI 发散的边没画成虚线 —— 用户会把模型猜的词当真');
+      }
+      // 词库外的节点必须是空心（有 stroke 没填充色），否则点它开详情会 404
+      if (!svg.includes('fill="transparent"')) throw new Error('词库外节点没有画成空心');
+    } finally {
+      sandbox.WordWiseAPI.API.graphView = orig;
+    }
+  }],
+
+  ['错词本：按「最少错」筛选，条数必须真的变少', async () => {
+    elById('leech-min-wrong').value = '0';
+    elById('leech-min-rate').value = '0';
+    elById('leech-max-mastery').value = '100';
+    elById('leech-order').value = 'wrong';
+    await sandbox.Leech.load();
+    const all = elById('leech-list').innerHTML.split('class="word-row"').length - 1;
+
+    elById('leech-min-wrong').value = '5';
+    await sandbox.Leech.load();
+    const few = elById('leech-list').innerHTML.split('class="word-row"').length - 1;
+    if (!(few < all)) throw new Error(`筛选没生效：全部 ${all} 条，≥5 次仍是 ${few} 条`);
+    if (few === 0) throw new Error('≥5 次一条都没有，mock 数据不足以验证筛选');
+  }],
+
+  ['错词本：导出 MD / CSV 都返回路径与条数', async () => {
+    elById('leech-min-wrong').value = '0';
+    await sandbox.Leech.load();
+    for (const [fmt, ext] of [['md', '.md'], ['csv', '.csv']]) {
+      const r = await sandbox.WordWiseAPI.API.leechExport({ format: fmt });
+      if (!r.path || !String(r.path).includes(ext)) throw new Error(fmt + ' 导出路径不对：' + r.path);
+      if (!(r.count > 0)) throw new Error(fmt + ' 导出条数为 0');
+    }
+  }],
+
+  ['错词本：「移出列表」只动当前筛选出来的词', async () => {
+    elById('leech-min-wrong').value = '5';
+    await sandbox.Leech.load();
+    const orig = sandbox.WordWiseAPI.API.leechRemoveMany;
+    let captured = null;
+    sandbox.WordWiseAPI.API.leechRemoveMany = (words) => { captured = words; return orig(words); };
+    try {
+      elById('leech-remove-visible')._fire('click', {});
+      await new Promise((r) => setTimeout(r, 60));
+      if (!captured || !captured.length) throw new Error('没有把任何词传给后端');
+      if (captured.length > 8) throw new Error('传了超出列表范围的词：' + captured.length);
+    } finally {
+      sandbox.WordWiseAPI.API.leechRemoveMany = orig;
+    }
+  }],
+
+  ['复习计划：到期清单渲染，逾期必须排在今天前面', async () => {
+    await sandbox.Plan.load();
+    const html = elById('plan-due').innerHTML;
+    if (!html.includes('abandon')) throw new Error('到期清单里没有词');
+    if (!html.includes('逾期')) throw new Error('没有标出逾期');
+    const iOver = html.indexOf('逾期');
+    const iToday = html.indexOf('今天');
+    if (iToday >= 0 && iOver > iToday) {
+      throw new Error('逾期项排在了今天之后，用户会先背不紧急的');
+    }
+  }],
+
+  ['学习统计：环形图按四段渲染，中心显示总量', async () => {
+    await sandbox.Stats.load();
+    const svg = elById('mastery-donut').innerHTML;
+    if (!svg.includes('<svg')) throw new Error('环形图没渲染');
+    const segs = svg.split('stroke-dasharray').length - 1;
+    if (segs < 3) throw new Error('环形图扇区不足：' + segs);
+    const lg = elById('mastery-donut-legend').innerHTML;
+    for (const k of ['未学习', '学习中', '需强化', '已掌握']) {
+      if (!lg.includes(k)) throw new Error('图例缺少「' + k + '」');
+    }
+    // 中心数字必须等于图例里四项之和 —— 两处数字对不上就是最典型的图表 bug
+    const m = svg.match(/<text[^>]*font-weight="700"[^>]*>(\d+)<\/text>/);
+    if (!m) throw new Error('环形图中心没有显示总量数字');
+    const center = Number(m[1]);
+    const counts = [...elById('mastery-donut-legend').innerHTML.matchAll(/dl-count">(\d+)</g)]
+      .map(x => Number(x[1]));
+    if (counts.length !== 4) throw new Error('图例不是四项：' + counts.length);
+    const sum = counts.reduce((a, b) => a + b, 0);
+    if (center !== sum) throw new Error(`中心数字 ${center} 与图例之和 ${sum} 不一致`);
+  }],
+
+  ['演示模式：只接管读命令，写命令一律不拦', () => {
+    if (!sandbox.Demo.has('cmd_stats')) throw new Error('演示模式应接管 cmd_stats');
+    if (!sandbox.Demo.has('cmd_leech_query')) throw new Error('演示模式应接管 cmd_leech_query');
+    for (const w of ['cmd_submit_answer', 'cmd_clear_leech', 'cmd_save_config', 'cmd_graph_build']) {
+      if (sandbox.Demo.has(w)) throw new Error('演示模式不该拦截写命令 ' + w);
+    }
+  }],
+
+  ['演示模式：示例数据覆盖统计/计划/到期/错词/图谱', () => {
+    const s = sandbox.Demo.for('cmd_stats', {});
+    if (s.history.length !== 14) throw new Error('示例历史不是 14 天');
+    if (!(s.total_words > 0)) throw new Error('示例统计为空');
+    const p = sandbox.Demo.for('cmd_review_plan', { days: 14 });
+    if (p.length !== 14) throw new Error('示例计划不是 14 天');
+    const d = sandbox.Demo.for('cmd_due_words', { limit: 60 });
+    if (!d.length) throw new Error('示例到期清单为空');
+    if (!d.some(x => x.overdue)) throw new Error('示例到期清单里应有逾期项');
+    const l = sandbox.Demo.for('cmd_leech_query', { order: 'wrong' });
+    if (!l.length) throw new Error('示例错词为空');
+    // 排序要真的按错误次数降序
+    for (let i = 1; i < l.length; i++) {
+      if (l[i - 1].state.wrong_count < l[i].state.wrong_count) {
+        throw new Error('示例错词没有按错误次数降序');
+      }
+    }
+    const g = sandbox.Demo.for('cmd_graph_view', { center: null });
+    if (!g.nodes.length || !g.edges.length) throw new Error('示例图谱为空');
+  }],
+
+  ['数据库面板：把路径、体积、每张表多少行都摆出来', async () => {
+    await sandbox.Maint.load();
+    const html = elById('db-info').innerHTML;
+    for (const k of ['词库', '学习进度', '复习日志', '知识图谱关系']) {
+      if (!html.includes(k)) throw new Error('没有列出「' + k + '」这张表');
+    }
+    if (!html.includes('体积')) throw new Error('没有显示体积');
+  }],
+
+  ['数据库维护：检查 / 整理 / 备份 三个动作都可执行', async () => {
+    const orig = sandbox.WordWiseAPI.API.dbMaintain;
+    const seen = [];
+    sandbox.WordWiseAPI.API.dbMaintain = (a) => { seen.push(a); return orig(a); };
+    try {
+      // 每个动作都是「点一下 → 异步请求 → 回显」。Mock 有 60ms 模拟延迟，
+      // 必须等回显真的写完再点下一个，否则测到的只是上一个动作的结果。
+      for (const id of ['btn-db-check', 'btn-db-vacuum', 'btn-db-backup']) {
+        elById('db-result').innerHTML = '';
+        elById(id)._fire('click', {});
+        for (let i = 0; i < 30 && !elById('db-result').innerHTML; i++) {
+          await new Promise((r) => setTimeout(r, 20));
+        }
+        if (!elById('db-result').innerHTML) throw new Error(id + ' 点了之后没有任何回显');
+      }
+      for (const a of ['check', 'vacuum', 'backup']) {
+        if (!seen.includes(a)) throw new Error('动作 ' + a + ' 没有被执行：' + seen.join(','));
+      }
+      const res = elById('db-result').innerHTML;
+      // 注意 mock 用的是全角括号，这里只匹配「调试模式」四个字
+      if (!res.includes("调试模式")) throw new Error("维护动作没有回显：seen=" + seen.join(",") + " res=" + JSON.stringify(res.slice(0,200)));
+      // 备份必须给出落盘路径，否则用户不知道文件去哪了
+      if (!res.includes('code')) throw new Error('备份结果里没给出路径：' + res.slice(0, 300));
+    } finally {
+      sandbox.WordWiseAPI.API.dbMaintain = orig;
+    }
+  }],
+
+  // ============================================================
+  // 第十八轮：数据与模型的存放位置（「装到 D 盘，数据别再写 C 盘」）
+  // ============================================================
+
+  ['存放位置：数据目录 / 模型目录 / 引擎 / 磁盘剩余都摆出来', async () => {
+    await sandbox.Maint.load();
+    const html = elById('storage-info').innerHTML;
+    for (const k of ['学习数据', '数据库', '模型文件', '推理引擎']) {
+      if (!html.includes(k)) throw new Error('没有列出「' + k + '」');
+    }
+    if (!html.includes('本机磁盘')) throw new Error('没有列出磁盘剩余空间 —— 用户没法判断该搬去哪');
+    if (!html.includes('剩余')) throw new Error('磁盘没显示剩余空间');
+    if (!html.includes('更换目录')) throw new Error('没有「更换目录」的入口');
+    if (!html.includes('合计占用')) throw new Error('没有给出总占用');
+  }],
+
+  ['存放位置：跟着软件走时必须提醒「删软件目录会连数据一起删」', async () => {
+    await sandbox.Maint.load();
+    const html = elById('storage-info').innerHTML;
+    // 「默认不写 C 盘」的代价就是这个，不说清楚等于给用户埋雷
+    if (!html.includes('删掉软件目录会连词库和进度一起删掉')) {
+      throw new Error('travels_with_app 为真时没有给出删目录的警告：' + html.slice(0, 400));
+    }
+    if (!html.includes('系统盘')) throw new Error('磁盘列表里没有标记系统盘');
+  }],
+
+  ['存放位置：环境变量强制指定时，如实说明界面改不动', async () => {
+    const orig = sandbox.WordWiseAPI.API.storageInfo;
+    sandbox.WordWiseAPI.API.storageInfo = async () => Object.assign({}, await orig(), {
+      from_env: true, env_data_dir: 'D:\\Forced',
+      models_env: 'E:\\ForcedModels',
+    });
+    try {
+      await sandbox.Maint.storage.load();
+      const html = elById('storage-info').innerHTML;
+      if (!html.includes('WORDWISE_DATA_DIR')) {
+        throw new Error('环境变量指定时没有说明来源');
+      }
+      if (!html.includes('优先级最高')) {
+        throw new Error('没有告诉用户「改这里不会生效」');
+      }
+      if (!html.includes('WORDWISE_MODELS_DIR')) throw new Error('没说明模型目录也受环境变量控制');
+    } finally {
+      sandbox.WordWiseAPI.API.storageInfo = orig;
+    }
+  }],
+
+  ['存放位置：打开换目录表单 → 点磁盘标签填路径 → 保存真的调后端', async () => {
+    await sandbox.Maint.load();
+    const S = sandbox.Maint.storage;
+
+    S.openEdit('models');
+    if (elById('storage-edit').classList.contains('hidden')) {
+      throw new Error('点了「更换目录」表单还是 hidden');
+    }
+    if (!elById('st-edit-title').textContent.includes('模型')) {
+      throw new Error('标题没跟着切换：' + elById('st-edit-title').textContent);
+    }
+    const chips = elById('st-edit-drives').innerHTML;
+    if (!chips.includes('D:\\')) throw new Error('没有列出可点的磁盘标签：' + chips.slice(0, 200));
+    // 标签文案要带建议目录名，用户才知道点下去会发生什么
+    if (!chips.includes('WordWiseModels')) throw new Error('磁盘标签没带建议目录名');
+
+    const filled = S.chooseDrive('E:\\');
+    if (filled !== 'E:\\WordWiseModels') throw new Error('点磁盘没填对路径：' + filled);
+    if (elById('st-edit-path').value !== 'E:\\WordWiseModels') {
+      throw new Error('路径没有写进输入框');
+    }
+
+    const seen = [];
+    const orig = sandbox.WordWiseAPI.API.setModelsDir;
+    sandbox.WordWiseAPI.API.setModelsDir = (p, m) => { seen.push([p, m]); return orig(p, m); };
+    try {
+      elById('st-edit-path').value = 'E:\\WW-Models';
+      elById('st-edit-migrate').checked = true;
+      await S.save(elById('btn-storage-save'));
+      if (!seen.length) throw new Error('点「保存」没有调后端');
+      if (seen[0][0] !== 'E:\\WW-Models') throw new Error('传下去的路径不对：' + seen[0][0]);
+      if (seen[0][1] !== true) throw new Error('「一起搬过去」没传成 true');
+      const res = elById('storage-result').innerHTML;
+      if (res.includes('没能改成功')) throw new Error('保存被报成失败：' + res.slice(0, 300));
+      if (!res.includes('重启')) throw new Error('改完没提示重启：' + res.slice(0, 300));
+      if (!res.includes('st-btn-restart')) throw new Error('没给「立即重启」的按钮');
+      if (!elById('storage-edit').classList.contains('hidden')) {
+        throw new Error('成功后表单没收起来');
+      }
+    } finally {
+      sandbox.WordWiseAPI.API.setModelsDir = orig;
+    }
+  }],
+
+  ['存放位置：重启按钮真的会调后端（改数据目录后必须重启才换库）', async () => {
+    let called = 0;
+    const orig = sandbox.WordWiseAPI.API.restartApp;
+    sandbox.WordWiseAPI.API.restartApp = async () => { called++; return { ok: true }; };
+    try {
+      elById('storage-result')._fire('click', { target: { id: 'st-btn-restart' } });
+      for (let i = 0; i < 20 && !called; i++) await new Promise((r) => setTimeout(r, 10));
+      if (!called) throw new Error('点「立即重启」没有调后端');
+    } finally {
+      sandbox.WordWiseAPI.API.restartApp = orig;
+    }
+  }],
+
+  ['存放位置：恢复默认传空路径（后端据此写 default，而不是删文件）', async () => {
+    const seen = [];
+    const origD = sandbox.WordWiseAPI.API.setDataDir;
+    const origM = sandbox.WordWiseAPI.API.setModelsDir;
+    sandbox.WordWiseAPI.API.setDataDir = (p, m) => { seen.push(['data', p, m]); return origD(p, m); };
+    sandbox.WordWiseAPI.API.setModelsDir = (p, m) => { seen.push(['models', p, m]); return origM(p, m); };
+    try {
+      const S = sandbox.Maint.storage;
+      S.openEdit('data');
+      await S.resetDefault(elById('btn-storage-default'));
+      S.openEdit('models');
+      await S.resetDefault(elById('btn-storage-default'));
+
+      if (seen.length !== 2) throw new Error('恢复默认没有各调一次：' + JSON.stringify(seen));
+      if (seen[0][0] !== 'data' || seen[1][0] !== 'models') {
+        throw new Error('恢复默认认错了目录类型：' + JSON.stringify(seen));
+      }
+      for (const s of seen) {
+        // ★ 空字符串是「恢复默认」的约定，不能传成 undefined（会被后端当成没给）
+        if (String(s[1]).trim() !== '') throw new Error('恢复默认应该传空路径，实际：' + JSON.stringify(s[1]));
+      }
+    } finally {
+      sandbox.WordWiseAPI.API.setDataDir = origD;
+      sandbox.WordWiseAPI.API.setModelsDir = origM;
+    }
+  }],
+
+  ['存放位置：路径没填时不给发请求（免得把数据目录指到一个空值上）', async () => {
+    let called = 0;
+    const orig = sandbox.WordWiseAPI.API.setDataDir;
+    sandbox.WordWiseAPI.API.setDataDir = (p, m) => { called++; return orig(p, m); };
+    try {
+      const S = sandbox.Maint.storage;
+      S.openEdit('data');
+      elById('st-edit-path').value = '   ';
+      await S.save(elById('btn-storage-save'));
+      if (called) throw new Error('空路径竟然发出去了，会把数据目录指向一个无意义的位置');
+    } finally {
+      sandbox.WordWiseAPI.API.setDataDir = orig;
+    }
+  }],
+
+  ['本地大模型：状态与三档模型清单都渲染出来', async () => {
+    await sandbox.Maint.load();
+    const st = elById('llm-local-status').innerHTML;
+    if (!st.includes('未启动')) throw new Error('状态行没写清楚服务有没有起');
+    if (!st.includes('未安装')) throw new Error('引擎缺失时应该明确提示');
+    const list = elById('llm-model-list').innerHTML;
+    for (const n of ['1.7B', '0.6B', '1.5B']) {
+      if (!list.includes(n)) throw new Error('模型清单里少了 ' + n);
+    }
+    if (!list.includes('MB')) throw new Error('模型没标体积，用户没法判断要不要下');
+  }],
+
+  // ============================================================
+  // 第十七轮：左下角「本地模型」弹层（启停不用再翻设置页）
+  // ============================================================
+
+  ['本地模型弹层：点状态条展开，再点收起', () => {
+    sandbox.Maint.chip.setOpen(false);
+    elById('llm-chip')._fire('click', {});
+    if (!sandbox.Maint.chip.isOpen) throw new Error('点状态条没有展开弹层');
+    if (elById('llm-pop').classList.contains('hidden')) throw new Error('弹层还带着 hidden');
+    elById('llm-chip')._fire('click', {});
+    if (sandbox.Maint.chip.isOpen) throw new Error('再点一次没有收起');
+    if (!elById('llm-pop').classList.contains('hidden')) throw new Error('收起后应加回 hidden');
+  }],
+
+  ['本地模型弹层：引擎没装时给「去安装」而不是「启动」', async () => {
+    const orig = sandbox.WordWiseAPI.API.localLlmStatus;
+    sandbox.WordWiseAPI.API.localLlmStatus = async () => ({
+      engine: { ready: false }, models: { installed: [] },
+      server: { running: false, port: 0, model: '' }, threads: 4, cpu: 8, auto_start: false,
+    });
+    try {
+      await sandbox.Maint.chip.refresh();
+      const html = elById('llm-pop-actions').innerHTML;
+      if (!html.includes('去安装引擎')) throw new Error('缺引擎时文案不对：' + html);
+      // 引擎不在却给「启动」，用户点了必然报错 —— 这正是要避免的
+      if (html.includes('>启动<')) throw new Error('引擎没装却给了「启动」按钮');
+    } finally { sandbox.WordWiseAPI.API.localLlmStatus = orig; }
+  }],
+
+  ['本地模型弹层：有引擎没模型时引导去下载', async () => {
+    const orig = sandbox.WordWiseAPI.API.localLlmStatus;
+    sandbox.WordWiseAPI.API.localLlmStatus = async () => ({
+      engine: { ready: true }, models: { installed: [] },
+      server: { running: false, port: 0, model: '' }, threads: 4, cpu: 8, auto_start: false,
+    });
+    try {
+      await sandbox.Maint.chip.refresh();
+      const html = elById('llm-pop-actions').innerHTML;
+      if (!html.includes('去下载模型')) throw new Error('缺模型时文案不对：' + html);
+    } finally { sandbox.WordWiseAPI.API.localLlmStatus = orig; }
+  }],
+
+  ['本地模型弹层：就绪给「启动」，运行中给「停止」', async () => {
+    const origSt = sandbox.WordWiseAPI.API.localLlmStatus;
+    const origMl = sandbox.WordWiseAPI.API.localLlmModels;
+    sandbox.WordWiseAPI.API.localLlmModels = async () => ([
+      { id: 'qwen3-1.7b', name: 'Qwen3 1.7B（推荐）',
+        file: 'Qwen3-1.7B-Q4_K_M.gguf', size_bytes: 1107400000, recommended: true },
+    ]);
+    const base = {
+      engine: { ready: true }, models: { installed: ['qwen3-1.7b'] }, threads: 4, cpu: 8,
+      auto_start: false,
+    };
+    try {
+      sandbox.WordWiseAPI.API.localLlmStatus = async () =>
+        Object.assign({}, base, { server: { running: false, port: 0, model: '' } });
+      await sandbox.Maint.chip.refresh();
+      let html = elById('llm-pop-actions').innerHTML;
+      if (!html.includes('>启动<')) throw new Error('就绪时应给「启动」：' + html);
+
+      // 运行中：后端记的是去扩展名的文件名，前端要能对上才不会一直显示「启动」
+      sandbox.WordWiseAPI.API.localLlmStatus = async () =>
+        Object.assign({}, base, { server: { running: true, port: 18080, model: 'Qwen3-1.7B-Q4_K_M' } });
+      await sandbox.Maint.chip.refresh();
+      html = elById('llm-pop-actions').innerHTML;
+      if (!html.includes('停止')) throw new Error('运行中应给「停止」：' + html);
+      const ml = elById('llm-pop-models').innerHTML;
+      if (!ml.includes('运行中')) throw new Error('模型清单没标出哪个在跑');
+      // 反向：跑的是 0.6B 时，1.7B 那一行必须是「启动」而不是「运行中」
+      sandbox.WordWiseAPI.API.localLlmModels = async () => ([
+        { id: 'qwen3-1.7b', name: 'Qwen3 1.7B（推荐）',
+          file: 'Qwen3-1.7B-Q4_K_M.gguf', size_bytes: 1107400000, recommended: true },
+        { id: 'qwen3-0.6b', name: 'Qwen3 0.6B（轻量）',
+          file: 'Qwen3-0.6B-Q4_K_M.gguf', size_bytes: 396700000, recommended: false },
+      ]);
+      sandbox.WordWiseAPI.API.localLlmStatus = async () =>
+        Object.assign({}, base, { models: { installed: ['qwen3-1.7b', 'qwen3-0.6b'] },
+          server: { running: true, port: 18080, model: 'Qwen3-0.6B-Q4_K_M' } });
+      await sandbox.Maint.chip.refresh();
+      const ml2 = elById('llm-pop-models').innerHTML;
+      // 模型名里带小数点（1.7B / 0.6B），归一化写成「砍掉最后一个点之后」就会
+      // 把版本号当扩展名，两行都会判错。这里把「只有一行标运行中」钉死。
+      const runs = (ml2.match(/运行中/g) || []).length;
+      if (runs !== 1) throw new Error('应且只应有一行标「运行中」，实际 ' + runs + ' 行：' + ml2);
+      const rows = ml2.split('class="lp-model"').slice(1);
+      if (rows[0].includes('运行中')) throw new Error('跑的是 0.6B，却把 1.7B 标成了运行中');
+      if (!rows[1].includes('运行中')) throw new Error('跑的是 0.6B，0.6B 那行没标出来');
+    } finally {
+      sandbox.WordWiseAPI.API.localLlmStatus = origSt;
+      sandbox.WordWiseAPI.API.localLlmModels = origMl;
+    }
+  }],
+
+  ['本地模型弹层：点「启动」真的会调后端，且先补齐引擎', async () => {
+    const origSt = sandbox.WordWiseAPI.API.localLlmStatus;
+    const origMl = sandbox.WordWiseAPI.API.localLlmModels;
+    const origStart = sandbox.WordWiseAPI.API.localLlmStart;
+    const origEngine = sandbox.WordWiseAPI.API.localLlmInstallEngine;
+    const calls = [];
+    // 引擎未就绪：应当先装引擎再启动
+    sandbox.WordWiseAPI.API.localLlmStatus = async () => ({
+      engine: { ready: false }, models: { installed: ['qwen3-1.7b'] },
+      server: { running: false, port: 0, model: '' }, threads: 4, cpu: 8, auto_start: false,
+    });
+    sandbox.WordWiseAPI.API.localLlmModels = async () => ([]);
+    sandbox.WordWiseAPI.API.localLlmInstallEngine = async () => { calls.push('engine'); return { ok: true }; };
+    sandbox.WordWiseAPI.API.localLlmStart = async (id) => { calls.push('start:' + (id || '-')); return { ok: true, message: 'x' }; };
+    try {
+      await sandbox.Maint.chip.refresh();
+      await sandbox.Maint.chip.start(null, 'qwen3-1.7b');
+      if (calls[0] !== 'engine') throw new Error('应先装引擎再启动，实际顺序：' + calls.join(','));
+      if (!calls.some(c => c === 'start:qwen3-1.7b')) throw new Error('没有把模型 id 传给后端：' + calls.join(','));
+    } finally {
+      sandbox.WordWiseAPI.API.localLlmStatus = origSt;
+      sandbox.WordWiseAPI.API.localLlmModels = origMl;
+      sandbox.WordWiseAPI.API.localLlmStart = origStart;
+      sandbox.WordWiseAPI.API.localLlmInstallEngine = origEngine;
+    }
+  }],
+
+  ['本地模型弹层：「启动时自动拉起」开关落盘，且两处同步', async () => {
+    const orig = sandbox.WordWiseAPI.API.setLocalLlmAuto;
+    const origSt = sandbox.WordWiseAPI.API.localLlmStatus;
+    let saved = null;
+    sandbox.WordWiseAPI.API.setLocalLlmAuto = async (on) => {
+      saved = on;
+      return { ok: true, enabled: on, message: '（调试模式）已更新自动启动设置' };
+    };
+    sandbox.WordWiseAPI.API.localLlmStatus = async () => ({
+      engine: { ready: true }, models: { installed: ['qwen3-1.7b'] },
+      server: { running: false, port: 0, model: '' }, threads: 4, cpu: 8, auto_start: true,
+    });
+    try {
+      await sandbox.Maint.chip.refresh();
+      if (!elById('llm-pop-auto').checked) throw new Error('弹层没有反映后端已开启的自动启动');
+
+      await sandbox.Maint.chip.toggleAuto(false);
+      if (saved !== false) throw new Error('关掉开关没有落盘：' + saved);
+      if (elById('set-llm-auto-start').checked) {
+        throw new Error('设置页那个开关没跟着关，两处显示会不一致');
+      }
+    } finally {
+      sandbox.WordWiseAPI.API.setLocalLlmAuto = orig;
+      sandbox.WordWiseAPI.API.localLlmStatus = origSt;
+    }
+  }],
+
+  ['本地模型弹层：停止后把「AI 地址已还原」如实告诉用户', async () => {
+    const origStop = sandbox.WordWiseAPI.API.localLlmStop;
+    const origSt = sandbox.WordWiseAPI.API.localLlmStatus;
+    const origMl = sandbox.WordWiseAPI.API.localLlmModels;
+    let stopped = 0;
+    // 后端停服时会把 base_url 还回用户的 LM Studio，这条信息必须传达到位，
+    // 否则用户不知道「AI 又能用了」，会以为只是停了个服务。
+    sandbox.WordWiseAPI.API.localLlmStop = async () => {
+      stopped += 1;
+      return { ok: true, restored: true, message: '本地模型服务已停止，AI 地址已还原' };
+    };
+    sandbox.WordWiseAPI.API.localLlmStatus = async () => ({
+      engine: { ready: true }, models: { installed: ['qwen3-1.7b'] },
+      server: { running: false, port: 0, model: '' }, threads: 4, cpu: 8, auto_start: false,
+    });
+    sandbox.WordWiseAPI.API.localLlmModels = async () => ([]);
+    try {
+      elById('toast').textContent = '';
+      await sandbox.Maint.chip.stop(null);
+      if (stopped !== 1) throw new Error('没有真的调后端停服，调了 ' + stopped + ' 次');
+      const t = elById('toast').textContent;
+      if (!t.includes('还原')) throw new Error('后端说地址已还原，前端却没说：' + JSON.stringify(t));
+    } finally {
+      sandbox.WordWiseAPI.API.localLlmStop = origStop;
+      sandbox.WordWiseAPI.API.localLlmStatus = origSt;
+      sandbox.WordWiseAPI.API.localLlmModels = origMl;
+    }
+  }],
+
+  ['左下角状态条：标题始终带着「可点击」的提示', async () => {
+    // 状态消息会写到 chip.title 上。如果直接覆盖，HTML 里那句
+    // 「点击查看 AI 服务」就没了 —— 用户再也看不出这块能点。
+    for (const st of [
+      { online: true, active_model: 'qwen3-1.7b', message: 'qwen3-1.7b 已就绪' },
+      { online: false, message: '连接被拒绝' },
+    ]) {
+      sandbox.App.updateLlmChip(st);
+      const t = elById('llm-chip').title || '';
+      if (!t.includes('点击查看 AI 服务')) {
+        throw new Error('状态条标题丢了可点击提示：' + JSON.stringify(t));
+      }
+      if (st.message && !t.includes(st.message)) {
+        throw new Error('状态条标题丢了状态消息：' + JSON.stringify(t));
+      }
+    }
+  }],
+
+  ['左下角状态条：在线 API 与本地模型分开措辞', async () => {
+    // 配的是在线 API，却说「本地模型未连接」，用户会去 LM Studio 里白找一圈
+    sandbox.App.updateLlmChip({ online: false, endpoint_kind: 'cloud', message: 'x',
+      base_url: 'https://api.deepseek.com/v1' });
+    let t = elById('llm-text').textContent;
+    if (!t.includes('在线 API')) throw new Error('在线 API 未连接时措辞不对：' + t);
+
+    sandbox.App.updateLlmChip({ online: true, endpoint_kind: 'cloud', active_model: 'deepseek-chat',
+      message: 'x', base_url: 'https://api.deepseek.com/v1' });
+    t = elById('llm-text').textContent;
+    if (!t.includes('在线 API')) throw new Error('在线 API 已连接时措辞不对：' + t);
+
+    sandbox.App.updateLlmChip({ online: false, endpoint_kind: 'local', message: 'x',
+      base_url: 'http://127.0.0.1:1234/v1' });
+    t = elById('llm-text').textContent;
+    if (!t.includes('本地模型')) throw new Error('本地服务措辞不对：' + t);
+  }],
+
+  // ============================================================
+  // AI 服务来源：本地模型 / 在线 API
+  // ============================================================
+
+  ['AI 服务：预设表里的地址都带版本号，且不重复', () => {
+    const ps = sandbox.Settings.presets;
+    if (!ps || ps.length < 6) throw new Error('预设太少：' + (ps ? ps.length : 0));
+    const seen = new Set();
+    for (const p of ps) {
+      if (seen.has(p.id)) throw new Error('预设 id 重复：' + p.id);
+      seen.add(p.id);
+      if (!p.name) throw new Error('预设没有名字：' + p.id);
+      const b = (p.base || '').replace(/\/+$/, '');
+      if (!b) continue;  // 本机一键部署 / 自定义：地址由运行时决定
+      if (!/^https?:\/\//.test(b)) throw new Error('地址缺协议头：' + b);
+      // 后端 endpoint() 见到版本号后缀就直接接 /chat/completions。
+      // 预设多写一段就会拼成 /v1/v1/... —— 这里把「写到版本号为止」钉死。
+      if (!/\/v\d+[a-z]*$/.test(b)) {
+        throw new Error('地址没停在版本号那一段，会被拼坏：' + b);
+      }
+    }
+    // 国内直连可用的几家必须在，否则等于没支持在线 API
+    for (const id of ['deepseek', 'dashscope', 'moonshot', 'zhipu']) {
+      if (!seen.has(id)) throw new Error('缺少预设：' + id);
+    }
+  }],
+
+  ['AI 服务：按地址反推来源，托管端口段与后端一致', () => {
+    const d = sandbox.Settings.detectPreset;
+    if (d('https://api.deepseek.com/v1') !== 'deepseek') throw new Error('没认出 DeepSeek');
+    if (d('https://open.bigmodel.cn/api/paas/v4') !== 'zhipu') throw new Error('没认出智谱');
+    if (d('http://127.0.0.1:1234/v1') !== 'lm-studio') throw new Error('没认出 LM Studio');
+    // 托管端口是运行时挑的，只能按段认；边界必须与 Rust 侧 pick_port 同源
+    if (d('http://127.0.0.1:18080/v1') !== 'local-managed') throw new Error('没认出托管服务(下界)');
+    if (d('http://127.0.0.1:18179/v1') !== 'local-managed') throw new Error('没认出托管服务(上界内)');
+    if (d('http://127.0.0.1:18180/v1') === 'local-managed') throw new Error('上界外被误判成托管');
+    if (d('https://api.example.com/v1') !== 'custom') throw new Error('陌生地址应为自定义');
+    // 尾部斜杠不能影响判断
+    if (d('https://api.deepseek.com/v1/') !== 'deepseek') throw new Error('尾斜杠没处理');
+  }],
+
+  ['AI 服务：选预设带出地址与推荐模型，但不动已填的 Key', async () => {
+    elById('set-llm-key').value = 'sk-我的密钥';
+    elById('set-llm-model').value = '旧模型';
+
+    await sandbox.Settings.applyPreset('deepseek');
+    if (elById('set-llm-url').value !== 'https://api.deepseek.com/v1') {
+      throw new Error('没带出 DeepSeek 地址：' + elById('set-llm-url').value);
+    }
+    if (elById('set-llm-model').value !== 'deepseek-chat') {
+      throw new Error('没带出推荐模型：' + elById('set-llm-model').value);
+    }
+    // 在几家里来回试是常事，一把一清会逼用户反复粘贴
+    if (elById('set-llm-key').value !== 'sk-我的密钥') {
+      throw new Error('切来源把 Key 清掉了');
+    }
+
+    // 智谱的地址结尾是 v4：带出去必须是 v4，不能自作聪明补 /v1
+    await sandbox.Settings.applyPreset('zhipu');
+    if (elById('set-llm-url').value !== 'https://open.bigmodel.cn/api/paas/v4') {
+      throw new Error('智谱地址不对：' + elById('set-llm-url').value);
+    }
+
+    // 换成 LM Studio：模型要清空，让后端走「自动选第一个已加载模型」
+    await sandbox.Settings.applyPreset('lm-studio');
+    if (elById('set-llm-model').value !== '') {
+      throw new Error('本机来源应清空模型名，实际：' + elById('set-llm-model').value);
+    }
+    if (elById('set-llm-url').value !== 'http://127.0.0.1:1234/v1') {
+      throw new Error('LM Studio 地址不对：' + elById('set-llm-url').value);
+    }
+
+    // 自定义：地址和模型都别碰
+    elById('set-llm-url').value = 'https://my-own-gateway.internal/openai';
+    elById('set-llm-model').value = 'my-model';
+    await sandbox.Settings.applyPreset('custom');
+    if (elById('set-llm-url').value !== 'https://my-own-gateway.internal/openai' ||
+        elById('set-llm-model').value !== 'my-model') {
+      throw new Error('选「自定义」不该改动用户填的地址/模型');
+    }
+  }],
+
+  ['AI 服务：Key 显示/隐藏切换，且「申请 Key」只在该露面时露面', () => {
+    elById('set-llm-key').type = 'password';
+    elById('btn-llm-key-eye').textContent = '显示';
+    sandbox.Settings.toggleKeyVisible();
+    if (elById('set-llm-key').type !== 'text') throw new Error('点「显示」没变成明文');
+    if (elById('btn-llm-key-eye').textContent !== '隐藏') throw new Error('按钮文案没跟着变');
+    sandbox.Settings.toggleKeyVisible();
+    if (elById('set-llm-key').type !== 'password') throw new Error('再点一下没变回密码');
+
+    // 本机来源没有 Key 可申请，按钮要藏起来
+    sandbox.Settings.applyPreset('lm-studio');
+    if (!elById('btn-llm-getkey').classList.contains('hidden')) {
+      throw new Error('本机来源不该显示「申请 API Key」');
+    }
+    sandbox.Settings.applyPreset('deepseek');
+    if (elById('btn-llm-getkey').classList.contains('hidden')) {
+      throw new Error('在线 API 应显示「申请 API Key」');
+    }
+    if (!String(elById('btn-llm-getkey').dataset.url || '').startsWith('https://')) {
+      throw new Error('「申请 Key」没有可打开的地址');
+    }
+  }],
+
+  ['AI 服务：保存会带上 Key，清空 Key 要真的清掉', async () => {
+    const origSave = sandbox.WordWiseAPI.API.saveConfig;
+    let saved = null;
+    sandbox.WordWiseAPI.API.saveConfig = async (c) => { saved = JSON.parse(JSON.stringify(c)); return null; };
+    try {
+      // save() 在 config 为空时会先 load()，而 load() 会用磁盘里的值回填输入框，
+      // 把我刚填的覆盖掉 —— 所以必须先 load 再填。
+      await sandbox.Settings.load();
+      sandbox.Settings.config.llm.api_key = 'sk-旧密钥';
+      elById('set-llm-key').value = '  sk-新的  ';
+      elById('set-llm-url').value = 'https://api.deepseek.com/v1';
+      elById('set-llm-model').value = 'deepseek-chat';
+      await sandbox.Settings.save();
+      if (!saved || saved.llm.api_key !== 'sk-新的') {
+        throw new Error('Key 没保存或没去空格：' + JSON.stringify(saved && saved.llm.api_key));
+      }
+
+      // 清空 = 真的要停用。若「留空则保持原值」，用户会拿废弃 Key 去请求，
+      // 收到 401 还找不到原因。
+      elById('set-llm-key').value = '';
+      await sandbox.Settings.save();
+      if (saved.llm.api_key !== '') throw new Error('清空 Key 没生效：' + JSON.stringify(saved.llm.api_key));
+    } finally {
+      sandbox.WordWiseAPI.API.saveConfig = origSave;
+    }
+  }],
+
+  ['AI 服务：在线 API 生效时弹层不给「启动本地模型」当主按钮', async () => {
+    const origSt = sandbox.WordWiseAPI.API.localLlmStatus;
+    const origAi = sandbox.WordWiseAPI.API.llmStatus;
+    sandbox.WordWiseAPI.API.localLlmStatus = async () => ({
+      engine: { ready: true }, models: { installed: ['qwen3-1.7b'] },
+      server: { running: false, port: 0, model: '' }, threads: 4, cpu: 8, auto_start: false,
+    });
+    sandbox.WordWiseAPI.API.llmStatus = async () => ({
+      online: true, base_url: 'https://api.deepseek.com/v1', models: ['deepseek-chat'],
+      active_model: 'deepseek-chat', message: '已连接 api.deepseek.com，共 1 个模型可用',
+      endpoint_kind: 'cloud',
+    });
+    try {
+      await sandbox.Maint.chip.refresh();
+      const html = elById('llm-pop-actions').innerHTML;
+      // 在线 API 生效时把「启动」摆成主按钮是误导：一点下去 AI 就从云端
+      // 切成本地小模型，用户只会觉得「点了反而变笨了」。
+      if (!html.includes('打开 AI 设置')) throw new Error('在线 API 时主按钮应是「打开 AI 设置」：' + html);
+      if (html.includes('>启动<')) throw new Error('在线 API 时不该给「启动」当主按钮');
+      // 但要留一个小口子，想换回本机模型的人找得到
+      if (!html.includes('改用本机模型')) throw new Error('没有换回本机模型的入口：' + html);
+      const st = elById('llm-pop-status').innerHTML;
+      if (!st.includes('api.deepseek.com')) throw new Error('状态行没说出在连哪家：' + st);
+      if (!st.includes('已连接')) throw new Error('在线 API 连通时应显示「已连接」：' + st);
+    } finally {
+      sandbox.WordWiseAPI.API.localLlmStatus = origSt;
+      sandbox.WordWiseAPI.API.llmStatus = origAi;
+    }
+  }],
+
+  // ---- 发音按钮：三个曾经「点了没反应」的位置 ----
+  ['发音：Speak 必须导出 playUrl / playTts（翻译页与词级译文朗读依赖它）', () => {
+    const S = sandbox.Speak;
+    for (const k of ['speak', 'speakText', 'playUrl', 'playTts', 'btnHtml', 'bindDelegate', 'bcp47']) {
+      if (typeof S[k] !== 'function') throw new Error(`Speak.${k} 未导出`);
+    }
+    return '';
+  }],
+  ['发音：详情卡 🔊 带上词条数据（静态结构取不到词的老问题）', async () => {
+    await sandbox.Detail.open(entry);
+    const b = elById('dc-audio');
+    if (b.dataset.speakWord !== 'abandon') throw new Error('dc-audio 没挂上词：' + b.dataset.speakWord);
+    if (!b.dataset.speakLang) throw new Error('dc-audio 没挂上语言');
+    if (!b.dataset.speakAudio && b.dataset.speakAudio !== '') throw new Error('dc-audio 的音频字段缺失');
+    return '';
+  }],
+
+  // ---- 整句查询：不再直接甩「查询失败」 ----
+  ['整句识别：只有像句子的才走翻译，单词/短语不受影响', () => {
+    const L = sandbox.Lookup;
+    if (!L.looksLikeSentence('how are you doing today')) throw new Error('整句没被识别');
+    if (L.looksLikeSentence('apple')) throw new Error('单词被误判成句子');
+    if (L.looksLikeSentence('take off')) throw new Error('两词短语被误判成句子');
+    if (!L.looksLikeSentence('今天天气怎么样？')) throw new Error('中文整句没被识别');
+    return '';
+  }],
+  ['整句查询：渲染成 sent-card，原文每个词可点', async () => {
+    await sandbox.Lookup.query('how are you doing today');
+    await new Promise(r => setTimeout(r, 260));
+    const html = elById('lk-result').innerHTML;
+    if (!html.includes('sent-card')) throw new Error('整句没渲染成 sent-card：' + html.slice(0, 160));
+    if (!html.includes('sent-word')) throw new Error('原文没有按词拆成可点链接');
+    if (html.includes('查询失败')) throw new Error('整句不该走到「查询失败」');
+    return html;
+  }],
+  ['历史栈：能一路退回最早的查询，退到底后按钮置灰', async () => {
+    const back = elById('lk-back');
+    if (back.disabled) throw new Error('有历史时返回按钮仍是禁用');
+    let steps = 0;
+    while (!back.disabled && steps++ < 30) {
+      await sandbox.Lookup.goBack();
+      await new Promise(r => setTimeout(r, 200));
+    }
+    if (!back.disabled) throw new Error('一直退到底都没置灰，栈没有收敛');
+    return `退了 ${steps} 步`;
+  }],
+
+  // ---- 查词判定：AI 可用性不得决定成败（需求 D） ----
+  ['查词判定：词典有结果、AI 没开 → 显示成功 + 降级提示，不显示失败', async () => {
+    const API = sandbox.WordWiseAPI.API;
+    const orig = API.lookup;
+    const apple = {
+      word: 'apple', lang: 'en',
+      phonetic: { uk: '/ˈæp.əl/', us: '' },
+      senses: [{ pos: 'n.', definition: '苹果', examples: [] }],
+      inflections: [], related: [], mnemonic: '', source: 'youdao', extra: {},
+    };
+    API.lookup = async () => ({
+      word: 'apple', lang: 'en', entry: apple,
+      sources: ['有道', '剑桥'], from_cache: false, from_llm: false, trace: [],
+      // 后端新契约：AI 没参与只写 note，不算失败
+      note: '本地大模型未启用，本次未使用 AI 兜底。', degraded: false,
+    });
+    try {
+      await sandbox.Lookup.query('apple');
+      await new Promise(r => setTimeout(r, 160));
+      const html = elById('lk-result').innerHTML;
+      if (html.includes('未查到')) throw new Error('词典有结果却被判成了失败');
+      if (!html.includes('lk-degrade-note')) throw new Error('AI 未参与时没渲染降级提示条');
+      if (!html.includes('苹果')) throw new Error('词条没渲染出来');
+    } finally {
+      API.lookup = orig;
+    }
+    return '';
+  }],
+  ['查词判定：启发式解析成功 → 数据来源标注「启发式解析」', async () => {
+    const API = sandbox.WordWiseAPI.API;
+    const orig = API.lookup;
+    const apple = {
+      word: 'apple', lang: 'en',
+      phonetic: { uk: '/ˈæp.əl/', us: '' },
+      senses: [{ pos: '', definition: 'a round fruit', examples: [] }],
+      inflections: [], related: [], mnemonic: '', source: 'src',
+      extra: { heuristic: '1' },
+    };
+    API.lookup = async () => ({
+      word: 'apple', lang: 'en', entry: apple,
+      sources: ['某词典'], from_cache: false, from_llm: false, trace: [],
+      note: '该词的释义由启发式解析得到（词典源返回结构与预设映射不一致），字段可能不完整。',
+      degraded: true,
+    });
+    try {
+      await sandbox.Lookup.query('apple');
+      await new Promise(r => setTimeout(r, 160));
+      const html = elById('lk-result').innerHTML;
+      if (html.includes('未查到')) throw new Error('启发式解析成功不该走失败态');
+      if (!html.includes('启发式解析')) throw new Error('降级来源没标注出来');
+    } finally {
+      API.lookup = orig;
+    }
+    return '';
+  }],
+
+  // ---- AI 讲解：存档 / 并入词库 ----
+  ['讲解：渲染「并入词库」与「查看原文」，且后者用 class 绑（原来用 id 点不动）', () => {
+    const pane = elById('dc-pane-ai');
+    sandbox.Detail.setExplainSaved('dc-pane-ai', false);
+    sandbox.Detail.renderExplain(pane, {
+      word: 'apple', text: '苹果', original: 'apple (the fruit)',
+      lang: 'zh', translated: true, note: '来自讲解存档（未重新调用模型）',
+    }, false);
+    const html = pane.innerHTML;
+    if (!html.includes('ai-to-book')) throw new Error('没渲染「并入词库」按钮');
+    if (!html.includes('ai-orig-toggle')) throw new Error('没渲染「查看原文」按钮');
+    if (html.includes('id="ai-orig-toggle"')) {
+      throw new Error('还在用 id 绑定「查看原文」：两个容器同时存在时会互相抢 id，按钮点不动');
+    }
+
+    // 已并入词库 → 按钮变禁用状态，避免重复点击
+    sandbox.Detail.setExplainSaved('dc-pane-ai', true);
+    sandbox.Detail.renderExplain(pane, {
+      word: 'apple', text: '苹果', original: '苹果', lang: 'zh', translated: false,
+    }, false);
+    if (!pane.innerHTML.includes('已并入词库')) throw new Error('已并入时不显示状态');
+    return '';
+  }],
+  ['讲解：存档相关的 API 方法都在（缺一个按钮点了就没反应）', () => {
+    const A = sandbox.WordWiseAPI.API;
+    for (const m of ['saveExplain', 'getExplain', 'listExplains', 'searchExplains',
+                     'deleteExplain', 'clearExplains', 'explainCount', 'explainToEntry']) {
+      if (typeof A[m] !== 'function') throw new Error('API 缺少 ' + m);
+    }
+    return '';
+  }],
+
+  ['讲解：已有存档时直接本地渲染、不再调模型（「第二次秒回」）', async () => {
+    const API = sandbox.WordWiseAPI.API;
+    await API.saveExplain('apple', null, null, '存档讲解正文：苹果', 'raw original', false);
+
+    const orig = API.aiExplain;
+    let called = 0;
+    API.aiExplain = async () => {
+      called++;
+      return { word: 'apple', text: '模型新讲解', original: 'x', lang: 'zh', translated: false };
+    };
+    try {
+      const pane = elById('dc-pane-ai');
+      await sandbox.Detail.explainInto('dc-pane-ai', 'apple');
+      const html = pane.innerHTML;
+      if (called !== 0) throw new Error('有存档却仍然调了模型，没做到秒回');
+      if (!html.includes('存档讲解正文')) throw new Error('没渲染存档正文：' + html.slice(0, 160));
+      if (!html.includes('ai-regen')) throw new Error('存档直出时没给「重新讲解」出口');
+    } finally {
+      API.aiExplain = orig;
+    }
+    return '';
+  }],
+
+  // ---- 学习页：界面随词库（教材）语言自动适配 ----
+  ['学习页：日语词库 → 按钮改「看日选中」、题面改「日语单词」、语言标记显示日语', () => {
+    const S = sandbox.Study;
+    S.state.bookLangById['jlpt-n3'] = 'ja';
+    S.setBook('jlpt-n3');
+    const en2zh = segBtns.find(b => b.dataset.mode === 'en_to_zh');
+    if (en2zh.textContent !== '看日选中') {
+      throw new Error('日语词库下应为「看日选中」，实际 ' + en2zh.textContent);
+    }
+    if (elById('study-lang-chip').textContent !== '日语') throw new Error('语言标记没显示日语');
+    if (S.modePromptLabel('zh_to_en', S.langInfo('ja')) !== '请选择正确的日语单词') {
+      throw new Error('题面文案没跟着语言走');
+    }
+    return '';
+  }],
+  ['学习页：中文词库 → 按钮改「看词选义」，并下线无意义的「看中选中」', () => {
+    const S = sandbox.Study;
+    S.state.bookLangById['zh-core'] = 'zh';
+    S.setBook('zh-core');
+    const en2zh = segBtns.find(b => b.dataset.mode === 'en_to_zh');
+    const zh2en = segBtns.find(b => b.dataset.mode === 'zh_to_en');
+    if (en2zh.textContent !== '看词选义') throw new Error('中文词库下应为「看词选义」，实际 ' + en2zh.textContent);
+    if (!zh2en.disabled) throw new Error('中文词库应下线「看中选中」');
+    // 当前模式被下线时要自动回到默认模式，否则会卡在一个不可用模式上
+    if (S.state.mode === 'zh_to_en') throw new Error('被下线的模式仍被选中');
+    return '';
+  }],
+  ['学习页：切回英语词库后模式重新可用，且不受上一本影响', () => {
+    const S = sandbox.Study;
+    S.state.bookLangById['cet4-core'] = 'en';
+    S.setBook('cet4-core');
+    const zh2en = segBtns.find(b => b.dataset.mode === 'zh_to_en');
+    if (zh2en.disabled) throw new Error('英语词库下「看中选英」应可用');
+    if (zh2en.textContent !== '看中选英') throw new Error('英语词库下文案应为「看中选英」');
+    if (!elById('study-lang-chip').classList.contains('hidden')) {
+      // 英语词库仍有语言标记（显示「英语」），这里只要求它不报错即可
+    }
+    return '';
+  }],
+  ['学习页：释义语言默认中文，可切「原文释义」并按词库语言分别记住', () => {
+    const S = sandbox.Study;
+    S.state.bookLangById['jlpt-n3'] = 'ja';
+    S.setBook('jlpt-n3');
+    if (S.state.defLang !== 'zh') throw new Error('首次应为中文释义，实际 ' + S.state.defLang);
+    S.setDefLang('src');
+    if (S.state.defLang !== 'src') throw new Error('切「原文释义」没生效');
+    S.setBook('cet4-core');
+    S.setBook('jlpt-n3');
+    if (S.state.defLang !== 'src') throw new Error('日语词库的释义语言选择没被记住');
+    S.setDefLang('zh');
+    return '';
+  }],
+
+  // ---- 朗读设置（离线系统语音） ----
+  ['朗读设置：语速/音色落盘，「自动」能清掉手工音色', () => {
+    const S = sandbox.Speak;
+    for (const k of ['voicePref', 'setVoicePref', 'ratePref', 'setRatePref', 'resetPrefs', 'preview']) {
+      if (typeof S[k] !== 'function') throw new Error(`Speak.${k} 未导出`);
+    }
+    S.setRatePref(1.25);
+    if (Math.abs(S.ratePref() - 1.25) > 1e-6) throw new Error('语速没落盘：' + S.ratePref());
+    S.setVoicePref('en-US', 'Microsoft Aria');
+    if (S.voicePref() !== 'en-US|Microsoft Aria') throw new Error('音色没落盘：' + S.voicePref());
+    S.setVoicePref('', '');
+    if (S.voicePref() !== '') throw new Error('选「自动」应清掉手工音色');
+    S.resetPrefs();
+    if (Math.abs(S.ratePref() - 0.95) > 1e-6) throw new Error('恢复默认失败：' + S.ratePref());
+    return '';
+  }],
+  ['朗读设置：读不到系统语音时如实提示，而不是给一个空下拉', () => {
+    sandbox.Settings.renderSpeakVoices();
+    const hint = elById('set-speak-voices-hint').textContent;
+    if (!hint || !hint.includes('语音')) throw new Error('没给出音色缺失提示：' + hint);
+    const sel = elById('set-speak-voice').innerHTML;
+    if (!sel.includes('系统未提供')) throw new Error('音色下拉没有降级文案：' + sel);
+    return hint;
   }],
 
   // ---- 整应用启动链路 ----

@@ -11,6 +11,11 @@ async function invoke(cmd, args = {}) {
   if (!HAS_TAURI) {
     return Mock.call(cmd, args);
   }
+  // 演示模式：只接管白名单里的「读」命令。写操作（提交答案、清错词、存设置…）
+  // 一律照常走后端，所以示例数据永远不可能落进真实数据库。
+  if (window.Demo && window.Demo.enabled && window.Demo.has(cmd)) {
+    return window.Demo.for(cmd, args);
+  }
   // Tauri v2: withGlobalTauri 下为 __TAURI__.core.invoke
   const t = window.__TAURI__;
   const fn = (t && t.core && t.core.invoke)
@@ -37,6 +42,41 @@ async function listen(event, handler) {
   return typeof un === 'function' ? un : () => {};
 }
 
+/* ---------------- 窗口控制 ----------------
+ *
+ * ★ 这里**必须走 invoke**，不能写 window.__TAURI__.window.getCurrentWindow()。
+ *   tauri.conf.json 并没有开 withGlobalTauri，所以 webview 里 window.__TAURI__
+ *   是 undefined，那样写会直接抛 TypeError；而它发生在 async 的事件回调里，
+ *   没人接这个异常 —— 表现就是「点了没反应、也没有任何报错」。
+ *   标题栏的最小化 / 最大化 / 关闭三个按钮一度全废，就是这么来的，
+ *   而且查起来毫无线索。invoke 走的是 __TAURI_INTERNALS__，一直可用。
+ */
+
+/** 当前窗口的 label（主窗口 main / 侧边栏 sidebar）。 */
+function currentWindowLabel() {
+  // 侧边栏用的就是同一个 index.html，只是加了 ?view=sidebar，
+  // 与 windows.rs 的 SIDEBAR_LABEL + WebviewUrl::App("index.html?view=sidebar") 对应。
+  try {
+    if (new URLSearchParams(window.location.search).get('view') === 'sidebar') return 'sidebar';
+  } catch (e) { /* 解析不了就当主窗口 */ }
+  return 'main';
+}
+
+const winMinimize = () => invoke('plugin:window|minimize', { label: currentWindowLabel() });
+const winToggleMaximize = () => invoke('plugin:window|toggle_maximize', { label: currentWindowLabel() });
+const winIsMaximized = () => invoke('plugin:window|is_maximized', { label: currentWindowLabel() });
+/** 隐藏窗口（退到托盘）。注意这是「隐藏」不是「退出」，退出要走托盘菜单。 */
+const winHide = () => invoke('plugin:window|hide', { label: currentWindowLabel() });
+
+/** 窗口控制统一入口。 */
+const WIN = {
+  label: currentWindowLabel,
+  minimize: winMinimize,
+  toggleMaximize: winToggleMaximize,
+  isMaximized: winIsMaximized,
+  hide: winHide,
+};
+
 /* ---------------- 业务 API ---------------- */
 
 const API = {
@@ -61,6 +101,24 @@ const API = {
   setExplainLang: (lang) => invoke('cmd_set_explain_lang', { lang }),
   translateText: (text, lang) => invoke('cmd_translate_text', { text, lang: lang || null }),
 
+  // 翻译（需求 1-5）：三级链路 —— 本地缓存 → 有道在线 → 本地大模型兜底
+  translate: (text, from, to, force) =>
+    invoke('cmd_translate', { text, from: from || null, to: to || null, force: force || false }),
+  translateAi: (action, text, translated, sourceLang, targetLang) =>
+    invoke('cmd_translate_ai', {
+      action, text, translated: translated || null,
+      sourceLang: sourceLang || null, targetLang: targetLang || null,
+    }),
+  translateHistory: (limit, onlyFavorite) =>
+    invoke('cmd_translate_history', { limit: limit || 200, onlyFavorite: onlyFavorite || false }),
+  translateFavorite: (id, on) => invoke('cmd_translate_favorite', { id, on: !!on }),
+  translateDelete: (id) => invoke('cmd_translate_delete', { id }),
+  translateClear: (keepFavorite) =>
+    invoke('cmd_translate_clear', { keepFavorite: keepFavorite !== false }),
+  swapDirection: () => invoke('cmd_swap_direction'),
+  translateLangs: () => invoke('cmd_translate_langs'),
+  translateStatus: () => invoke('cmd_translate_status'),
+
   // 查词搜索
   lookup: (word, lang, forceRefresh) =>
     invoke('cmd_lookup', { word, lang: lang || null, forceRefresh: !!forceRefresh }),
@@ -74,6 +132,30 @@ const API = {
   searchWords: (query, lang, limit) =>
     invoke('cmd_search_words', { query, lang: lang || null, limit: limit || 50 }),
   recentSearches: () => invoke('cmd_recent_searches'),
+
+  // AI 讲解存档（「讲解也是一种存储，可以在词库里搜到」）
+  // 讲解在生成时后端已自动落库，这里的 saveExplain 主要是为了**拿回存档行**
+  // （里面带 saved 标记），让「并入词库」按钮的状态在重开面板后依然正确。
+  saveExplain: (word, lang, explainLang, text, original, translated) =>
+    invoke('cmd_save_explain', {
+      word, lang: lang || null, explainLang: explainLang || null,
+      text, original: original || null, translated: !!translated,
+    }),
+  getExplain: (word, lang, explainLang) =>
+    invoke('cmd_get_explain', { word, lang: lang || null, explainLang: explainLang || null }),
+  listExplains: (word, lang) => invoke('cmd_list_explains', { word, lang: lang || null }),
+  searchExplains: (query, lang, limit) =>
+    invoke('cmd_search_explains', { query, lang: lang || null, limit: limit || 50 }),
+  deleteExplain: (word, lang, explainLang) =>
+    invoke('cmd_delete_explain', { word, lang: lang || null, explainLang: explainLang || null }),
+  clearExplains: (keepSaved) =>
+    invoke('cmd_clear_explains', { keepSaved: keepSaved !== false }),
+  explainCount: () => invoke('cmd_explain_count'),
+  // 把一段讲解整理成结构化词条并写入词库（text 可选：不传就读存档）
+  explainToEntry: (word, lang, explainLang, text) =>
+    invoke('cmd_explain_to_entry', {
+      word, lang: lang || null, explainLang: explainLang || null, text: text || null,
+    }),
 
   // 词库
   listWords: (lang, limit, offset) =>
@@ -145,12 +227,13 @@ const API = {
   getDirection: () => invoke('cmd_get_direction'),
   exampleCoverage: (lang) => invoke('cmd_example_coverage', { lang: lang || null }),
   quizModes: () => invoke('cmd_quiz_modes'),
-  startBookSession: (bookId, mode, size, lang) =>
+  startBookSession: (bookId, mode, size, lang, defLang) =>
     invoke('cmd_start_book_session', {
       bookId: bookId || null,
       mode: mode || null,
       size: size || null,
       lang: lang || null,
+      defLang: defLang || null,
     }),
   checkSpelling: (input, answer, strict) =>
     invoke('cmd_check_spelling', { input, answer, strict: !!strict }),
@@ -160,12 +243,13 @@ const API = {
     invoke('cmd_build_advanced_card', { mode, lang: lang || null }),
 
   // 背诵
-  startSession: (mode, size, leechOnly, lang) =>
+  startSession: (mode, size, leechOnly, lang, defLang) =>
     invoke('cmd_start_session', {
       mode: mode || null,
       size: size || null,
       leechOnly: !!leechOnly,
       lang: lang || null,
+      defLang: defLang || null,
     }),
   currentQuestion: (lang) => invoke('cmd_current_question', { lang: lang || null }),
   submitAnswer: (word, grade, elapsedMs, lang) =>
@@ -182,8 +266,69 @@ const API = {
   // 统计
   stats: (lang) => invoke('cmd_stats', { lang: lang || null }),
   reviewPlan: (days, lang) => invoke('cmd_review_plan', { days: days || 14, lang: lang || null }),
+  dueWords: (limit, lang) => invoke('cmd_due_words', { limit: limit || 60, lang: lang || null }),
   leechList: (limit, lang) => invoke('cmd_leech_list', { limit: limit || 100, lang: lang || null }),
   clearLeech: (word, lang) => invoke('cmd_clear_leech', { word, lang: lang || null }),
+
+  // 错题本增强：筛选 / 概览 / 批量移出 / 导出
+  leechQuery: (opts, lang) => invoke('cmd_leech_query', {
+    lang: lang || null,
+    minWrong: (opts && opts.minWrong) || 0,
+    maxMastery: opts && opts.maxMastery != null ? opts.maxMastery : 100,
+    minErrorRate: (opts && opts.minErrorRate) || 0,
+    order: (opts && opts.order) || 'wrong',
+    limit: (opts && opts.limit) || 300,
+  }),
+  leechSummary: (lang) => invoke('cmd_leech_summary', { lang: lang || null }),
+  leechRemoveMany: (words, lang) =>
+    invoke('cmd_leech_remove_many', { words, lang: lang || null }),
+  leechExport: (opts, lang) => invoke('cmd_leech_export', {
+    format: (opts && opts.format) || 'md',
+    path: (opts && opts.path) || null,
+    lang: lang || null,
+    minWrong: (opts && opts.minWrong) || 0,
+    maxMastery: opts && opts.maxMastery != null ? opts.maxMastery : 100,
+    minErrorRate: (opts && opts.minErrorRate) || 0,
+    order: (opts && opts.order) || 'wrong',
+  }),
+
+  // 知识图谱（独立栏目）
+  graphView: (center, depth, lang) =>
+    invoke('cmd_graph_view', { center: center || null, depth: depth || 1, lang: lang || null }),
+  graphBuild: (lang) => invoke('cmd_graph_build', { lang: lang || null }),
+  graphExpand: (word, lang) => invoke('cmd_graph_expand', { word, lang: lang || null }),
+  graphSearch: (q, lang) => invoke('cmd_graph_search', { q: q || '', lang: lang || null }),
+  graphRels: () => invoke('cmd_graph_rels'),
+  graphClear: (lang) => invoke('cmd_graph_clear', { lang: lang || null }),
+  graphStats: (lang) => invoke('cmd_graph_stats', { lang: lang || null }),
+
+  // 数据库维护
+  dbInfo: () => invoke('cmd_db_info'),
+  dbMaintain: (action) => invoke('cmd_db_maintain', { action }),
+  openDir: (path) => invoke('cmd_open_dir', { path }),
+  openUrl: (url) => invoke('cmd_open_url', { url }),
+
+  // 数据与模型的存放位置（装到哪，数据就落哪，默认不写 C 盘）
+  storageInfo: () => invoke('cmd_storage_info'),
+  setDataDir: (path, migrate) =>
+    invoke('cmd_set_data_dir', { path: path || '', migrate: migrate !== false }),
+  setModelsDir: (path, migrate) =>
+    invoke('cmd_set_models_dir', { path: path || '', migrate: migrate !== false }),
+  restartApp: () => invoke('cmd_restart_app'),
+
+  // 本地大模型一键部署
+  localLlmStatus: () => invoke('cmd_local_llm_status'),
+  localLlmModels: () => invoke('cmd_local_llm_models'),
+  localLlmInstallEngine: () => invoke('cmd_local_llm_install_engine'),
+  localLlmInstallModel: (modelId) => invoke('cmd_local_llm_install_model', { modelId }),
+  localLlmStart: (modelId) => invoke('cmd_local_llm_start', { modelId: modelId || null }),
+  localLlmStop: () => invoke('cmd_local_llm_stop'),
+  localLlmProbe: () => invoke('cmd_local_llm_probe'),
+  localLlmCancel: () => invoke('cmd_local_llm_cancel'),
+  localLlmRemoveModel: (modelId) => invoke('cmd_local_llm_remove_model', { modelId }),
+  setLocalLlmAuto: (enabled) => invoke('cmd_set_local_llm_auto', { enabled: !!enabled }),
+  // 部署进度是后端主动推的事件
+  onLocalLlmProgress: (fn) => listen('local-llm://progress', fn),
 
   // 词典源
   getSources: () => invoke('cmd_get_sources'),
@@ -212,6 +357,8 @@ const Mock = (() => {
     words: [],
     states: {},
     session: null,
+    // AI 讲解存档：key = `${word}|${lang}|${explain_lang}`（与后端主键同构）
+    explains: new Map(),
     config: {
       llm: { base_url: 'http://127.0.0.1:1234/v1', model: '', temperature: 0.6, max_tokens: 1024,
              timeout_secs: 120, api_key: 'lm-studio', system_prompt: '' },
@@ -221,11 +368,124 @@ const Mock = (() => {
         ai_explain: true, batch_size: 20, daily_limit: 120,
       },
       target_lang: 'en', ui_lang: 'zh-CN', sidebar_always_on_top: true, sidebar_width: 380,
+      source_lang: 'auto',
       explain_lang: 'zh', explain_auto_translate: true, explain_translate_template: '',
       srs: { base_intervals: [1,2,4,7,15,30,90,180] },
       dict_sources: [],
+      auto_start_local_llm: false,
     },
+    transHistory: [],
   };
+
+  /* ---- 调试模式的翻译小词典：让界面能显示出「真的翻了」的样子 ---- */
+  const MOCK_TRANS = {
+    '你好|ja': 'こんにちは',
+    '你好|en': 'Hello',
+    '你好|ko': '안녕하세요',
+    '你好|fr': 'Bonjour',
+    '谢谢|ja': 'ありがとう',
+    '谢谢|en': 'Thank you',
+    '早上好|ja': 'おはようございます',
+    'hello|zh': '你好',
+    'hello world|zh': '你好世界',
+    'こんにちは|zh': '你好',
+  };
+
+  const MOCK_LANG_NAMES = {
+    auto: '自动检测', zh: '中文', en: '英语', ja: '日语', ko: '韩语',
+    fr: '法语', de: '德语', es: '西班牙语', ru: '俄语', pt: '葡萄牙语', it: '意大利语',
+  };
+  function mockLangName(code) { return MOCK_LANG_NAMES[code] || code; }
+
+  /** 与后端 dict::detect_lang 同源的粗判（调试模式够用）。 */
+  function mockGuessLang(s) {
+    for (const ch of String(s || '')) {
+      const c = ch.codePointAt(0);
+      if ((c >= 0x3040 && c <= 0x30ff) || (c >= 0x31f0 && c <= 0x31ff)) return 'ja';
+      if ((c >= 0x1100 && c <= 0x11ff) || (c >= 0xac00 && c <= 0xd7af)) return 'ko';
+      if ((c >= 0x4e00 && c <= 0x9fff) || (c >= 0x3400 && c <= 0x4dbf)) return 'zh';
+      if (c >= 0x0400 && c <= 0x04ff) return 'ru';
+    }
+    return 'en';
+  }
+
+  /* ---- 错题本 mock：从示例词库派生稳定的错词记录 ---- */
+  //
+  // 为什么必须是**确定性**的：冒烟测试要断言「筛选后条数为 X」，
+  // 用 Math.random 会让断言随机失败，那比不做测试更糟。
+  function mockLeech() {
+    init();
+    const removed = store.leechRemoved || new Set();
+    return store.words.slice(0, 8)
+      .filter(w => !removed.has(w.word))
+      .map((e, i) => {
+        const wrong = 9 - i;
+        const correct = Math.max(0, 3 - i);
+        return {
+          entry: e,
+          state: {
+            word: e.word, lang: 'en', ease_factor: 2.5, interval_days: 1,
+            repetitions: 0, due_at: Math.floor(Date.now() / 1000) + 3600 * (i + 1),
+            last_review_at: Math.floor(Date.now() / 1000) - 86400,
+            correct_count: correct, wrong_count: wrong,
+            is_leech: true, mastery: Math.min(90, 10 + i * 9), is_mastered: false,
+          },
+          retention: Math.max(0.05, 0.9 - i * 0.11),
+          error_rate: wrong / Math.max(1, wrong + correct),
+        };
+      });
+  }
+
+  /* ---- 图谱 mock：从词条已有的 related / inflections 抽边 ---- */
+  function mockEdges() {
+    init();
+    const out = [];
+    for (const e of store.words) {
+      for (const r of (e.related || [])) {
+        const s = String(r).trim();
+        if (s && s.length <= 24 && s.toLowerCase() !== e.word.toLowerCase()) {
+          out.push({ src: e.word, dst: s, rel: 'related', weight: 1, source: 'local' });
+        }
+      }
+      for (const inf of (e.inflections || [])) {
+        const f = String((inf && inf.form) || '').trim();
+        if (f && f.toLowerCase() !== e.word.toLowerCase()) {
+          out.push({ src: e.word, dst: f, rel: 'derived', weight: 0.6, source: 'local' });
+        }
+      }
+    }
+    out.push(...(store.graphExtra || []));
+    return out;
+  }
+
+  function mockNodes(words, edges) {
+    const deg = new Map();
+    for (const e of edges) {
+      deg.set(e.src, (deg.get(e.src) || 0) + 1);
+      deg.set(e.dst, (deg.get(e.dst) || 0) + 1);
+    }
+    const byWord = new Map(store.words.map(w => [w.word, w]));
+    return words.map(w => {
+      const e = byWord.get(w);
+      return {
+        word: w, lang: 'en', degree: deg.get(w) || 0,
+        in_dict: !!e,
+        gloss: (e && e.senses && e.senses[0] && e.senses[0].definition) || '',
+        mastery: null,
+      };
+    });
+  }
+
+  function mockTop(words) {
+    const deg = new Map();
+    for (const e of mockEdges()) {
+      deg.set(e.src, (deg.get(e.src) || 0) + 1);
+      deg.set(e.dst, (deg.get(e.dst) || 0) + 1);
+    }
+    return words.map(w => ({ word: w, degree: deg.get(w) || 0 }))
+      .sort((a, b) => b.degree - a.degree)
+      .slice(0, 12);
+  }
 
   const demo = [
     ['abandon', '/əˈbæn.dən/', 'v. 放弃；抛弃', 'He abandoned his car.'],
@@ -272,9 +532,15 @@ const Mock = (() => {
         case 'cmd_save_config': store.config = args.config; return null;
         case 'cmd_set_study_options': store.config.study = args.options; return store.config;
         case 'cmd_set_llm_config': store.config.llm = args.llm; return store.config;
-        case 'cmd_llm_status':
-          return { online: false, base_url: store.config.llm.base_url, models: [], active_model: '',
-                   message: '浏览器调试模式：未连接本地模型服务' };
+        case 'cmd_llm_status': {
+          // endpoint_kind 与后端同义：managed / local / cloud。
+          // 调试模式没有托管服务，127.0.0.1 就算 local。
+          const b = (store.config.llm && store.config.llm.base_url) || '';
+          const kind = /127\.0\.0\.1|localhost|\[::1\]/.test(b) ? 'local' : 'cloud';
+          return { online: false, base_url: b, models: [], active_model: '',
+                   endpoint_kind: kind,
+                   message: '（调试模式）未连接 AI 服务' };
+        }
         case 'cmd_llm_autoconnect': return Mock.call('cmd_llm_status', args);
         case 'cmd_lookup':
         case 'cmd_get_word': {
@@ -378,7 +644,30 @@ const Mock = (() => {
             date: new Date(Date.now() + i*86400000).toISOString().slice(0,10),
             weekday: '周' + '日一二三四五六'[new Date(Date.now()+i*86400000).getDay()],
             count: Math.floor(Math.random()*25), overdue: i===0?2:0, is_today: i===0 }));
-        case 'cmd_leech_list': return [];
+        case 'cmd_due_words': {
+          // 固定几条，别用随机数：冒烟测试要断言列表条数
+          const base = Date.now();
+          const mk = (w, daysAgo, wrong, leech) => ({
+            word: w,
+            gloss: `n. ${w} 的释义`,
+            due_at: Math.floor((base - daysAgo * 86400000) / 1000),
+            due_label: daysAgo > 0 ? `逾期 ${daysAgo} 天` : '今天 09:00',
+            overdue: daysAgo > 0,
+            overdue_days: daysAgo > 0 ? daysAgo : 0,
+            mastery: 40 - daysAgo * 5,
+            wrong_count: wrong,
+            is_leech: !!leech,
+          });
+          // 排序要和后端 cmd_due_words 一致（逾期久的在前），否则前端测试断言
+          // 「逾期排在今天前面」在调试模式下会失效
+          return [mk('abandon', 5, 6, true), mk('benefit', 2, 3, false),
+                  mk('capture', 0, 1, false), mk('decline', 0, 0, false)]
+            .sort((a, b) => b.overdue_days - a.overdue_days || a.due_at - b.due_at)
+            .slice(0, args.limit || 60);
+        }
+        case 'cmd_leech_list': return mockLeech().map(x => ({
+          entry: x.entry, state: x.state, retention: x.retention,
+        }));
         case 'cmd_clear_leech': return null;
         case 'cmd_get_sources': return store.config.dict_sources;
         case 'cmd_save_sources': store.config.dict_sources = args.sources; return null;
@@ -388,6 +677,349 @@ const Mock = (() => {
         case 'cmd_clear_cache': return null;
         case 'cmd_export': return '(调试模式) 未实际导出';
         case 'cmd_import': return { added: 0, skipped: 0, prefetched: 0 };
+        /* ---- 错题本增强（调试模式） ---- */
+        case 'cmd_leech_query': {
+          let rows = mockLeech();
+          const minWrong = args.minWrong || 0;
+          const maxMastery = args.maxMastery == null ? 100 : args.maxMastery;
+          const minRate = args.minErrorRate || 0;
+          rows = rows.filter(x => x.state.wrong_count >= minWrong
+            && x.state.mastery <= maxMastery && x.error_rate >= minRate);
+          const order = args.order || 'wrong';
+          rows.sort((a, b) => {
+            if (order === 'mastery') return a.state.mastery - b.state.mastery;
+            if (order === 'word') return a.entry.word.localeCompare(b.entry.word);
+            if (order === 'rate') return b.error_rate - a.error_rate;
+            return b.state.wrong_count - a.state.wrong_count;
+          });
+          return rows.slice(0, args.limit || 300);
+        }
+        case 'cmd_leech_summary': {
+          const rows = mockLeech();
+          const total = rows.length;
+          const tw = rows.reduce((s, x) => s + x.state.wrong_count, 0);
+          return {
+            total,
+            total_wrong: tw,
+            stubborn: rows.filter(x => x.state.wrong_count >= 5).length,
+            avg_mastery: total ? Math.round(rows.reduce((s, x) => s + x.state.mastery, 0) / total * 10) / 10 : 0,
+            dict_size: store.words.length,
+          };
+        }
+        case 'cmd_leech_remove_many': {
+          const set = new Set(args.words || []);
+          const before = store.leechRemoved || (store.leechRemoved = new Set());
+          set.forEach(w => before.add(w));
+          return set.size;
+        }
+        case 'cmd_leech_export': {
+          const rows = mockLeech();
+          if (!rows.length) throw new Error('当前筛选条件下没有错词可导出');
+          const fmt = args.format === 'csv' ? 'csv' : 'md';
+          return {
+            path: `(调试模式) 未实际写出 /错词本-${fmt === 'csv' ? 'x.csv' : 'x.md'}`,
+            count: rows.length,
+            format: fmt,
+          };
+        }
+
+        /* ---- 知识图谱（调试模式） ---- */
+        case 'cmd_graph_rels':
+          return [
+            { code: 'synonym', name: '同义' },
+            { code: 'antonym', name: '反义' },
+            { code: 'derived', name: '派生' },
+            { code: 'related', name: '相关' },
+            { code: 'hypernym', name: '上义' },
+            { code: 'hyponym', name: '下义' },
+          ];
+        case 'cmd_graph_build':
+          return mockEdges().length;
+        case 'cmd_graph_clear':
+          store.graphExtra = [];
+          return mockEdges().length;
+        case 'cmd_graph_stats': {
+          const es = mockEdges();
+          const words = new Set();
+          es.forEach(e => { words.add(e.src); words.add(e.dst); });
+          return {
+            nodes: words.size, edges: es.length, rel_count: 6,
+            top: mockTop([...words]),
+            dict_size: store.words.length,
+          };
+        }
+        case 'cmd_graph_view': {
+          const all = mockEdges();
+          const center = args.center || null;
+          if (!center) {
+            const words = new Set();
+            all.forEach(e => { words.add(e.src); words.add(e.dst); });
+            return {
+              nodes: mockNodes([...words], all), edges: all,
+              center: null, total_nodes: words.size, total_edges: all.length,
+            };
+          }
+          const depth = Math.min(args.depth || 1, 2);
+          let frontier = [center];
+          const seenW = new Set([center]);
+          const seenE = new Set();
+          const picked = [];
+          for (let d = 0; d < depth; d++) {
+            const next = [];
+            for (const w of frontier) {
+              for (const e of all) {
+                if (e.src !== w && e.dst !== w) continue;
+                const k = `${e.src}|${e.dst}|${e.rel}`;
+                if (seenE.has(k)) continue;
+                seenE.add(k);
+                picked.push(e);
+                const other = e.src === w ? e.dst : e.src;
+                if (!seenW.has(other)) { seenW.add(other); next.push(other); }
+              }
+            }
+            frontier = next;
+            if (!next.length) break;
+          }
+          const words = new Set();
+          picked.forEach(e => { words.add(e.src); words.add(e.dst); });
+          return {
+            nodes: mockNodes([...words], picked), edges: picked,
+            center, total_nodes: words.size, total_edges: picked.length,
+          };
+        }
+        case 'cmd_graph_expand': {
+          const w = args.word;
+          const extra = store.graphExtra || (store.graphExtra = []);
+          const mock = {
+            abandon: [['synonym', 'desert'], ['synonym', 'forsake']],
+            desert: [['synonym', 'abandon'], ['antonym', 'keep']],
+            ability: [['synonym', 'capability'], ['hypernym', 'skill']],
+          }[w] || [['related', 'hello']];
+          let n = 0;
+          for (const [rel, dst] of mock) {
+            if (extra.some(e => e.src === w && e.dst === dst && e.rel === rel)) continue;
+            extra.push({ src: w, dst, rel, weight: 0.8, source: 'llm' });
+            n++;
+          }
+          return n;
+        }
+        case 'cmd_graph_search': {
+          const words = new Set();
+          mockEdges().forEach(e => { words.add(e.src); words.add(e.dst); });
+          const q = String(args.q || '').trim().toLowerCase();
+          const list = [...words].filter(w => !q || w.toLowerCase().includes(q));
+          return list.slice(0, 30);
+        }
+
+        /* ---- 数据库维护（调试模式） ---- */
+        case 'cmd_db_info':
+          return {
+            path: '(调试模式) 未连接真实数据库',
+            data_dir: '(调试模式)',
+            size_bytes: 0, size_text: '—', wal_bytes: 0, wal_text: '—',
+            tables: [
+              { name: 'words', label: '词库', rows: store.words.length },
+              { name: 'study_state', label: '学习进度', rows: store.words.length },
+              { name: 'review_log', label: '复习日志', rows: 0 },
+              { name: 'word_edges', label: '知识图谱关系', rows: mockEdges().length },
+            ],
+            total_rows: store.words.length * 2 + mockEdges().length,
+            export_dir: '(调试模式)', models_dir: '(调试模式)',
+            now: new Date().toISOString().slice(0, 16).replace('T', ' '),
+          };
+        case 'cmd_db_maintain':
+          if (args.action === 'check') {
+            return { action: 'check', ok: true, message: '（调试模式）数据库结构完整，没有发现问题',
+                     before_text: '—', after_text: '—' };
+          }
+          if (args.action === 'backup') {
+            return { action: 'backup', ok: true, message: '（调试模式）未实际备份',
+                     before_text: '—', after_text: '—', path: '(调试模式)/backups/wordwise.db' };
+          }
+          return { action: 'vacuum', ok: true, message: '（调试模式）整理完成，数据库已经很紧凑',
+                   before_text: '—', after_text: '—' };
+        case 'cmd_open_dir': return null;
+        case 'cmd_open_url': return null;
+
+        /* ---- 数据与模型的存放位置（调试模式） ---- */
+        case 'cmd_storage_info':
+          return {
+            data_dir: '(调试模式)\\data',
+            source: 'beside_exe',
+            source_label: '软件所在目录（默认，跟着程序走）',
+            travels_with_app: true,
+            from_env: false,
+            pointer_file: '(调试模式)\\location.txt',
+            portable: false, portable_file: '(调试模式)\\portable.txt',
+            env_data_dir: '',
+            exe_dir: '(调试模式)',
+            data_bytes: 0, data_text: '—', data_files: 0,
+            db_path: '(调试模式)\\data\\wordwise.db',
+            db_bytes: 0, db_text: '—', db_wal_text: '—',
+            models_dir: '(调试模式)\\data\\models',
+            models_dir_default: '(调试模式)\\data\\models',
+            models_custom: false,
+            models_bytes: 0, models_text: '—', models_files: 0,
+            models_pointer_file: '(调试模式)\\data\\models_dir.txt',
+            models_env: '',
+            models_installed: [],
+            models_missing: [
+              { id: 'qwen3-1.7b', name: 'Qwen3 1.7B（推荐）',
+                file: 'Qwen3-1.7B-Q4_K_M.gguf', size_bytes: 1107400000,
+                size_text: '1056 MB', installed: false },
+              { id: 'qwen3-0.6b', name: 'Qwen3 0.6B（极速）',
+                file: 'Qwen3-0.6B-Q4_K_M.gguf', size_bytes: 396700000,
+                size_text: '378 MB', installed: false },
+            ],
+            engine_dir: '(调试模式)\\vendor\\llama',
+            engine_ready: true, engine_from_bundle: true,
+            engine_bytes: 0, engine_files: 0, engine_text: '—',
+            total_text: '—',
+            drives: [
+              { letter: 'C', root: 'C:\\', kind: 'fixed', kind_label: '本地磁盘',
+                system: true, total_bytes: 0, free_bytes: 0, free_text: '—' },
+              { letter: 'D', root: 'D:\\', kind: 'fixed', kind_label: '本地磁盘',
+                system: false, total_bytes: 0, free_bytes: 0, free_text: '—' },
+            ],
+          };
+        case 'cmd_set_data_dir':
+        case 'cmd_set_models_dir':
+          return {
+            ok: true, changed: true, restart_required: true,
+            migrated: args.migrate !== false,
+            copied_files: 0, copied_text: '0 B',
+            path: args.path || '',
+            message: '（调试模式）未实际改动任何目录。',
+          };
+        case 'cmd_restart_app': return { ok: true };
+
+        /* ---- 本地大模型一键部署（调试模式） ---- */
+        case 'cmd_local_llm_models':
+          return [
+            { id: 'qwen3-1.7b', name: 'Qwen3 1.7B（推荐）',
+              note: '中文与多语言理解好，讲词、造句、翻译兜底都够用。',
+              file: 'Qwen3-1.7B-Q4_K_M.gguf', size_bytes: 1107400000, recommended: true },
+            { id: 'qwen3-0.6b', name: 'Qwen3 0.6B（极速）',
+              note: '只有 400 MB，老机器也能流畅跑。',
+              file: 'Qwen3-0.6B-Q4_K_M.gguf', size_bytes: 396700000, recommended: false },
+            { id: 'qwen2.5-1.5b', name: 'Qwen2.5 1.5B（稳定）',
+              note: '上一代模型，指令遵循非常稳、不说怪话。',
+              file: 'qwen2.5-1.5b-instruct-q4_k_m.gguf', size_bytes: 1117300000, recommended: false },
+          ];
+        case 'cmd_local_llm_status':
+          return {
+            engine: { ready: false, dir: null, bundled_dir: '(调试模式)/vendor/llama',
+                      bundled_ready: false, downloaded_dir: '(调试模式)/engine',
+                      tag: 'b11414', asset: 'llama-b11414-bin-win-vulkan-x64.zip',
+                      exe: 'llama-server.exe' },
+            models: { dir: '(调试模式)/models', installed: [], detail: [] },
+            server: { running: false, port: 0, model: '', using_ours: false,
+                      base_url: store.config.llm.base_url },
+            threads: 4, cpu: 8, app_dir: '(调试模式)',
+            engine_needs_download: true,
+            auto_start: !!store.autoStartLocal,
+          };
+        case 'cmd_set_local_llm_auto':
+          store.autoStartLocal = !!args.enabled;
+          return { ok: true, enabled: store.autoStartLocal, message: '（调试模式）已更新自动启动设置' };
+        case 'cmd_local_llm_install_engine':
+        case 'cmd_local_llm_install_model':
+          throw new Error('（调试模式）不会真的下载，请在桌面程序里操作');
+        case 'cmd_local_llm_start':
+          store.config.llm.base_url = 'http://127.0.0.1:18080/v1';
+          return { ok: true, port: 18080, base_url: store.config.llm.base_url,
+                   model: 'Qwen3 1.7B', threads: 4,
+                   message: '（调试模式）Qwen3 1.7B 已启动（127.0.0.1:18080，4 线程）' };
+        case 'cmd_local_llm_stop':
+          // 与后端一致：装了引擎/模型后停服会把 AI 地址还回原样
+          return { ok: true, restored: true, message: '（调试模式）本地模型服务已停止，AI 地址已还原' };
+        case 'cmd_local_llm_probe':
+          return { ok: false, message: '（调试模式）本地模型服务未运行' };
+        case 'cmd_local_llm_cancel': return null;
+        case 'cmd_local_llm_remove_model':
+          return '（调试模式）未实际删除';
+
+        /* ---- 翻译（调试模式） ---- */
+        case 'cmd_translate_langs':
+          return [
+            { code: 'auto', name: '自动检测', self_name: '自动检测' },
+            { code: 'zh', name: '中文', self_name: '简体中文' },
+            { code: 'en', name: '英语', self_name: 'English' },
+            { code: 'ja', name: '日语', self_name: '日本語' },
+            { code: 'ko', name: '韩语', self_name: '한국어' },
+            { code: 'fr', name: '法语', self_name: 'Français' },
+            { code: 'de', name: '德语', self_name: 'Deutsch' },
+            { code: 'es', name: '西班牙语', self_name: 'Español' },
+            { code: 'ru', name: '俄语', self_name: 'Русский' },
+            { code: 'pt', name: '葡萄牙语', self_name: 'Português' },
+            { code: 'it', name: '意大利语', self_name: 'Italiano' },
+          ];
+        case 'cmd_translate_status':
+          return { online_ready: true, cooldown_secs: 0 };
+        case 'cmd_swap_direction': {
+          const from = store.config.source_lang || 'auto';
+          const to = store.config.target_lang || 'en';
+          let nf, nt;
+          if (from === 'auto') { nf = to; nt = to === 'zh' ? 'en' : 'zh'; }
+          else { nf = to; nt = from; }
+          store.config.source_lang = nf;
+          store.config.target_lang = nt;
+          return [nf, nt];
+        }
+        case 'cmd_translate': {
+          const from = args.from || store.config.source_lang || 'auto';
+          const to = args.to || store.config.target_lang || 'en';
+          const key = args.text + '|' + to;
+          const hit = MOCK_TRANS[key];
+          const detected = from === 'auto' ? mockGuessLang(args.text) : from;
+          const text = hit || `（调试模式）${args.text} 的${mockLangName(to)}译文`;
+
+          // 与后端一致：写历史（同方向同原文只占一行），并把 record_id 回传，
+          // 否则「收藏」按钮会一直禁用。
+          const list = store.transHistory || (store.transHistory = []);
+          let rec = list.find(x => x.src_text === args.text && x.target_lang === to);
+          if (rec) {
+            rec.dst_text = text; rec.source_lang = detected; rec.engine = 'youdao';
+          } else {
+            rec = {
+              id: list.length ? Math.max(...list.map(x => x.id)) + 1 : 1,
+              source_lang: detected, target_lang: to,
+              src_text: args.text, dst_text: text,
+              engine: 'youdao', favorite: false, created_at: Date.now(),
+            };
+            list.unshift(rec);
+          }
+
+          return {
+            source: args.text, text,
+            alternatives: [],
+            from: detected, to,
+            phonetic: to === 'ja' ? 'konnichiwa' : '',
+            tts_url: '', engine: 'youdao', from_cache: false,
+            record_id: rec.id, favorite: rec.favorite,
+          };
+        }
+        case 'cmd_translate_ai':
+          return `## ${mockLangName('zh')}（调试模式）\n\n当前运行在浏览器调试环境中，未连接本地大模型服务。\n\n- 请通过 Tauri 桌面程序启动以使用 AI 增强`;
+        case 'cmd_translate_history': {
+          const all = store.transHistory || [];
+          return args.onlyFavorite ? all.filter(x => x.favorite) : all;
+        }
+        case 'cmd_translate_favorite': {
+          const r = (store.transHistory || []).find(x => x.id === args.id);
+          if (r) r.favorite = !!args.on;
+          return null;
+        }
+        case 'cmd_translate_delete':
+          store.transHistory = (store.transHistory || []).filter(x => x.id !== args.id);
+          return null;
+        case 'cmd_translate_clear': {
+          const before = (store.transHistory || []).length;
+          store.transHistory = args.keepFavorite === false
+            ? [] : (store.transHistory || []).filter(x => x.favorite);
+          return before - store.transHistory.length;
+        }
+
         case 'cmd_ai_explain':
         case 'cmd_ai_explain_sync': {
           const t = '## 调试模式\n\n当前运行在浏览器调试环境中，未连接本地大模型服务。\n\n- 请通过 Tauri 桌面程序启动以使用 AI 讲解';
@@ -402,6 +1034,43 @@ const Mock = (() => {
                    lang: args.lang || store.config.explain_lang || 'zh', translated: false,
                    note: '（调试模式）未连接模型，未实际翻译' };
         case 'cmd_ai_generate_entry': throw new Error('（调试模式）无法生成词条');
+
+        // AI 讲解存档（调试模式：进程内 Map，key 与后端主键同构）
+        case 'cmd_save_explain': {
+          const k = Mock.explainKey(args);
+          const prev = store.explains.get(k) || { entry_json: '', saved: false };
+          const row = {
+            word: (args.word || '').toLowerCase(),
+            lang: args.lang || '', explain_lang: args.explainLang || '',
+            text: args.text || '', original: args.original || '',
+            translated: !!args.translated,
+            entry_json: prev.entry_json, saved: prev.saved, updated_at: Date.now(),
+          };
+          store.explains.set(k, row);
+          return row;
+        }
+        case 'cmd_get_explain':
+          return store.explains.get(Mock.explainKey(args)) || null;
+        case 'cmd_list_explains': {
+          const w = (args.word || '').toLowerCase();
+          return [...store.explains.values()].filter((r) => r.word === w);
+        }
+        case 'cmd_search_explains': {
+          const q = (args.query || '').toLowerCase();
+          return [...store.explains.values()].filter(
+            (r) => r.word.includes(q) || (r.text || '').toLowerCase().includes(q));
+        }
+        case 'cmd_delete_explain':
+          return store.explains.delete(Mock.explainKey(args)) ? 1 : 0;
+        case 'cmd_clear_explains': {
+          const n = store.explains.size;
+          store.explains.clear();
+          return n;
+        }
+        case 'cmd_explain_count':
+          return store.explains.size;
+        case 'cmd_explain_to_entry':
+          throw new Error('（调试模式）未连接模型，无法把讲解整理成词条');
 
         // 多级词库（需求 3 / 5）
         case 'cmd_list_wordbooks':
@@ -546,6 +1215,15 @@ const Mock = (() => {
           return null;
       }
     },
+
+    /** 讲解存档的主键，与后端 `explain_store` 的 (word, lang, explain_lang) 同构。 */
+    explainKey(args) {
+      // 与后端一致：lang / explain_lang 缺省时回落到配置里的当前值，
+      // 否则「保存时不传、读取时也不传」会算出两个不同的 key 而永远读不到。
+      const lang = args.lang || store.config.target_lang || 'en';
+      const el = args.explainLang || store.config.explain_lang || 'zh';
+      return [(args.word || '').trim().toLowerCase(), lang, el].join('|');
+    },
   };
 })();
 
@@ -583,4 +1261,6 @@ function explainLangLabel(code) {
 window.WordWiseAPI = {
   API, invoke, listen, HAS_TAURI,
   EXPLAIN_LANGS, explainLangOptions, explainLangLabel,
+  // 窗口控制（标题栏自绘三键用）
+  WIN, currentWindowLabel,
 };

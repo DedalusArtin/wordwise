@@ -382,6 +382,12 @@ pub fn migrate_config(cfg: &mut crate::models::AppConfig) -> bool {
         cfg.explain_lang = "zh".to_string();
     }
 
+    // v5：互译方向。老配置里 source_lang 是被清空的空串（当时语言下拉已被合并
+    // 成一个），现在它是「源语言」这个明确的角色，空串要变成「自动检测」。
+    if cfg.source_lang.trim().is_empty() {
+        cfg.source_lang = crate::translate::AUTO.to_string();
+    }
+
     if !cfg.network.enable_proxy {
         for s in cfg.dict_sources.iter_mut() {
             if s.builtin && s.needs_proxy {

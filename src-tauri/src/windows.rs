@@ -7,7 +7,7 @@
 //! - 系统托盘：快速唤出侧边栏、开始复习、退出
 
 use crate::commands;
-use crate::state::{resolve_data_dir, AppState};
+use crate::state::{resolve_data_dir_ex, AppState};
 use std::sync::Arc;
 use tauri::{
     menu::{Menu, MenuItem, PredefinedMenuItem},
@@ -48,6 +48,15 @@ fn build_invoke_handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync +
         commands::cmd_get_word,
         commands::cmd_search_words,
         commands::cmd_recent_searches,
+        // AI 讲解存档（讲解也是一种词库资料，可搜索、可并入词库）
+        commands::explain::cmd_save_explain,
+        commands::explain::cmd_get_explain,
+        commands::explain::cmd_list_explains,
+        commands::explain::cmd_search_explains,
+        commands::explain::cmd_delete_explain,
+        commands::explain::cmd_clear_explains,
+        commands::explain::cmd_explain_count,
+        commands::explain::cmd_explain_to_entry,
         // 词库
         commands::cmd_list_words,
         commands::cmd_add_word,
@@ -65,6 +74,16 @@ fn build_invoke_handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync +
         commands::books::cmd_download_book,
         commands::books::cmd_reviewed_words,
         commands::books::cmd_words_in_book,
+        // 翻译（需求 1-5）：三级链路 + AI 增强 + 历史收藏
+        commands::translate::cmd_translate,
+        commands::translate::cmd_translate_ai,
+        commands::translate::cmd_translate_history,
+        commands::translate::cmd_translate_favorite,
+        commands::translate::cmd_translate_delete,
+        commands::translate::cmd_translate_clear,
+        commands::translate::cmd_swap_direction,
+        commands::translate::cmd_translate_langs,
+        commands::translate::cmd_translate_status,
         // 在线搜索 / 方向 / 进阶练习（需求 4 / 6 / 7）
         commands::extra::cmd_search_engines,
         commands::extra::cmd_web_search,
@@ -92,8 +111,42 @@ fn build_invoke_handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync +
         // 统计与计划
         commands::cmd_stats,
         commands::cmd_review_plan,
+        commands::plan::cmd_due_words,
         commands::cmd_leech_list,
         commands::cmd_clear_leech,
+        // 知识图谱（独立栏目）
+        commands::graph::cmd_graph_build,
+        commands::graph::cmd_graph_view,
+        commands::graph::cmd_graph_expand,
+        commands::graph::cmd_graph_search,
+        commands::graph::cmd_graph_rels,
+        commands::graph::cmd_graph_clear,
+        commands::graph::cmd_graph_stats,
+        // 错题本增强：筛选 + 导出
+        commands::leech::cmd_leech_query,
+        commands::leech::cmd_leech_summary,
+        commands::leech::cmd_leech_remove_many,
+        commands::leech::cmd_leech_export,
+        // 数据库维护
+        commands::maint::cmd_db_info,
+        commands::maint::cmd_db_maintain,
+        commands::maint::cmd_open_dir,
+        // 数据与模型的存放位置（需求：装到哪，数据就落哪，默认不写 C 盘）
+        commands::storage::cmd_storage_info,
+        commands::storage::cmd_set_data_dir,
+        commands::storage::cmd_set_models_dir,
+        commands::storage::cmd_restart_app,
+        // 本地大模型一键部署
+        commands::localllm::cmd_local_llm_status,
+        commands::localllm::cmd_local_llm_models,
+        commands::localllm::cmd_local_llm_install_engine,
+        commands::localllm::cmd_local_llm_install_model,
+        commands::localllm::cmd_local_llm_start,
+        commands::localllm::cmd_local_llm_stop,
+        commands::localllm::cmd_local_llm_probe,
+        commands::localllm::cmd_local_llm_cancel,
+        commands::localllm::cmd_local_llm_remove_model,
+        commands::localllm::cmd_set_local_llm_auto,
         // 词典源
         commands::cmd_get_sources,
         commands::cmd_save_sources,
@@ -285,9 +338,14 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
 
 /// 应用主入口。
 pub fn run_app() {
-    let data_dir = resolve_data_dir();
+    let (data_dir, data_dir_source) = resolve_data_dir_ex();
+    println!(
+        "WordWise 数据目录：{}（{}）",
+        data_dir.display(),
+        data_dir_source.label()
+    );
 
-    let state = match AppState::new(data_dir) {
+    let state = match AppState::with_source(data_dir, data_dir_source) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("初始化失败：{}", e);
@@ -329,6 +387,10 @@ pub fn run_app() {
                 println!("已写入 {} 条示例词库", entries.len());
             }
 
+            // 用户开过「自动启动」时，后台悄悄把本地模型服务拉起来。
+            // 这里只是派发线程，不会阻塞窗口显示。
+            commands::localllm::spawn_autostart(st.inner().clone());
+
             Ok(())
         })
         .on_window_event(|window, event| match event {
@@ -346,8 +408,16 @@ pub fn run_app() {
             }
             _ => {}
         })
-        .run(tauri::generate_context!())
-        .expect("WordWise 运行失败");
+        .build(tauri::generate_context!())
+        .expect("WordWise 构建失败")
+        .run(|_handle, event| {
+            // ★ 退出时必须回收托管的 llama-server 子进程。
+            //   漏掉这一步，用户关掉应用后本地模型服务会变成孤儿进程，
+            //   继续占着上 GB 内存 —— 在低配机器上等于「关不掉」。
+            if let tauri::RunEvent::Exit = event {
+                commands::localllm::cleanup_on_exit();
+            }
+        });
 }
 
 /// 致命错误弹窗（不依赖任何 GUI 库）。

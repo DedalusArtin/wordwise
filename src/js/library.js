@@ -518,6 +518,32 @@ const Library = (() => {
     const states = await Promise.all(rows.map(r =>
       API.wordState(r.word).catch(() => null)));
 
+    // ★ 讲解存档也要能被搜到（需求 C：「在词库中搜索」）。
+    //   否则用户讲过的词如果还没"并入词库"，搜出来就是一片空白，
+    //   会以为讲解白讲了。已经并入词库的那些不再重复列（上面主列表里已有）。
+    let explains = [];
+    if (keyword) {
+      try {
+        const found = (await API.searchExplains(keyword, null, 30)) || [];
+        const have = new Set(rows.map(r => r.word));
+        explains = found.filter(x => !have.has(x.word));
+      } catch (e) {
+        explains = []; // 存档搜索失败不该拖垮词库列表
+      }
+    }
+
+    const exSection = explains.length ? `
+      <div class="lib-section-h">
+        AI 讲解存档
+        <span class="muted">（${explains.length} 条，点开查看讲解，可一键并入词库）</span>
+      </div>
+      ${explains.map(x => `<div class="word-row ex-row" data-ex="${U().esc(x.word)}" data-ex-lang="${U().esc(x.explain_lang)}">
+        <div class="wr-word">${U().esc(x.word)}</div>
+        <div class="wr-phon">讲解</div>
+        <div class="wr-def">${U().esc(String(x.text || x.original || '').replace(/\\s+/g, ' ').slice(0, 90))}…</div>
+        <div class="wr-meta">${x.saved ? '<span class="tag green">已并入词库</span>' : '<span class="tag">未并入词库</span>'}</div>
+      </div>`).join('')}` : '';
+
     box.innerHTML = rows.map((r, i) => {
       const st = states[i];
       const e = r.entry;
@@ -540,9 +566,38 @@ const Library = (() => {
           </div>
         </div>
       </div>`;
-    }).join('');
+    }).join('') + exSection;
 
     box.querySelectorAll('.word-row').forEach(row => {
+      // 讲解存档行：直接画存档正文，**不重新调用模型**（存档的意义就在这）
+      if (row.classList.contains('ex-row')) {
+        row.addEventListener('click', async () => {
+          const w = row.dataset.ex;
+          const ex = explains.find(x => x.word === w && x.explain_lang === row.dataset.exLang);
+          if (!ex) return;
+          try {
+            // 先正常打开详情卡（用空壳词条占位），再把它重置过的 AI 面板
+            // 换成存档正文——open() 是异步的，必须在它之后再画。
+            await window.Detail.open({
+              word: ex.word, lang: ex.lang || 'en', phonetic: {}, senses: [],
+              inflections: [], related: [], extra: {},
+            }, { reason: '讲解存档' });
+            const pane = document.getElementById('dc-pane-ai');
+            if (!pane) return;
+            U().switchDetailTab('ai');
+            window.Detail.setExplainSaved('dc-pane-ai', !!ex.saved);
+            window.Detail.renderExplain(pane, {
+              word: ex.word, text: ex.text, original: ex.original,
+              lang: ex.explain_lang, translated: ex.translated,
+              note: '来自讲解存档（未重新调用模型）',
+            }, false);
+          } catch (e) {
+            U().toast(e && e.message ? e.message : String(e), 'err');
+          }
+        });
+        return;
+      }
+
       row.addEventListener('click', async () => {
         const w = row.dataset.word;
         try {
@@ -584,67 +639,113 @@ const Leech = (() => {
   const U = () => window.WW;
 
   let search = null;
+  /** 当前筛选结果。导出和「移出列表」都基于它，保证「所见即所得」。 */
+  let rows = [];
+
+  const $ = (id) => document.getElementById(id);
+
+  /** 读筛选控件。掌握度是 0~100 的整数，错误率是 0~1 的小数（与后端一致）。 */
+  function filters() {
+    const num = (id, d) => {
+      const el = $(id);
+      const v = el ? parseFloat(el.value) : NaN;
+      return Number.isFinite(v) ? v : d;
+    };
+    return {
+      minWrong: num('leech-min-wrong', 0),
+      minErrorRate: num('leech-min-rate', 0),
+      maxMastery: num('leech-max-mastery', 100),
+      order: ($('leech-order') || {}).value || 'wrong',
+      limit: 300,
+    };
+  }
+
+  function summaryHtml(s) {
+    if (!s || !s.total) {
+      return '<span class="muted">错词本里还没有词。答错后会自动收录到这里。</span>';
+    }
+    return [
+      `<span>共 <b>${s.total}</b> 个错词</span>`,
+      `<span>累计答错 <b>${s.total_wrong}</b> 次</span>`,
+      `<span>顽固词 <b>${s.stubborn}</b> 个</span>`,
+      `<span>平均掌握度 <b>${s.avg_mastery}</b></span>`,
+      `<span class="muted">词库共 ${s.dict_size} 词</span>`,
+    ].join('');
+  }
+
+  async function loadSummary() {
+    const box = $('leech-summary');
+    if (!box) return;
+    try {
+      box.innerHTML = summaryHtml(await API.leechSummary());
+    } catch (e) {
+      box.innerHTML = `<span class="muted">概览加载失败：${U().esc(e.message)}</span>`;
+    }
+  }
+
+  function rowHtml(it) {
+    const s = it.state;
+    const e = it.entry || {};
+    const def = (e.senses && e.senses[0])
+      ? `${e.senses[0].pos || ''} ${e.senses[0].definition || ''}`.trim()
+      : '暂无释义';
+    const rate = Math.round((it.error_rate || 0) * 100);
+    const m = s.mastery == null ? 0 : s.mastery;
+    return `<div class="word-row" data-word="${U().esc(e.word || s.word)}">
+      <div class="wr-word">${U().esc(e.word || s.word)}</div>
+      <div class="wr-phon">${U().esc((e.phonetic && e.phonetic.uk) || '')}</div>
+      <div class="wr-def">${U().esc(def)}</div>
+      <div class="wr-meta">
+        <span class="tag orange">错误率 ${rate}%</span>
+        <span class="tag">错 ${s.wrong_count} 次</span>
+        <span class="tag">掌握 ${m}</span>
+        <button class="ghost-btn xs btn-clear" data-word="${U().esc(e.word || s.word)}">移出</button>
+      </div>
+    </div>`;
+  }
 
   async function load() {
-    const box = document.getElementById('leech-list');
+    const box = $('leech-list');
     if (!box) return;
     box.innerHTML = U().loadingHtml();
 
-    let items;
+    const f = filters();
     try {
-      items = await API.leechList(200);
+      rows = await API.leechQuery(f);
     } catch (e) {
+      rows = [];
       box.innerHTML = `<div class="muted" style="padding:20px">加载失败：${U().esc(e.message)}</div>`;
+      await loadSummary();
       return;
     }
 
-    // 更新导航角标
-    const badge = document.getElementById('nav-leech-badge');
+    // 导航角标用「总数」而不是「筛选结果数」，否则筛选时角标会乱跳
+    await loadSummary();
+    const badge = $('nav-leech-badge');
     if (badge) {
-      if (items && items.length) {
-        badge.textContent = items.length > 99 ? '99+' : items.length;
-        badge.classList.remove('hidden');
-      } else {
-        badge.classList.add('hidden');
-      }
+      try {
+        const s = await API.leechSummary();
+        if (s && s.total) { badge.textContent = s.total > 99 ? '99+' : s.total; badge.classList.remove('hidden'); }
+        else badge.classList.add('hidden');
+      } catch (e) { /* 角标失败不影响列表 */ }
     }
 
-    if (!items || !items.length) {
+    if (!rows.length) {
       box.innerHTML = `<div class="empty-state">
         <div class="es-icon">&#127881;</div>
-        <p>太棒了，暂时没有需要强化的词</p>
-        <p class="muted">答错的单词会自动进入这里，并按遗忘曲线高频重现</p>
+        <p>当前筛选条件下没有错词</p>
+        <p class="muted">换个筛选条件，或点「重置筛选」查看全部</p>
       </div>`;
       return;
     }
 
-    box.innerHTML = items.map(it => {
-      const s = it.state;
-      const e = it.entry;
-      const def = (e.senses && e.senses[0])
-        ? `${e.senses[0].pos || ''} ${e.senses[0].definition || ''}`.trim()
-        : '暂无释义';
-      const rate = (s.correct_count + s.wrong_count) > 0
-        ? Math.round((s.wrong_count / (s.correct_count + s.wrong_count)) * 100) : 0;
-      return `<div class="word-row" data-word="${U().esc(it.entry.word)}">
-        <div class="wr-word">${U().esc(it.entry.word)}</div>
-        <div class="wr-phon">${U().esc((e.phonetic && e.phonetic.uk) || '')}</div>
-        <div class="wr-def">${U().esc(def)}</div>
-        <div class="wr-meta">
-          <span class="tag orange">错误率 ${rate}%</span>
-          <span class="tag">错 ${s.wrong_count} 次</span>
-          <button class="ghost-btn xs btn-clear" data-word="${U().esc(it.entry.word)}">移出</button>
-        </div>
-      </div>`;
-    }).join('');
+    box.innerHTML = rows.map(rowHtml).join('');
 
     box.querySelectorAll('.word-row').forEach(row => {
       row.addEventListener('click', (e) => {
         if (e.target.classList.contains('btn-clear')) return;
-        Detail.open(
-          items.find(x => x.entry.word === row.dataset.word).entry,
-          { reason: '强化记忆词' }
-        );
+        const hit = rows.find(x => (x.entry && x.entry.word) === row.dataset.word);
+        if (hit && hit.entry) Detail.open(hit.entry, { reason: '强化记忆词' });
       });
     });
 
@@ -672,7 +773,75 @@ const Leech = (() => {
     }
   }
 
-  return { load };
+  /* ---------------- 导出 / 批量移出 ---------------- */
+
+  /**
+   * 导出走后端：后端直接读库写文件，不用把几百条词条搬到前端再拼字符串。
+   * 另一个好处是文件名和目录由后端统一决定（data_dir/exports/），
+   * 不会因为前端沙箱拿不到真实路径而写丢。
+   */
+  async function exportAs(format) {
+    if (!rows.length) {
+      U().toast('当前没有可导出的错词', 'err');
+      return;
+    }
+    const btn = $(format === 'csv' ? 'leech-export-csv' : 'leech-export-md');
+    if (btn) { btn.disabled = true; btn.textContent = '导出中…'; }
+    try {
+      const r = await API.leechExport(Object.assign(filters(), { format }));
+      U().toast(`已导出 ${r.count} 条 → ${r.path}`, 'ok');
+      // 顺手打开所在文件夹，省得用户去 APPDATA 里翻。
+      // cmd_open_dir 传文件时会自己定位到父目录，这里不用手工剥文件名。
+      try { await API.openDir(r.path); } catch (e) { /* 打开失败不影响导出结果 */ }
+    } catch (e) {
+      U().toast(`导出失败：${e.message}`, 'err');
+    } finally {
+      if (btn) {
+        btn.disabled = false;
+        btn.textContent = format === 'csv' ? '导出 CSV' : '导出 MD';
+      }
+    }
+  }
+
+  async function removeVisible() {
+    if (!rows.length) {
+      U().toast('当前没有可移出的错词', 'err');
+      return;
+    }
+    const words = rows.map(r => (r.entry && r.entry.word) || r.state.word);
+    if (!window.confirm(`确定把当前列表里的 ${words.length} 个词移出强化队列吗？\n\n移出后它们不再高频重现，但学习记录会保留。`)) return;
+    try {
+      await API.leechRemoveMany(words);
+      U().toast(`已移出 ${words.length} 个词`, 'ok');
+      load();
+    } catch (e) {
+      U().toast(e.message, 'err');
+    }
+  }
+
+  function resetFilters() {
+    const set = (id, v) => { const el = $(id); if (el) el.value = v; };
+    set('leech-min-wrong', '0');
+    set('leech-min-rate', '0');
+    set('leech-max-mastery', '100');
+    set('leech-order', 'wrong');
+    load();
+  }
+
+  /** 只在第一次进页面时绑一次，避免切页重复监听。 */
+  let bound = false;
+  function bind() {
+    if (bound) return;
+    bound = true;
+    ['leech-min-wrong', 'leech-min-rate', 'leech-max-mastery', 'leech-order']
+      .forEach(id => $(id)?.addEventListener('change', load));
+    $('leech-export-md')?.addEventListener('click', () => exportAs('md'));
+    $('leech-export-csv')?.addEventListener('click', () => exportAs('csv'));
+    $('leech-remove-visible')?.addEventListener('click', removeVisible);
+    $('leech-reset')?.addEventListener('click', resetFilters);
+  }
+
+  return { load, bind };
 })();
 
 /* ---------------- 复习计划 ---------------- */
@@ -681,8 +850,68 @@ const Plan = (() => {
   const { API } = window.WordWiseAPI;
   const U = () => window.WW;
 
+  const $ = (id) => document.getElementById(id);
+
+  /**
+   * 到期清单。
+   *
+   * 「未来 14 天安排」回答的是「哪天有多少」，但真要动手时用户问的是
+   * 「现在该背哪几个」。这里把逾期和今天到期的词逐条列出来。
+   */
+  async function loadDue() {
+    const box = $('plan-due');
+    if (!box) return;
+    box.innerHTML = U().loadingHtml();
+
+    let rows;
+    try {
+      rows = await API.dueWords(60);
+    } catch (e) {
+      box.innerHTML = `<div class="muted" style="padding:14px">加载失败：${U().esc(e.message)}</div>`;
+      return;
+    }
+
+    if (!rows || !rows.length) {
+      box.innerHTML = `<div class="empty-state" style="padding:18px">
+        <div class="es-icon">&#127881;</div>
+        <p>现在没有到期要复习的词</p>
+        <p class="muted">新学的词会按遗忘曲线自动排进这里</p>
+      </div>`;
+      return;
+    }
+
+    const overdue = rows.filter(r => r.overdue).length;
+    box.innerHTML =
+      `<div class="due-stat">
+        <span>待复习 <b>${rows.length}</b> 词</span>
+        ${overdue ? `<span class="warn">其中逾期 <b>${overdue}</b> 词</span>` : ''}
+      </div>` +
+      rows.map(r => `
+        <div class="due-row ${r.overdue ? 'overdue' : ''}" data-word="${U().esc(r.word)}">
+          <div class="due-word">${U().esc(r.word)}</div>
+          <div class="due-gloss">${U().esc(r.gloss)}</div>
+          <div class="due-side">
+            ${r.is_leech ? '<span class="tag orange">强化</span>' : ''}
+            ${r.wrong_count ? `<span class="tag">错 ${r.wrong_count} 次</span>` : ''}
+            <span class="due-time ${r.overdue ? 'warn' : ''}">${U().esc(r.due_label)}</span>
+          </div>
+        </div>`).join('');
+
+    // 点一行看详情
+    box.querySelectorAll('.due-row').forEach(row => {
+      row.addEventListener('click', () => {
+        if (window.Lookup && window.Lookup.query) window.Lookup.query(row.dataset.word);
+      });
+    });
+    // 用「开始复习」直接开一轮
+    const btn = $('btn-due-quiz');
+    if (btn) btn.classList.toggle('hidden', !rows.length);
+  }
+
   async function load() {
-    const box = document.getElementById('plan-list');
+    loadDue();
+
+    const box = $('plan-list');
     if (!box) return;
     box.innerHTML = U().loadingHtml();
 
@@ -729,7 +958,18 @@ const Plan = (() => {
     }
   }
 
-  return { load };
+  let bound = false;
+  function bind() {
+    if (bound) return;
+    bound = true;
+    $('btn-due-quiz')?.addEventListener('click', () => {
+      // 到期词本来就在出题队列最前面，直接开一轮即可
+      window.Pages.go('study');
+      if (window.Study && window.Study.start) window.Study.start();
+    });
+  }
+
+  return { load, bind };
 })();
 
 /* ---------------- 统计 ---------------- */
@@ -737,6 +977,68 @@ const Plan = (() => {
 const Stats = (() => {
   const { API } = window.WordWiseAPI;
   const U = () => window.WW;
+
+  const $ = (id) => document.getElementById(id);
+
+  /** 掌握度的四个桶。环形图和下面的条形图共用，保证两处数字永远一致。 */
+  function buckets(s) {
+    return [
+      { label: '未学习', value: Math.max(0, s.total_words - s.learned), color: '#ccd3e0' },
+      { label: '学习中', value: Math.max(0, s.learned - s.mastered - s.leeches), color: '#1a6ce8' },
+      { label: '需强化', value: s.leeches, color: '#f5a623' },
+      { label: '已掌握', value: s.mastered, color: '#17a673' },
+    ];
+  }
+
+  /**
+   * 环形图。
+   *
+   * 用 SVG 圆的 `stroke-dasharray` 画扇区，而不是算 arc path：
+   * 一段 dash = 一段弧，累计偏移靠 `stroke-dashoffset` 推，
+   * 代码短且不会有三角函数误差。rotate(-90) 是为了从 12 点方向开始。
+   */
+  function renderDonut(list) {
+    const box = $('mastery-donut');
+    if (!box) return;
+    const total = list.reduce((n, b) => n + b.value, 0);
+    const R = 50;
+    const C = 2 * Math.PI * R;
+    const safeTotal = Math.max(1, total);
+
+    let off = 0;
+    const arcs = list.map(b => {
+      if (b.value <= 0) return '';
+      const len = (b.value / safeTotal) * C;
+      const seg = `<circle cx="70" cy="70" r="${R}" fill="none"
+        stroke="${b.color}" stroke-width="22"
+        stroke-dasharray="${len.toFixed(2)} ${(C - len).toFixed(2)}"
+        stroke-dashoffset="${(-off).toFixed(2)}"
+        transform="rotate(-90 70 70)"><title>${U().esc(b.label)} ${b.value}</title></circle>`;
+      off += len;
+      return seg;
+    }).join('');
+
+    box.innerHTML = `<svg viewBox="0 0 140 140" width="150" height="150" role="img"
+        aria-label="掌握度构成环形图">
+      <circle cx="70" cy="70" r="${R}" fill="none" stroke="#eef1f6" stroke-width="22" />
+      ${arcs}
+      <text x="70" y="66" text-anchor="middle" font-size="22" font-weight="700"
+            fill="#1c2434">${total}</text>
+      <text x="70" y="86" text-anchor="middle" font-size="11" fill="#8b94a7">单词</text>
+    </svg>`;
+
+    const lg = $('mastery-donut-legend');
+    if (!lg) return;
+    lg.innerHTML = list.map(b => {
+      const pct = total ? Math.round((b.value / total) * 100) : 0;
+      return `<div class="dl-row">
+        <i class="dl-dot" style="background:${b.color}"></i>
+        <span class="dl-label">${b.label}</span>
+        <span class="dl-count">${b.value}</span>
+        <span class="dl-pct">${pct}%</span>
+      </div>`;
+    }).join('');
+  }
 
   async function load() {
     const stamp = document.getElementById('stamp-now');
@@ -778,21 +1080,16 @@ const Stats = (() => {
         </div>`;
     }
 
-    U().renderBarChart(document.getElementById('stats-chart'), s.history);
+    U().renderBarChart($('stats-chart'), s.history);
+    renderDonut(buckets(s));
     renderMasteryDist(s);
   }
 
   function renderMasteryDist(s) {
-    const box = document.getElementById('mastery-dist');
+    const box = $('mastery-dist');
     if (!box) return;
     const total = Math.max(1, s.total_words);
-    const buckets = [
-      { label: '未学习', value: Math.max(0, s.total_words - s.learned), color: '#ccd3e0' },
-      { label: '学习中', value: Math.max(0, s.learned - s.mastered - s.leeches), color: '#1a6ce8' },
-      { label: '需强化', value: s.leeches, color: '#f5a623' },
-      { label: '已掌握', value: s.mastered, color: '#17a673' },
-    ];
-    box.innerHTML = buckets.map(b => `
+    box.innerHTML = buckets(s).map(b => `
       <div class="md-row">
         <div class="md-label">${b.label}</div>
         <div class="md-bar">

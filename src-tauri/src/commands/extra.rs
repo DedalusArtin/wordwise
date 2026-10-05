@@ -214,11 +214,13 @@ pub fn cmd_start_book_session(
     mode: Option<QuizMode>,
     size: Option<i64>,
     lang: Option<String>,
+    def_lang: Option<String>,
 ) -> Result<crate::commands::SessionInfo, String> {
     let cfg = state.cfg();
     let now = timeutil::now_ts();
     let limit = size.unwrap_or(cfg.study.batch_size).clamp(1, 200);
     let mode = mode.unwrap_or_default();
+    let def_lang = def_lang.unwrap_or_default();
 
     let book = book_id.unwrap_or_default();
     // 未指定语言时按**词库自身**的语言出题：
@@ -290,6 +292,7 @@ pub fn cmd_start_book_session(
         s.wrong = 0;
         s.started_at = now;
         s.leech_only = false;
+        s.def_lang = def_lang;
     }
 
     Ok(crate::commands::SessionInfo {
@@ -418,7 +421,7 @@ pub fn cmd_build_advanced_card(
     lang: Option<String>,
 ) -> Result<Option<QuizCard>, String> {
     let lang = lang.unwrap_or_else(|| state.cfg().target_lang);
-    let (entry, index, total, correct, wrong, is_leech) = {
+    let (entry, index, total, correct, wrong, is_leech, def_lang) = {
         let s = state.session.read();
         if !s.is_active() {
             return Ok(None);
@@ -433,7 +436,7 @@ pub fn cmd_build_advanced_card(
             .flatten()
             .map(|st| st.is_leech)
             .unwrap_or(false);
-        (e, s.index, s.total(), s.correct, s.wrong, leech)
+        (e, s.index, s.total(), s.correct, s.wrong, leech, s.def_lang.clone())
     };
 
     let card = crate::commands::build_card_public(
@@ -446,6 +449,7 @@ pub fn cmd_build_advanced_card(
         total,
         correct,
         wrong,
+        &def_lang,
     )?;
     Ok(Some(card))
 }

@@ -34,6 +34,66 @@ const Study = (() => {
     listen_spell: { label: '听发音，拼出这个单词', typing: true, example: false, audio: true },
   };
 
+  /* ---------------- 词库语言 → 界面文案 ----------------
+     背日语教材时把「看英选中」「请选择正确的英文单词」原样摆着是错的 ——
+     学生会以为软件把日语当成英语。这里按**所选词库的语言**改写所有
+     与语种相关的字样，并下线对该语言没有意义的模式。 */
+  const LANG_INFO = {
+    en: { name: '英语', word: '英', full: '英文单词' },
+    zh: { name: '中文', word: '中', full: '中文词' },
+    ja: { name: '日语', word: '日', full: '日语单词' },
+    ko: { name: '韩语', word: '韩', full: '韩语单词' },
+    fr: { name: '法语', word: '法', full: '法语单词' },
+    de: { name: '德语', word: '德', full: '德语单词' },
+    es: { name: '西班牙语', word: '西', full: '西班牙语单词' },
+    ru: { name: '俄语', word: '俄', full: '俄语单词' },
+    it: { name: '意大利语', word: '意', full: '意大利语单词' },
+    pt: { name: '葡萄牙语', word: '葡', full: '葡萄牙语单词' },
+    ar: { name: '阿拉伯语', word: '阿', full: '阿拉伯语单词' },
+    th: { name: '泰语', word: '泰', full: '泰语单词' },
+  };
+
+  /** 取语言信息，未知语种退化为「XX语」。 */
+  function langInfo(lang) {
+    const code = String(lang || 'en').toLowerCase().split(/[-_]/)[0];
+    if (LANG_INFO[code]) return { ...LANG_INFO[code], code };
+    return { name: code.toUpperCase() + '语', word: code.toUpperCase(), full: '单词', code };
+  }
+
+  /** 模式按钮文字（随语言变化）。 */
+  function modeButtonText(mode, info) {
+    const w = info.word;
+    switch (mode) {
+      case 'en_to_zh': return info.code === 'zh' ? '看词选义' : `看${w}选中`;
+      case 'zh_to_en': return `看中选${w}`;
+      case 'spelling': return '拼写';
+      case 'ex_to_zh': return '例句选义';
+      case 'ex_pick_word': return '例句识词';
+      case 'listen_spell': return '听音拼写';
+      default: return mode;
+    }
+  }
+
+  /** 题面提示文字（随语言变化）。 */
+  function modePromptLabel(mode, info) {
+    switch (mode) {
+      case 'en_to_zh': return '请选择正确的中文释义';
+      case 'zh_to_en': return `请选择正确的${info.full}`;
+      case 'spelling': return `看释义，拼出这个${info.full}`;
+      case 'ex_to_zh': return '看例句，选择正确的释义';
+      case 'ex_pick_word': return `看例句，选出正确的${info.full}`;
+      case 'listen_spell': return `听发音，拼出这个${info.full}`;
+      default: return MODE_META[mode] ? MODE_META[mode].label : '';
+    }
+  }
+
+  /** 该语言下不适用的模式（例如中文词库没有「看中选中」的意义）。 */
+  function disabledModes(info) {
+    const off = [];
+    if (info.code === 'zh') off.push('zh_to_en');
+    return off;
+  }
+
   const state = {
     mode: 'en_to_zh',
     running: false,
@@ -42,9 +102,66 @@ const Study = (() => {
     answered: false,
     config: null,
     bookId: '',          // 指定词库（空 = 全库）
+    bookLang: '',        // 当前词库语言（en / ja / zh…）
+    defLang: 'zh',       // 题面释义语言：zh 中文 / src 原文 / '' 不限
     hintLevel: 0,        // 拼写提示等级
     learnedCount: 0,     // 本轮已答对计数（用于自动发音）
+    bookLangById: {},    // 词库 id → 语言
   };
+
+  /* ---------------- 语言自适应 ---------------- */
+
+  /** 按语言改写模式按钮、题面文案、语言标记、释义语言默认值。 */
+  function applyLangUI(lang) {
+    const info = langInfo(lang);
+    state.bookLang = info.code;
+
+    // 1) 模式按钮文字 + 可用性
+    const off = disabledModes(info);
+    document.querySelectorAll('#mode-seg .seg-btn').forEach(b => {
+      const m = b.dataset.mode;
+      b.textContent = modeButtonText(m, info);
+      const disabled = off.includes(m);
+      b.disabled = disabled;
+      b.title = disabled ? `「${info.name}」词库不支持这个模式` : b.textContent;
+    });
+    // 当前模式被下线 → 回到默认
+    if (off.includes(state.mode)) setMode('en_to_zh');
+
+    // 2) 语言标记
+    const chip = document.getElementById('study-lang-chip');
+    if (chip) {
+      chip.textContent = info.name;
+      chip.classList.toggle('hidden', !lang);
+    }
+
+    // 3) 释义语言：默认中文释义（背外语看中文天经地义），可切「原文释义」做英英/日日。
+    //    用户的手工选择按语言分别记住。
+    let saved = '';
+    try { saved = localStorage.getItem('ww.study.deflang.' + info.code) || ''; } catch (e) { /* 忽略 */ }
+    state.defLang = saved || 'zh';
+    const sel = document.getElementById('study-def-lang');
+    if (sel) sel.value = state.defLang;
+    const hint = document.getElementById('study-def-lang-hint');
+    if (hint) {
+      hint.textContent = state.defLang === 'src'
+        ? `题面使用词典给出的${info.name}原文释义`
+        : '题面使用中文释义（背外语时更直观）';
+    }
+
+    // 4) 题面提示（若当前正在答题也同步刷新）
+    if (state.running && state.card) {
+      const lab = document.getElementById('q-label');
+      if (lab) lab.textContent = modePromptLabel(state.mode, info);
+    }
+  }
+
+  /** 读取当前释义语言偏好（下拉的 change 处理）。 */
+  function setDefLang(v) {
+    state.defLang = v || '';
+    try { localStorage.setItem('ww.study.deflang.' + state.bookLang, state.defLang); } catch (e) { /* 忽略 */ }
+    applyLangUI(state.bookLang);
+  }
 
   /* ---------------- 启动与结束 ---------------- */
 
@@ -60,6 +177,15 @@ const Study = (() => {
     document.querySelectorAll('#mode-seg .seg-btn').forEach(b => {
       b.classList.toggle('active', b.dataset.mode === mode);
     });
+    // 题面提示随模式与词库语言一起变
+    const lab = document.getElementById('q-label');
+    if (lab) lab.textContent = modePromptLabel(mode, langInfo(state.bookLang));
+  }
+
+  /** 未指定词库时用配置里的目标语言。 */
+  function defaultLang() {
+    const cfg = state.config || (window.App && window.App.config) || null;
+    return (cfg && cfg.target_lang) || 'en';
   }
 
   /** 同步词库下拉选择（多个 select 保持一致）。 */
@@ -69,6 +195,12 @@ const Study = (() => {
       const el = document.getElementById(id);
       if (el) el.value = state.bookId;
     });
+    // ★ 界面语言跟着**所选词库**走：选 JLPT 就切到日语文案与中文释义，
+    //   切回「全部词库」则回到配置里的目标语言。
+    const lang = state.bookId
+      ? (state.bookLangById[state.bookId] || '')
+      : '';
+    applyLangUI(lang || defaultLang());
   }
 
   /** 从词库页跳进来：直接按该词库开始。 */
@@ -94,9 +226,10 @@ const Study = (() => {
     let info;
     try {
       if (bookId) {
-        info = await API.startBookSession(bookId, backendMode, size);
+        const bl = state.bookLangById[bookId] || null;
+        info = await API.startBookSession(bookId, backendMode, size, bl, state.defLang);
       } else {
-        info = await API.startSession(backendMode, size, leechOnly);
+        info = await API.startSession(backendMode, size, leechOnly, null, state.defLang);
       }
     } catch (e) {
       U().toast(e.message, 'err');
@@ -124,7 +257,8 @@ const Study = (() => {
   /* ---------------- 出题 ---------------- */
 
   function meta() {
-    return MODE_META[state.mode] || MODE_META.en_to_zh;
+    const base = MODE_META[state.mode] || MODE_META.en_to_zh;
+    return { ...base, label: modePromptLabel(state.mode, langInfo(state.bookLang)) };
   }
 
   async function nextQuestion() {
@@ -335,10 +469,15 @@ const Study = (() => {
 
     showFeedback(correct, card, grade);
 
-    // 答对自动发音（需求 4）
+    // 自动发音
     if (correct) {
       state.learnedCount++;
       try { speakCurrent(); } catch (e) {}
+    } else {
+      // 答错更要发音：这时候「听到正确读音」比什么都重要 ——
+      // 老逻辑只在答对时读，答错的词用户永远听不到自己错在哪。
+      // 稍等一下再读，避开答错时的提示动画。
+      setTimeout(() => { try { speakCurrent(); } catch (e) {} }, 420);
     }
 
     let res = null;
@@ -454,11 +593,16 @@ const Study = (() => {
   async function loadBookOptions() {
     let books = [];
     try { books = await API.listWordbooks(); } catch (e) { return; }
+    // 记下每本词库的语言，选词库时才能自动切换界面文案与释义语言
+    state.bookLangById = {};
+    books.forEach(b => { if (b && b.id) state.bookLangById[b.id] = b.lang || 'en'; });
+
     // 只保留叶子（可背的）词库 + 全库
     const leafs = books.filter(b => b.level >= 2 || b.id === 'root');
-    const html = leafs.map(b =>
-      `<option value="${U().esc(b.id)}">${U().esc(b.name)}（${b.word_count || 0}）</option>`
-    ).join('');
+    const html = leafs.map(b => {
+      const info = langInfo(b.lang);
+      return `<option value="${U().esc(b.id)}">${U().esc(b.name)}（${b.word_count || 0} · ${U().esc(info.name)}）</option>`;
+    }).join('');
     ['study-book', 'study-book2'].forEach(id => {
       const el = document.getElementById(id);
       if (!el) return;
@@ -466,6 +610,8 @@ const Study = (() => {
       el.value = state.bookId || '';
       el.onchange = () => setBook(el.value);
     });
+    // 下拉建好后，按当前选择刷新一次界面语言
+    setBook(state.bookId || '');
   }
 
   /* ---------------- 键盘操作 ---------------- */
@@ -513,11 +659,18 @@ const Study = (() => {
       b.addEventListener('click', () => setMode(b.dataset.mode));
     });
 
+    document.getElementById('study-def-lang')?.addEventListener('change', (e) => setDefLang(e.target.value));
+
     bindKeys();
+    applyLangUI(defaultLang());
     loadBookOptions();
   }
 
-  return { bind, start, end, setMode, setBook, startWithBook, loadBookOptions, state };
+  return {
+    bind, start, end, setMode, setBook, startWithBook, loadBookOptions,
+    applyLangUI, setDefLang, langInfo, modePromptLabel, modeButtonText,
+    state,
+  };
 })();
 
 window.Study = Study;

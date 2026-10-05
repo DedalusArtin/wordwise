@@ -375,47 +375,108 @@ pub async fn get_json(
         if attempt > 0 {
             tokio::time::sleep(Duration::from_millis(250 * (1 << attempt))).await;
         }
-        let mut req = client.get(url).timeout(Duration::from_secs(timeout_secs));
-        for (k, v) in headers {
-            req = req.header(k.as_str(), v.as_str());
-        }
-        if !api_key.is_empty() {
-            req = req.bearer_auth(api_key);
-        }
-
-        match req.send().await {
-            Ok(resp) => {
-                let status = resp.status();
-                if status.is_success() {
-                    match resp.text().await {
-                        Ok(t) => match serde_json::from_str::<Value>(&t) {
-                            Ok(v) => return Ok(v),
-                            Err(_) => {
-                                last_err =
-                                    Some(anyhow!("返回内容不是合法 JSON（HTTP {}）", status.as_u16()));
-                                continue;
-                            }
-                        },
-                        Err(e) => {
-                            last_err = Some(anyhow!("读取响应失败: {}", e));
+        match get_raw(client, url, headers, api_key, timeout_secs).await {
+            Ok((status, body)) => {
+                if (200..300).contains(&status) {
+                    match serde_json::from_str::<Value>(&body) {
+                        Ok(v) => return Ok(v),
+                        Err(_) => {
+                            last_err = Some(anyhow!("返回内容不是合法 JSON（HTTP {}）", status));
                             continue;
                         }
                     }
-                } else if status.as_u16() == 404 {
+                } else if status == 404 {
                     // 404 表示这个词不存在，不必重试
                     return Err(anyhow!("404 未收录该词"));
-                } else if status.as_u16() == 429 {
+                } else if status == 429 {
                     last_err = Some(anyhow!("请求过于频繁（429），已重试"));
                     continue;
                 } else {
-                    last_err = Some(anyhow!("服务返回 HTTP {}", status.as_u16()));
+                    last_err = Some(anyhow!("服务返回 HTTP {}", status));
                     continue;
                 }
             }
             Err(e) => {
-                last_err = Some(anyhow!(friendly_reqwest_error(&e)));
+                last_err = Some(e);
                 continue;
             }
+        }
+    }
+
+    Err(last_err.unwrap_or_else(|| anyhow!("请求失败")))
+}
+
+/// GET 一次，拿到 `(HTTP 状态码, 响应体原文)`。
+///
+/// 只负责「发请求 + 读 body」，不含解析与业务判定，供 `get_json` /
+/// `get_json_or_text` 复用，保证两条路径的超时、代理、鉴权行为完全一致。
+async fn get_raw(
+    client: &reqwest::Client,
+    url: &str,
+    headers: &BTreeMap<String, String>,
+    api_key: &str,
+    timeout_secs: u64,
+) -> Result<(u16, String)> {
+    let mut req = client.get(url).timeout(Duration::from_secs(timeout_secs));
+    for (k, v) in headers {
+        req = req.header(k.as_str(), v.as_str());
+    }
+    if !api_key.is_empty() {
+        req = req.bearer_auth(api_key);
+    }
+    let resp = req
+        .send()
+        .await
+        .map_err(|e| anyhow!(friendly_reqwest_error(&e)))?;
+    let status = resp.status().as_u16();
+    let body = resp
+        .text()
+        .await
+        .map_err(|e| anyhow!("读取响应失败: {}", e))?;
+    Ok((status, body))
+}
+
+/// GET 并**尽量**解析 JSON；响应体不是 JSON 时把原文一并带回。
+///
+/// 为什么需要它：不少词典源直接返回 HTML 页面，或返回带 BOM / 前缀说明的
+/// 「半 JSON」。走 `get_json` 时这类响应会被判为「返回内容不是合法 JSON」
+/// 而直接丢弃，于是这个源在界面上表现为「连得上却查不出词」。
+/// 这里把原文交回上层，让词典模块自己决定怎么抽取
+/// （见 `dict::normalize_heuristic`）。
+///
+/// 返回 `(Some(json), body)` 或 `(None, body)`；HTTP 非 2xx 一律返回 Err。
+pub async fn get_json_or_text(
+    client: &reqwest::Client,
+    url: &str,
+    headers: &BTreeMap<String, String>,
+    api_key: &str,
+    timeout_secs: u64,
+    retries: usize,
+) -> Result<(Option<Value>, String)> {
+    let mut last_err: Option<anyhow::Error> = None;
+
+    for attempt in 0..=retries {
+        if attempt > 0 {
+            tokio::time::sleep(Duration::from_millis(250 * (1 << attempt))).await;
+        }
+        match get_raw(client, url, headers, api_key, timeout_secs).await {
+            Ok((status, body)) => {
+                if (200..300).contains(&status) {
+                    // 去掉可能存在的 UTF-8 BOM 再试解析（很多国内源会带）
+                    let trimmed = body.trim_start_matches('\u{feff}').trim_start();
+                    let v = serde_json::from_str::<Value>(trimmed).ok();
+                    return Ok((v, body));
+                }
+                if status == 404 {
+                    return Err(anyhow!("404 未收录该词"));
+                }
+                if status == 429 {
+                    last_err = Some(anyhow!("请求过于频繁（429），已重试"));
+                    continue;
+                }
+                last_err = Some(anyhow!("服务返回 HTTP {}", status));
+            }
+            Err(e) => last_err = Some(e),
         }
     }
 
@@ -485,6 +546,21 @@ pub async fn get_text(
     resp.text().await.map_err(|e| anyhow!("读取响应失败: {}", e))
 }
 
+/// 从 URL 里取「主机:端口」，用于在提示文案里说清「连的是哪个服务」。
+///
+/// 不用 `reqwest::Url` 解析：那是重量级操作，而且用户填的地址经常缺协议头
+/// （`api.deepseek.com/v1`），Url 会直接报错。这里只需要能展示，够用即可。
+pub fn host_of(url: &str) -> String {
+    let s = url.trim();
+    let s = s.split("://").last().unwrap_or(s);
+    let s = s.split('/').next().unwrap_or(s);
+    if s.is_empty() {
+        url.trim().to_string()
+    } else {
+        s.to_string()
+    }
+}
+
 /// 把 reqwest 的错误翻译成用户能看懂的中文。
 pub fn friendly_reqwest_error(e: &reqwest::Error) -> String {
     if e.is_timeout() {
@@ -540,6 +616,18 @@ pub async fn probe(client: &reqwest::Client, url: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn host_of_extracts_display_host() {
+        assert_eq!(host_of("http://127.0.0.1:1234/v1"), "127.0.0.1:1234");
+        assert_eq!(host_of("https://api.deepseek.com/v1"), "api.deepseek.com");
+        assert_eq!(host_of("https://api.deepseek.com"), "api.deepseek.com");
+        assert_eq!(host_of("https://open.bigmodel.cn/api/paas/v4"), "open.bigmodel.cn");
+        // 用户手填时常忘了协议头：不能因为解析不了就显示空
+        assert_eq!(host_of("api.deepseek.com/v1"), "api.deepseek.com");
+        // 极端输入也要给点东西看，不能是空白
+        assert_eq!(host_of(""), "");
+    }
 
     #[test]
     fn client_builds() {

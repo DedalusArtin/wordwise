@@ -156,17 +156,32 @@ pub fn schedule(state: &mut StudyState, grade: Grade, cfg: &SrsConfig, now: i64)
         && low_error;
     state.is_mastered = became_mastered || was_mastered;
 
-    // 常错词判定（需求 5）：错误率高 + 作答次数够，自动纳入强化记忆
+    // 强化记忆（错词本）判定。
+    //
+    // 两条触发，任一条命中就进册：
+    //   ① **答错即收录** —— 用户的直觉就是「错了一次就该进错词本反复看」。
+    //      老逻辑只认「错误率 + 作答次数（默认 ≥3）」，所以只错一次的词
+    //      永远进不去，错词本看起来就像坏的。
+    //   ② 常错词启发式：错误率高且作答次数够，兜住「反复错又反复改对」、
+    //      单看错误率不算高但明显不牢的词。
     let total = state.correct_count + state.wrong_count;
-    let became_leech = total >= cfg.leech_min_reviews
-        && state.error_rate() >= cfg.leech_error_rate
-        && !state.is_mastered;
-    if became_leech {
+    let just_wrong = !grade.is_correct();
+    let chronic = total >= cfg.leech_min_reviews && state.error_rate() >= cfg.leech_error_rate;
+    let newly_leech = (just_wrong || chronic) && !state.is_mastered;
+    if newly_leech {
         state.is_leech = true;
-        // 强化记忆的词，间隔压缩，强制高频重现
+    }
+
+    // 间隔压缩（强制高频重现）：只在「刚进册」和「这次又答错」时做。
+    //
+    // ★ 不能写成「只要是强化词就压」—— 那样每次答对也会被压回 1 天，
+    //   间隔永远涨不到 30 天，「掌握」（要求 interval>=30）就永远不成立，
+    //   词会被**永久锁死在错词本里出不来**。这是老逻辑里真实存在的死结。
+    if state.is_leech && (just_wrong || (!was_leech && newly_leech)) {
         state.interval_days = state.interval_days.min(1.0);
         state.due_at = now + (state.interval_days * 86400.0) as i64;
     }
+
     // 掌握后自动移出强化队列
     if state.is_mastered && state.is_leech {
         state.is_leech = false;
@@ -177,7 +192,7 @@ pub fn schedule(state: &mut StudyState, grade: Grade, cfg: &SrsConfig, now: i64)
         interval_days: state.interval_days,
         due_at: state.due_at,
         due_text: format_ts(state.due_at),
-        became_leech: became_leech && !was_leech,
+        became_leech: newly_leech && !was_leech,
         became_mastered: state.is_mastered && !was_mastered,
     }
 }
@@ -311,6 +326,59 @@ mod tests {
             schedule(&mut st, Grade::Wrong, &c, now + i * 1000);
         }
         assert!(st.is_leech, "连续答错应进入强化记忆");
+    }
+
+    /// 用户直觉：错了一次就该进错词本。老逻辑要求「作答 ≥3 次且错误率 ≥0.5」，
+    /// 只错一次的词永远进不去 —— 错词本看起来像坏的。
+    #[test]
+    fn single_wrong_answer_enters_leech_book() {
+        let c = cfg();
+        let now = 1_700_000_000;
+        let mut st = StudyState::new("once", "en", now);
+        let r = schedule(&mut st, Grade::Wrong, &c, now);
+        assert!(st.is_leech, "答错一次就应进入错词本");
+        assert!(r.became_leech, "应报告「本次进册」");
+        assert_eq!(st.wrong_count, 1);
+    }
+
+    /// ★ 死锁回归测试：老逻辑「只要是强化词就压间隔」会让每次答对也被压回 1 天，
+    /// 间隔永远涨不到 30 天，「掌握」永不成立 → 词被永久锁死在错词本里出不来。
+    #[test]
+    fn leech_can_escape_when_answered_right() {
+        let c = cfg();
+        let now = 1_700_000_000;
+        let mut st = StudyState::new("escape", "en", now);
+        schedule(&mut st, Grade::Wrong, &c, now);
+        assert!(st.is_leech);
+
+        let mut t = now;
+        for _ in 0..6 {
+            t += 86400;
+            schedule(&mut st, Grade::Good, &c, t);
+        }
+        assert!(
+            st.interval_days > 1.0,
+            "进册后连续答对，间隔必须能突破 1 天，实际 {}",
+            st.interval_days
+        );
+    }
+
+    /// 掌握后应自动移出强化队列（否则错词本只进不出）。
+    #[test]
+    fn mastered_word_leaves_leech_book() {
+        let c = cfg();
+        let now = 1_700_000_000;
+        let mut st = StudyState::new("done", "en", now);
+        schedule(&mut st, Grade::Wrong, &c, now);
+        assert!(st.is_leech);
+
+        let mut t = now;
+        for _ in 0..8 {
+            t += 86400;
+            schedule(&mut st, Grade::Good, &c, t);
+        }
+        assert!(st.is_mastered, "连续答对到长期档位应视为掌握");
+        assert!(!st.is_leech, "掌握后应自动移出错词本");
     }
 
     #[test]

@@ -1,6 +1,6 @@
 [package]
 name = "wordwise"
-version = "0.35.0"
+version = "0.41.0"
 description = "WordWise - LM Studio 驱动的可视化背单词与 AI 讲解一体化桌面软件"
 authors = ["DedalusArtin"]
 edition = "2021"
@@ -52,6 +52,9 @@ rusqlite = { version = "0.32", features = ["bundled", "chrono", "serde_json"] }
 
 # 时间处理（记忆周期表 / 复习计划）
 chrono = { version = "0.4", features = ["serde"] }
+
+# 解压 llama.cpp 引擎包（本地大模型一键部署）
+zip = { version = "2", default-features = false, features = ["deflate"] }
 
 # 工具库
 anyhow = "1"

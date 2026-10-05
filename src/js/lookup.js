@@ -60,6 +60,19 @@ const Detail = (() => {
 
     document.getElementById('dc-word').textContent = entry.word || '';
 
+    // 朗读按钮的数据挂载。
+    //
+    // 详情卡是 index.html 里的**静态**结构，`#dc-audio` 与音标行里的 🔇 都
+    // 不在任何 `[data-entry-word]` 容器里 —— 所以委托取不到词，点了没反应
+    // （这正是「朗读按钮点不动」的来源之一）。这里把词 / 音频 / 语言直接
+    // 写到按钮和音标容器上，并在 bind() 里给整个 overlay 挂一次委托。
+    const audioBtn = document.getElementById('dc-audio');
+    if (audioBtn) {
+      audioBtn.dataset.speakWord = entry.word || '';
+      audioBtn.dataset.speakAudio = (entry.phonetic && entry.phonetic.audio) || '';
+      audioBtn.dataset.speakLang = entry.lang || 'en';
+    }
+
     // 音标（带英/美发音按钮）
     const ph = entry.phonetic || {};
     const phItems = [];
@@ -74,6 +87,8 @@ const Detail = (() => {
       phItems.push(`<span class="phon-item">${U().speakBtn(entry, 'us', '发音')}</span>`);
     }
     document.getElementById('dc-phonetic').innerHTML = phItems.join('');
+    // 让音标行里的 🔊 也能取到词（委托会找最近的 [data-entry-word]）
+    document.getElementById('dc-phonetic').setAttribute('data-entry-word', entry.word || '');
 
     // 标签
     const tags = [];
@@ -168,8 +183,9 @@ const Detail = (() => {
   }
 
   function renderRel(entry) {
-    if (!entry.related || !entry.related.length) return '<div class="muted">暂无相关词。</div>';
-    return '<div class="rel-list">' + entry.related.map(r =>
+    const rels = U().splitRelated(entry.related);
+    if (!rels.length) return '<div class="muted">暂无相关词。</div>';
+    return '<div class="rel-list">' + rels.map(r =>
       `<span class="rel-chip" data-word="${U().esc(r)}">${U().esc(r)}</span>`).join('') + '</div>';
   }
 
@@ -200,6 +216,8 @@ const Detail = (() => {
   /* 事件绑定 */
   function bind() {
     document.getElementById('dc-close')?.addEventListener('click', close);
+    // 详情卡内的发音按钮委托（整卡只挂一次，bind 只跑一次）
+    U().speakBind(document.getElementById('detail-overlay'));
     document.getElementById('detail-overlay')?.addEventListener('click', (e) => {
       if (e.target.id === 'detail-overlay') close();
     });
@@ -255,11 +273,20 @@ const Detail = (() => {
   const explainCache = {};
 
   /**
+   * 每个容器的存档状态：`{ saved }`。
+   *
+   * 讲解**在生成时后端就已自动落库**（`cmd_ai_explain` 里顺手存的），
+   * 所以这里不记「有没有存档」，只记「有没有进一步并入词库」。
+   */
+  const explainSaved = {};
+
+  /**
    * 渲染一次讲解结果。
    *
    * 顶部固定一条语言提示条：
    * - 说明本次用的讲解语言、是否经过自动翻译、失败提示；
-   * - 译文与原文不一致时给出「查看原文 / 返回译文」开关（需求 4）。
+   * - 译文与原文不一致时给出「查看原文 / 返回译文」开关（需求 4）；
+   * - 「并入词库」：把讲解正文交给模型整理成结构化词条写进词库（需求 C）。
    */
   function renderExplain(box, res, showOriginal) {
     if (!box) return;
@@ -270,12 +297,24 @@ const Detail = (() => {
     if (res.note) meta.push(res.note);
 
     const differs = !!(res.original && res.original !== res.text);
-    const btn = differs
-      ? `<button class="ghost-btn xs" id="ai-orig-toggle">${showOriginal ? '返回译文' : '查看原文'}</button>`
+    // ★ 这里必须用 class 而不是 id：同一个页面里 #ai-body 与 #dc-pane-ai 可能
+    //   同时存在，用 id 会绑到错误的那个容器上，按钮永远点不动。
+    const origBtn = differs
+      ? `<button class="ghost-btn xs ai-orig-toggle">${showOriginal ? '返回译文' : '查看原文'}</button>`
+      : '';
+    // 存档直出时给一个「重新讲解」出口，否则用户没法刷新内容
+    const regenBtn = res.fromArchive
+      ? '<button class="ghost-btn xs ai-regen">重新讲解</button>'
       : '';
 
+    const saved = !!explainSaved[box.id];
+    const bookBtn = saved
+      ? '<button class="ghost-btn xs is-disabled" disabled>已并入词库</button>'
+      : '<button class="ghost-btn xs ai-to-book">并入词库</button>';
+
     box.innerHTML =
-      `<div class="ai-lang-bar"><span class="ai-lang-meta">${U().esc(meta.join(' · '))}</span>${btn}</div>` +
+      `<div class="ai-lang-bar"><span class="ai-lang-meta">${U().esc(meta.join(' · '))}</span>` +
+      `<span class="ai-lang-actions">${origBtn}${regenBtn}${bookBtn}</span></div>` +
       U().renderMarkdown(body);
 
     // 用 box.querySelector 而不是 getElementById：查词页的 #ai-body 与详情卡的
@@ -283,13 +322,70 @@ const Detail = (() => {
     box.querySelector('.ai-orig-toggle')?.addEventListener('click', () => {
       renderExplain(box, res, !showOriginal);
     });
+
+    box.querySelector('.ai-regen')?.addEventListener('click', () => {
+      // 显式要求跳过存档，强制重新调用模型
+      explainInto(box.id, res.word, null, { preferArchive: false });
+    });
+
+    box.querySelector('.ai-to-book')?.addEventListener('click', async (ev) => {
+      const b = ev.currentTarget || ev.target;
+      if (b) { b.disabled = true; b.textContent = '整理中…'; }
+      try {
+        const entry = await API.explainToEntry(res.word, null, res.lang, res.text);
+        explainSaved[box.id] = true;
+        U().toast(`已按讲解把「${entry.word}」并入词库`, 'ok');
+        renderExplain(box, res, showOriginal);
+      } catch (e) {
+        if (b) { b.disabled = false; b.textContent = '并入词库'; }
+        U().toast(e && e.message ? e.message : String(e), 'err');
+      }
+    });
   }
 
-  /** 在指定容器里流式输出 AI 讲解。 */
-  async function explainInto(containerId, word, question) {
+  /**
+   * 在指定容器里流式输出 AI 讲解。
+   *
+   * `opts.preferArchive`（默认 true）：先用本地讲解存档，有就直接渲染、不调模型。
+   *
+   * 为什么默认走存档：一次讲解是一次完整的模型调用，本地小模型动辄十几秒。
+   * 同一个词第二次点开还要再等十几秒，用户会以为软件卡了。存档的存在就是
+   * 为了「第二次秒回」；想刷新内容，提示条上有「重新讲解」。
+   */
+  async function explainInto(containerId, word, question, opts) {
     const box = document.getElementById(containerId);
     if (!box) return;
 
+    const isFollowUp = !!(question && String(question).trim());
+    // 追问不覆盖主讲解，也就不参与存档，先把上一次的状态清掉
+    if (isFollowUp) explainSaved[containerId] = false;
+
+    // ---- 1) 优先读存档 ----
+    if (!isFollowUp && (!opts || opts.preferArchive !== false)) {
+      try {
+        const row = await API.getExplain(word, null, null);
+        if (row && (row.text || row.original)) {
+          const res = {
+            word: row.word || word,
+            text: row.text || row.original,
+            original: row.original || row.text,
+            lang: row.explain_lang,
+            translated: !!row.translated,
+            fromArchive: true,
+            note: `来自本地讲解存档（${U().timeAgo(row.updated_at)}）`,
+          };
+          explainCache[containerId] = res;
+          explainSaved[containerId] = !!row.saved;
+          renderExplain(box, res, false);
+          return res;
+        }
+      } catch (e) {
+        // 读存档失败不该挡路，照常走模型
+        console.warn('[lookup] 读取讲解存档失败', e);
+      }
+    }
+
+    // ---- 2) 调用模型 ----
     explainBuffer = '';
     box.innerHTML = '<div class="loading"><div class="spinner"></div><span>正在调用本地模型…</span></div>';
 
@@ -312,6 +408,21 @@ const Detail = (() => {
             original: explainBuffer, lang: '', translated: false };
 
       explainCache[containerId] = res;
+
+      // 存档：后端在首次讲解时已自动落库，这里再调一次是为了**拿回存档行**
+      // （带 `saved` 标记）—— 否则用户在别处把这条讲解并进词库后，重新打开
+      // 面板会又显示成「并入词库」，点了才发现已经并过。
+      if (!isFollowUp) {
+        try {
+          const row = await API.saveExplain(
+            res.word || word, null, res.lang, res.text, res.original, res.translated);
+          explainSaved[containerId] = !!(row && row.saved);
+        } catch (e) {
+          // 存档失败不影响讲解本身，但要说清「并入词库」依然可用
+          console.warn('[lookup] 讲解存档失败', e);
+        }
+      }
+
       renderExplain(box, res, false);
       return res;
     } catch (e) {
@@ -324,7 +435,10 @@ const Detail = (() => {
   return {
     open, close, bind, explainInto, renderExplain,
     lastExplain: (id) => explainCache[id] || null,
+    // 供词库页展示「讲解存档」时复用同一套渲染 + 「并入词库」按钮逻辑：
+    // 存档正文直接画出来，不重新调用模型。
     cacheExplain: (id, res) => { explainCache[id] = res; },
+    setExplainSaved: (id, saved) => { explainSaved[id] = !!saved; },
     get current() { return current; },
   };
 })();
@@ -337,7 +451,8 @@ const Lookup = (() => {
 
   let lastResult = null;
   let suggestTimer = null;
-  let reqSeq = 0;   // 请求序号：只有最后一次查询能写界面，避免旧请求覆盖新结果
+  let reqSeq = 0;      // 请求序号：只有最后一次查询能写界面，避免旧请求覆盖新结果
+  let transSeq = 0;    // 词级译文也有自己的序号，防止切换语言时旧译文盖住新译文
 
   /** 给任意 Promise 套一个硬超时，防止 invoke 长时间 pending 时界面无限转圈。 */
   function withTimeout(p, ms, msg) {
@@ -372,11 +487,18 @@ const Lookup = (() => {
       suggestTimer = setTimeout(() => loadSuggest(v), 320);
     });
     refresh?.addEventListener('click', () => query(input.value, true));
+    document.getElementById('lk-back')?.addEventListener('click', goBack);
+    // Alt+← / Alt+→：仿浏览器的历史前进后退
+    document.addEventListener('keydown', (e) => {
+      if (!e.altKey) return;
+      if (U().isTypingTarget(e.target)) return;
+      if (e.key === 'ArrowLeft') { e.preventDefault(); goBack(); }
+    });
+    syncBackBtn();
 
-    // 查询语言 + 搜索引擎。原来这里还有「源语言」下拉和 ⇄ 交换按钮，
-    // 与「目标语言」选项完全重复，已合并为一个下拉（用户反馈）。
-    document.getElementById('lk-dst-lang')?.addEventListener('change', saveDirection);
-    document.getElementById('lk-engine')?.addEventListener('change', saveDirection);
+    // 只绑搜索引擎。语言方向改由顶部的方向选择器（DirPicker）统一管理，
+    // 它同时驱动查词、AI 讲解、在线搜索三个面板。
+    document.getElementById('lk-engine')?.addEventListener('change', saveEngine);
 
     // AI 追问
     const ask = document.getElementById('ai-send');
@@ -548,23 +670,52 @@ const Lookup = (() => {
 
     try {
       const d = await API.getDirection();
-      const dst = document.getElementById('lk-dst-lang');
       const eng = document.getElementById('lk-engine');
-      // 老配置里 target_lang 可能是空串，给个可靠的兜底
-      if (dst) dst.value = d.target_lang || 'en';
       if (eng) eng.value = d.search_engine || 'bing';
       updateWebEngineLabel();
     } catch (e) { /* 忽略 */ }
+
+    // 查询语言已由顶部方向选择器统一管理，这里只负责搜索方式与占位提示
+    syncLookupPlaceholder();
+    // 方向一变：占位提示、待重查的标记、在线搜索语言都要跟着走（需求 4）
+    window.DirPicker?.onChange(() => {
+      syncLookupPlaceholder();
+      if (lastResult && lastResult.word) {
+        loadWebResults(lastResult.word);
+        // 目标语言变了 → 词级译文必须重取，否则会显示上一个语言的译文（需求 3）
+        loadWordTranslation(lastResult);
+      }
+    });
   }
 
-  async function saveDirection() {
-    const dst = document.getElementById('lk-dst-lang')?.value || 'en';
+  async function saveEngine() {
     const eng = document.getElementById('lk-engine')?.value || 'bing';
     try {
-      await API.setDirection(null, dst, eng);
+      await API.setDirection(null, null, eng);
       updateWebEngineLabel();
-      U().toast(`查询语言已切到「${U().langLabel(dst)}」`, 'ok');
+      U().toast(`搜索引擎已切到「${engineLabel()}」`, 'ok');
+      if (lastResult && lastResult.word) loadWebResults(lastResult.word);
     } catch (e) { /* 忽略 */ }
+  }
+
+  /** 按当前互译方向刷新输入框占位提示（需求 4）。 */
+  function syncLookupPlaceholder() {
+    const input = document.getElementById('lk-input');
+    const D = window.DirPicker;
+    if (!input || !D) return;
+    const to = U().langLabel(D.to);
+    input.placeholder = D.from === D.AUTO
+      ? `输入单词，自动识别语种 → 给出${to}释义与译文…`
+      : `输入${U().langLabel(D.from)}单词，查看释义与${to}译文…`;
+
+    // AI 追问的占位也要跟着语言走
+    const ai = document.getElementById('ai-input');
+    if (ai) ai.placeholder = `追问，例如：这个词和 rely 有什么区别？（用${U().langLabel(D.to)}回答）`;
+  }
+
+  function engineLabel() {
+    const sel = document.getElementById('lk-engine');
+    return sel && sel.options[sel.selectedIndex] ? sel.options[sel.selectedIndex].textContent : '必应';
   }
 
   function updateWebEngineLabel() {
@@ -699,13 +850,21 @@ const Lookup = (() => {
     } catch (e) { /* 忽略 */ }
   }
 
-  async function query(word, forceRefresh = false) {
+  async function query(word, forceRefresh = false, opts = {}) {
     word = (word || '').trim();
     if (!word) { U().toast('请输入要查询的单词', 'err'); return; }
 
     const input = document.getElementById('lk-input');
     if (input) input.value = word;
     document.getElementById('lk-suggest').innerHTML = '';
+
+    if (!opts.fromNav) nav.push({ kind: 'word', text: word });
+
+    // 从一开始就不像词条的整句：直接走翻译，别让用户白等一轮必然失败的词典查询
+    if (looksLikeSentence(word)) {
+      querySentence(word, { fromNav: true });
+      return;
+    }
 
     const box = document.getElementById('lk-result');
     const my = ++reqSeq;                 // 本次请求的序号
@@ -738,21 +897,29 @@ const Lookup = (() => {
     } catch (e) {
       clearTimeout(stageTimer);
       if (!alive()) return;
-      box.innerHTML = `<div class="empty-state">
-        <div class="es-icon">&#128533;</div>
-        <p>查询失败</p>
-        <p class="muted">${U().esc(e.message)}</p>
-        <p class="muted" style="margin-top:12px">建议：检查网络连接，或在设置中确认本地模型服务已启动</p>
-      </div>`;
-      // 仍然允许用 AI 讲解这个词
+      // 词典查不到 + 输入本来就像整句 → 自动改走整句翻译，而不是甩一个「查询失败」
+      if (looksLikeSentence(word)) {
+        querySentence(word, { fromNav: true });
+        return;
+      }
+      renderFail(box, word, e.message);
       askTarget = word;
-      document.getElementById('ai-body').innerHTML =
-        `<p class="muted">词典查询失败，可点击下方按钮让本地模型直接讲解「${U().esc(word)}」。</p>`;
+      const aiBox = document.getElementById('ai-body');
+      if (aiBox) {
+        aiBox.innerHTML =
+          `<p class="muted">所有词典源都没给出这个词的释义，可点击下方按钮让本地模型直接讲解「${U().esc(word)}」。</p>`;
+      }
       return;
     }
 
     clearTimeout(stageTimer);
     if (!alive()) return;
+
+    // 查到了「空壳词条」（没有任何释义）而且输入像整句 → 翻译更有用
+    if (looksLikeSentence(word)) {
+      const hasSense = res && res.entry && (res.entry.senses || []).some(s => (s.definition || '').trim());
+      if (!hasSense) { querySentence(word, { fromNav: true }); return; }
+    }
 
     // 渲染出错也要给出提示，而不是把 loading 留在屏幕上
     try {
@@ -770,6 +937,9 @@ const Lookup = (() => {
 
     loadDictLinks(res.word, res.lang);
 
+    // 词级译文（需求 2）：与词典查询并行，不阻塞上面已经画好的词条
+    loadWordTranslation(res);
+
     // 自动开始讲解（若开启）
     if (study.ai_explain !== false) {
       Detail.explainInto('ai-body', res.word).catch(() => {});
@@ -777,6 +947,69 @@ const Lookup = (() => {
 
     // 在线搜索（需求 6）：替代维基百科
     loadWebResults(res.word);
+  }
+
+  /**
+   * 词级译文（需求 2 / 3）。
+   *
+   * 「查词」本身是词典查询，返回的是**词条释义**；用户要的
+   * 「选日语得到 こんにちは」属于**翻译**，所以这里额外补一次翻译，
+   * 放在词条最上方最显眼的位置。
+   *
+   * 目标语言与词条语言相同时不必翻译 —— 否则「中文词条、目标也是中文」
+   * 会白白多打一次在线接口（那接口限频很严）。
+   */
+  async function loadWordTranslation(res) {
+    const box = document.getElementById('lk-trans');
+    const D = window.DirPicker;
+    if (!box || !D || !res) return;
+
+    const to = D.to;
+    if (!to || res.lang === to) {
+      box.innerHTML = '';
+      box.classList.add('hidden');
+      return;
+    }
+
+    box.classList.remove('hidden');
+    box.innerHTML = U().loadingHtml('正在翻译…');
+
+    const my = ++transSeq;
+    try {
+      const t = await API.translate(res.word, res.lang, to, false);
+      if (my !== transSeq) return;                 // 已有更新的查询
+      if (!t || !t.text) {
+        box.innerHTML = '';
+        box.classList.add('hidden');
+        return;
+      }
+
+      const alts = (t.alternatives || []).filter(Boolean);
+      box.innerHTML = `
+        <div class="lk-trans-head">
+          <span class="lk-trans-lang">${U().esc(U().langLabel(t.to))}</span>
+          <span class="lk-trans-text">${U().esc(t.text)}</span>
+          <button class="ghost-btn xs" data-lk-trans-speak title="朗读译文">朗读</button>
+        </div>
+        ${t.phonetic ? `<div class="lk-trans-phonetic">读音 ${U().esc(t.phonetic)}</div>` : ''}
+        ${alts.length ? `<div class="lk-trans-alt">其他译法：${alts.map(U().esc).join(' · ')}</div>` : ''}
+        ${t.note ? `<div class="lk-trans-note">${U().esc(t.note)}</div>` : ''}
+      `;
+
+      box.querySelector('[data-lk-trans-speak]')?.addEventListener('click', () => {
+        if (t.tts_url && window.Speak && window.Speak.playUrl) {
+          window.Speak.playUrl(t.tts_url, 'lk-trans');
+        } else if (window.Speak && window.Speak.playTts) {
+          window.Speak.playTts(t.text, t.to, 0, 'lk-trans');
+        }
+      });
+    } catch (e) {
+      if (my !== transSeq) return;
+      // 翻译失败不该影响已经渲染好的词条，安静地隐藏即可
+      box.innerHTML = '';
+      box.classList.add('hidden');
+      console.warn('[lookup] 词级译文获取失败', e);
+    }
   }
 
   /** 把查到的结果画到 lk-result 面板上（与交互绑定放在一起，便于整体 try/catch）。 */
@@ -787,10 +1020,26 @@ const Lookup = (() => {
     askTarget = res.word;
 
     const srcLine = res.sources && res.sources.length
-      ? `<div class="muted" style="margin-top:10px;font-size:12px">数据来源：${res.sources.map(U().esc).join(' · ')}${res.from_cache ? '（缓存）' : ''}${res.from_llm ? '（本地模型生成）' : ''}</div>`
+      ? `<div class="muted" style="margin-top:10px;font-size:12px">数据来源：${res.sources.map(U().esc).join(' · ')}${res.from_cache ? '（缓存）' : ''}${res.from_llm ? '（本地模型生成）' : ''}${res.degraded ? ' · 启发式解析' : ''}</div>`
       : '';
 
-    box.innerHTML = U().renderEntry(res.entry, {
+    // 语言被书写系统判定纠正过 → 如实告诉用户（需求 3）
+    const langNote = res.lang_note
+      ? `<div class="lk-lang-note">${U().esc(res.lang_note)}</div>`
+      : '';
+
+    // 降级提示条：**查询是成功的**，只是某项「增强能力」没参与（最常见的是
+    // 本地大模型没开 / 超时）。用户明确要求「不能因为 AI 服务器没开就显示
+    // 查询失败」，所以这类信息一律走这条提示，绝不进失败态。
+    const degradeNote = res.note
+      ? `<div class="lk-degrade-note">${U().esc(res.note)}</div>`
+      : '';
+
+    // 词级译文容器（需求 2）：放**目标语言的实际文字**（「你好」→「こんにちは」），
+    // 读音只是它下面的附属标注。查询后由 loadWordTranslation 填充。
+    const transBox = '<div id="lk-trans" class="lk-trans hidden"></div>';
+
+    box.innerHTML = langNote + degradeNote + transBox + U().renderEntry(res.entry, {
       showInflections: study.show_inflections !== false,
       showExamples: study.show_examples !== false,
       showRelated: study.show_related === true,
@@ -821,6 +1070,196 @@ const Lookup = (() => {
     document.getElementById('lk-detail')?.addEventListener('click', () => Detail.open(res.entry));
     document.getElementById('lk-ai')?.addEventListener('click', () => {
       Detail.explainInto('ai-body', res.word).catch(() => {});
+    });
+  }
+
+  /* ---------------- 整句查询（句子也能查，且词词可点） ---------------- */
+
+  /**
+   * 查询历史栈（仿浏览器前进/后退）。
+   *
+   * 每次成功查询都把 `{kind, text}` 压栈；`back()` 只移动游标、不弹栈，
+   * 所以「后退再点新词」时会把后面的分支截断 —— 与浏览器行为一致。
+   */
+  const nav = (() => {
+    const stack = [];
+    let cursor = -1;
+    return {
+      push(item) {
+        const cur = stack[cursor];
+        if (cur && cur.kind === item.kind && cur.text === item.text) return;
+        stack.splice(cursor + 1);
+        stack.push(item);
+        if (stack.length > 80) stack.shift();
+        cursor = stack.length - 1;
+        syncBackBtn();
+      },
+      back() {
+        if (cursor <= 0) return null;
+        cursor -= 1;
+        syncBackBtn();
+        return stack[cursor];
+      },
+      canBack() { return cursor > 0; },
+      reset() { stack.length = 0; cursor = -1; syncBackBtn(); },
+    };
+  })();
+
+  /** 同步「← 返回」按钮的可用状态。 */
+  function syncBackBtn() {
+    const b = document.getElementById('lk-back');
+    if (b) {
+      const can = nav.canBack();
+      b.disabled = !can;
+      b.classList.toggle('is-disabled', !can);
+    }
+  }
+
+  /** 回到栈里的上一个查询。 */
+  function goBack() {
+    const prev = nav.back();
+    if (!prev) { U().toast('已经是最早的查询了', ''); return; }
+    if (prev.kind === 'sentence') querySentence(prev.text, { fromNav: true });
+    else query(prev.text, false, { fromNav: true });
+  }
+
+  /**
+   * 判断输入更像「单句 / 短语」而不是一个词条。
+   *
+   * 用途：词典查不到时**不要直接甩「查询失败」**，而是自动改走整句翻译。
+   * 这是用户截图里那个报错的根源 —— 输入是一整句英文，任何词典源都不可能命中，
+   * 于是四层链路（本地词库 / 缓存 / 在线词典 / AI 兜底）全空，最后只能报失败。
+   *
+   * 注意：现在「AI 没开」已经**不会**单独导致失败了（见 v0.40.0 的判定重构），
+   * 这里的拦截依然必要 —— 它是为了把整句引到翻译那条更合适的路上，
+   * 而不是为了掩盖失败。
+   */
+  function looksLikeSentence(text) {
+    const t = String(text || '').trim();
+    if (!t) return false;
+    // CJK 没有空格，靠长度与句末标点判断
+    if (/[\u3040-\u30ff\u4e00-\u9fff\uac00-\ud7af]/.test(t)) {
+      return t.length >= 10 || /[。！？；]/.test(t);
+    }
+    const tokens = t.split(/\s+/).filter(Boolean);
+    if (tokens.length >= 4) return true;
+    if (tokens.length >= 2 && /[.!?]/.test(t)) return true;
+    return false;
+  }
+
+  /**
+   * 把一句原文切成「可点词 / 分隔符」。
+   *
+   * 拉丁词按 `[A-Za-z][A-Za-z'’-]*` 切；日语/中文按**汉字串与假名串分开**
+   * （日语里这正好大致对应「词」，比整段吞要好用得多）。
+   */
+  function tokenizeSentence(text) {
+    const t = String(text || '');
+    const re = /[A-Za-z][A-Za-z'’-]*|[\u3040-\u30ff]+|[\u4e00-\u9fff]+|[\uac00-\ud7af]+|\s+|[^\sA-Za-z\u3040-\u30ff\u4e00-\u9fff\uac00-\ud7af]+/g;
+    const out = [];
+    for (const piece of (t.match(re) || [])) {
+      if (/^\s+$/.test(piece)) { out.push({ t: piece, word: false }); continue; }
+      const isWord = /^[A-Za-z\u3040-\u30ff\u4e00-\u9fff\uac00-\ud7af]/.test(piece);
+      out.push({ t: piece, word: isWord });
+    }
+    return out;
+  }
+
+  /** 整句翻译并渲染（每个词可点击）。 */
+  async function querySentence(text, opts = {}) {
+    const box = document.getElementById('lk-result');
+    const input = document.getElementById('lk-input');
+    if (input) input.value = text;
+    const sug = document.getElementById('lk-suggest');
+    if (sug) sug.innerHTML = '';
+
+    if (!opts.fromNav) nav.push({ kind: 'sentence', text });
+
+    const my = ++reqSeq;
+    const alive = () => my === reqSeq;
+    box.innerHTML = U().loadingHtml('这是一整句，正在翻译…');
+
+    const D = window.DirPicker;
+    const to = (D && D.to) || 'zh';
+    let res;
+    try {
+      res = await API.translate(text, null, to, false);
+    } catch (e) {
+      if (!alive()) return;
+      renderFail(box, text, `整句翻译失败：${e.message || e}`);
+      return;
+    }
+    if (!alive()) return;
+    if (!res || !res.text) { renderFail(box, text, '翻译服务没有返回结果'); return; }
+
+    renderSentence(res, text, to);
+  }
+
+  /** 渲染整句结果：原文按词可点 + 译文 + 朗读。 */
+  function renderSentence(res, srcText, toLang) {
+    const box = document.getElementById('lk-result');
+    const srcLang = res.from || 'en';
+    const tokens = tokenizeSentence(srcText);
+    const srcHtml = tokens.map(tk => (tk.word
+      ? `<span class="sent-word" data-word="${U().esc(tk.t)}" title="点击查询「${U().esc(tk.t)}」">${U().esc(tk.t)}</span>`
+      : U().esc(tk.t))).join('');
+
+    const back = nav.canBack()
+      ? '<button class="ghost-btn xs" id="lk-sent-back">&#8592; 返回上一个</button>'
+      : '';
+
+    box.innerHTML = `
+      <div class="sent-card">
+        <div class="sent-bar">
+          ${back}
+          <button class="ghost-btn xs speak-btn" data-speak-text="${U().esc(srcText)}"
+                  data-speak-lang="${U().esc(srcLang)}" data-speak-rate="0.9"
+                  title="朗读原文">&#128266; 朗读原文</button>
+          <span class="sent-note">词典未收录为词条，已按整句翻译 · 点击任意单词可查词</span>
+        </div>
+        <div class="sent-src" data-speak-text="${U().esc(srcText)}" data-speak-lang="${U().esc(srcLang)}">${srcHtml}</div>
+        <div class="sent-dst">${U().esc(res.text)}</div>
+        ${res.phonetic ? `<div class="sent-phonetic">读音 ${U().esc(res.phonetic)}</div>` : ''}
+        ${(res.alternatives || []).filter(a => a && a !== res.text).length
+          ? `<div class="sent-alt">其他译法：${res.alternatives.filter(a => a && a !== res.text).map(U().esc).join(' · ')}</div>` : ''}
+        ${res.note ? `<div class="sent-note-2">${U().esc(res.note)}</div>` : ''}
+      </div>`;
+
+    // 每个词点开查词（会压栈，所以能一路退回来）
+    box.querySelectorAll('.sent-word').forEach(el => {
+      el.addEventListener('click', () => query(el.dataset.word));
+    });
+    document.getElementById('lk-sent-back')?.addEventListener('click', goBack);
+    U().speakBind(box);
+    lastResult = null;
+    askTarget = '';
+    syncBackBtn();
+  }
+
+  /**
+   * 统一的失败态渲染。
+   *
+   * 只有「本地词库 / 缓存 / 在线词典 / AI 兜底」**全都**没结果时才会走到这里
+   * ——只要有一个词典源能返回内容，后端就会返回成功（必要时带降级提示），
+   * 不会进这个页面。所以文案不再把「没启动 AI 服务器」当成失败原因。
+   */
+  function renderFail(box, word, msg) {
+    box.innerHTML = `<div class="empty-state">
+      <div class="es-icon">&#128533;</div>
+      <p>未查到「${U().esc(word)}」</p>
+      <p class="muted">${U().esc(msg)}</p>
+      <p class="muted" style="margin-top:12px">
+        只要有一个词典源返回结果就会显示成功，所以这里多半是所有源都没收录该词。
+      </p>
+      <div class="btn-row" style="margin-top:14px">
+        <button class="ghost-btn sm" id="lk-fail-sent">改按整句翻译</button>
+        <button class="ghost-btn sm" id="lk-fail-ai">用 AI 讲解</button>
+      </div>
+    </div>`;
+    document.getElementById('lk-fail-sent')?.addEventListener('click', () => querySentence(word));
+    document.getElementById('lk-fail-ai')?.addEventListener('click', () => {
+      askTarget = word;
+      Detail.explainInto('ai-body', word).catch(() => {});
     });
   }
 
@@ -867,7 +1306,8 @@ const Lookup = (() => {
   }
 
   return {
-    bind, query, loadWebResults,
+    bind, query, querySentence, goBack, looksLikeSentence, loadWebResults,
+    loadWordTranslation, syncLookupPlaceholder,
     initLayout, setSplit, setCollapsed, isCollapsed,
     get currentSplit() { return currentSplit(); },
     get last() { return lastResult; },

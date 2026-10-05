@@ -28,6 +28,35 @@ function esc(s) {
     .replace(/'/g, '&#39;');
 }
 
+/**
+ * 把 related 拆成一个个真正可查的词。
+ *
+ * 后端 `split_related()` 已经拆过一遍，但**旧缓存里存的是拆之前的数据**
+ * （dict_cache TTL 30 天），所以前端必须再兜一层 —— 否则老用户点相关词
+ * 仍然是拿 "desert, abandon, leave" 整串去查，结果显示「查询失败」。
+ */
+function splitRelated(list) {
+  const out = [];
+  const seps = /[,;，；、/|\n\r\t·]+/;
+  const edge = /^[.。,，()\[\]"']+|[.。,，()\[\]"']+$/g;
+  const clean = (s) => String(s).trim().replace(edge, '');
+  for (const raw of (list || [])) {
+    if (typeof raw !== 'string') continue;
+    for (const piece of raw.split(seps)) {
+      const p = clean(piece);
+      if (!p) continue;
+      // CJK 串里的空格常是词组的一部分，保留原样；拉丁串按空格再拆
+      const words = /[\u3040-\u30ff\u4e00-\u9fff\uac00-\ud7af]/.test(p) ? [p] : p.split(/\s+/);
+      for (const raw2 of words) {
+        const w = clean(raw2);
+        if (!w || w.length > 30) continue;
+        if (!out.includes(w)) out.push(w);
+      }
+    }
+  }
+  return out.slice(0, 20);
+}
+
 /** 全局轻提示。 */
 let toastTimer = null;
 function toast(msg, type = '') {
@@ -72,8 +101,26 @@ function renderEntry(entry, opts = {}) {
   if (o.showPhonetic) {
     const ph = entry.phonetic || {};
     const items = [];
-    if (ph.uk) items.push(`<span class="phon-item"><span class="phon-tag">英</span>${esc(ph.uk)}${speakBtn(entry, 'uk', '英音')}</span>`);
-    if (ph.us) items.push(`<span class="phon-item"><span class="phon-tag">美</span>${esc(ph.us)}${speakBtn(entry, 'us', '美音')}</span>`);
+    // 读音标签必须跟着**词条语言**走。
+    //
+    // 老代码不看语言，只要 uk/us 有值就标「英」「美」—— 于是中文词「你好」
+    // 的拼音 `nǐ hǎo` 被标成了英语音标，用户看到的第一眼信息就是错的
+    // （这也正是「选日语却只看到读音」观感问题的来源之一）。
+    // 读音终究只是**附属标注**，主体必须是目标语言的实际文字。
+    const lg = entry.lang || 'en';
+    if (lg === 'zh') {
+      const py = ph.uk || ph.us;
+      if (py) items.push(`<span class="phon-item"><span class="phon-tag">拼音</span>${esc(py)}${speakBtn(entry, 'us', '朗读')}</span>`);
+    } else if (lg === 'ja') {
+      const rb = ph.uk || ph.us;
+      if (rb) items.push(`<span class="phon-item"><span class="phon-tag">读音</span>${esc(rb)}${speakBtn(entry, 'us', '朗读')}</span>`);
+    } else if (lg === 'ko') {
+      const rb = ph.uk || ph.us;
+      if (rb) items.push(`<span class="phon-item"><span class="phon-tag">罗马音</span>${esc(rb)}${speakBtn(entry, 'us', '朗读')}</span>`);
+    } else {
+      if (ph.uk) items.push(`<span class="phon-item"><span class="phon-tag">英</span>${esc(ph.uk)}${speakBtn(entry, 'uk', '英音')}</span>`);
+      if (ph.us) items.push(`<span class="phon-item"><span class="phon-tag">美</span>${esc(ph.us)}${speakBtn(entry, 'us', '美音')}</span>`);
+    }
     if (!items.length) items.push(`<span class="phon-item">${speakBtn(entry, 'us', '发音')}</span>`);
     parts.push(`<div class="we-phon">${items.join('')}</div>`);
   }
@@ -132,13 +179,16 @@ function renderEntry(entry, opts = {}) {
 
   // 相关词
   if (o.showRelated && entry.related && entry.related.length) {
-    parts.push('<div class="we-section">');
-    parts.push('<div class="we-section-title">相关词</div>');
-    parts.push('<div class="rel-list">');
-    for (const r of entry.related) {
-      parts.push(`<span class="rel-chip" data-word="${esc(r)}">${esc(r)}</span>`);
+    const rels = splitRelated(entry.related);
+    if (rels.length) {
+      parts.push('<div class="we-section">');
+      parts.push('<div class="we-section-title">相关词</div>');
+      parts.push('<div class="rel-list">');
+      for (const r of rels) {
+        parts.push(`<span class="rel-chip" data-word="${esc(r)}">${esc(r)}</span>`);
+      }
+      parts.push('</div></div>');
     }
-    parts.push('</div></div>');
   }
 
   parts.push('</div>');
@@ -566,10 +616,27 @@ function attachListSearch(o) {
   };
 }
 
+/**
+ * 把**纯文本**渲染成 HTML：转义 + 保留段落与换行。
+ *
+ * 译文不是 Markdown（模型/接口返回的就是平文），直接用 renderMarkdown 会把
+ * 译文里的 `#`、`*`、`-` 当成语法，反而破坏内容。段落翻译还需要保留原文的
+ * 分行结构，所以按空行切段、段内换行转 <br>。
+ */
+function renderPlainText(s) {
+  const t = String(s == null ? '' : s).replace(/\r\n?/g, '\n').trim();
+  if (!t) return '';
+  return t
+    .split(/\n{2,}/)
+    .map(p => `<p>${esc(p).replace(/\n/g, '<br>')}</p>`)
+    .join('');
+}
+
 window.WW = window.WW || {};
 Object.assign(window.WW, {
   esc, toast, loadingHtml, renderEntry, collectExamples, sourceLabel, langLabel,
-  renderMarkdown, fmtDay, timeAgo, masteryClass, renderBarChart, switchDetailTab, debounce,
+  splitRelated,
+  renderMarkdown, renderPlainText, fmtDay, timeAgo, masteryClass, renderBarChart, switchDetailTab, debounce,
   attachListSearch, speakBtn, isTypingTarget,
   speak: (word, opts) => (window.Speak ? window.Speak.speak(word, opts) : null),
   speakBind: (root) => { if (window.Speak) window.Speak.bindDelegate(root); },

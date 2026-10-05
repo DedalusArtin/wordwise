@@ -34,3 +34,14 @@ installer/build_iss.bat
 /tmp/
 *.7z
 /src-tauri/gen/
+
+# 随包分发的 llama.cpp 引擎（vendor\llama，约 118 MB）。
+#
+# 为什么不进 git：这是第三方二进制，单个 ggml-vulkan.dll 就有 45 MB。
+# 提交进仓库会让 clone 永久变重，而它**每次都能重新下载**（build.ps1 对缺失
+# 的情况有降级提示）。分发渠道是 Release 附件里的安装包/便携包 ——
+# 它们已经把这 118 MB 打进去了，用户拿到的是开箱即用的版本。
+#
+# 需要本地复现「带引擎的便携包」时，把引擎解压到 vendor\llama 即可
+# （llama-server.exe + 若干 .dll，来源见 build.ps1 里的 engine 说明）。
+/vendor/

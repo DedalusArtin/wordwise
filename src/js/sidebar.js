@@ -93,7 +93,7 @@ const Sidebar = (() => {
       res = await API.lookup(word);
     } catch (e) {
       box.innerHTML = `<div class="muted" style="padding:16px;line-height:1.8">
-        <p style="color:#e5484d;margin-bottom:8px">查询失败</p>
+        <p style="color:#e5484d;margin-bottom:8px">未查到该词</p>
         <p>${U().esc(e.message)}</p>
       </div>`;
       currentEntry = null;

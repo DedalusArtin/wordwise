@@ -130,7 +130,7 @@ cd src-tauri && cargo build --release && cd ..
 "G:\Programming\07-utils\Inno Setup 7\ISCC.exe" installer\wordwise.iss
 ```
 
-产物：`installer\output\WordWise-Setup-0.35.0.exe`
+产物：`installer\output\WordWise-Setup-0.36.0.exe`
 
 ### 4.3b 便携版（免安装）
 

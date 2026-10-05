@@ -62,6 +62,15 @@ pub fn short_date(ts: i64) -> String {
         .unwrap_or_default()
 }
 
+/// Unix 秒 -> "YYYY-MM-DD HH:MM"，导出报表用。
+pub fn full_ts(ts: i64) -> String {
+    Local
+        .timestamp_opt(ts, 0)
+        .single()
+        .map(|d| d.format("%Y-%m-%d %H:%M").to_string())
+        .unwrap_or_default()
+}
+
 /// 计算两个时间戳相差的自然天数。
 pub fn days_between(a: i64, b: i64) -> i64 {
     let (sa, _) = day_bounds(a);

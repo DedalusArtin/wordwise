@@ -4,7 +4,15 @@
 //! 所有命令统一返回 `Result<T, String>`，错误转成中文文案直接给用户看。
 
 pub mod books;
+pub mod explain;
 pub mod extra;
+pub mod graph;
+pub mod leech;
+pub mod localllm;
+pub mod maint;
+pub mod plan;
+pub mod storage;
+pub mod translate;
 
 use crate::db;
 use crate::dict;
@@ -275,6 +283,27 @@ pub async fn cmd_ai_explain(
         note,
     };
 
+    // 顺手存档（用户需求 C：讲解也算存储，能在词库里搜到）。
+    //
+    // 只在**首次讲解**时落库：追问（`question` 非空）的答案是对同一个词的
+    // 补充说明，存进去会用「追问的答复」把主讲解覆盖掉，得不偿失。
+    // 存档是尽力而为的，失败不该影响讲解本身，所以忽略错误。
+    if question.as_deref().map(|q| q.trim().is_empty()).unwrap_or(true) {
+        let now = timeutil::now_ts();
+        let row = db::ExplainRow {
+            word: word.trim().to_lowercase(),
+            lang: lang.clone(),
+            explain_lang: out.lang.clone(),
+            text: out.text.clone(),
+            original: out.original.clone(),
+            translated: out.translated,
+            entry_json: String::new(),
+            saved: false,
+            updated_at: now,
+        };
+        let _ = state.db.save_explain(&row, now);
+    }
+
     // 前端据此整体替换（流式期间显示的是可能未经翻译的增量文本）
     let _ = app.emit("explain://done", serde_json::to_value(&out).unwrap_or_default());
     Ok(out)
@@ -303,6 +332,21 @@ pub async fn cmd_ai_explain_sync(
         .map_err(err)?;
     let (text, translated, note) =
         apply_explain_lang(&state, &cfg, original.clone(), &explain_lang).await;
+    // 与流式版一致：顺手存档，失败不影响返回
+    let now = timeutil::now_ts();
+    let row = db::ExplainRow {
+        word: word.trim().to_lowercase(),
+        lang: lang.clone(),
+        explain_lang: explain_lang.clone(),
+        text: text.clone(),
+        original: original.clone(),
+        translated,
+        entry_json: String::new(),
+        saved: false,
+        updated_at: now,
+    };
+    let _ = state.db.save_explain(&row, now);
+
     Ok(ExplainResult {
         word: word.clone(),
         text,
@@ -399,15 +443,50 @@ pub async fn cmd_lookup(
         return Err("请输入要查询的单词".into());
     }
 
-    // 语言判定：书写系统能明确判断时以「词本身」为准，判不出来才用下拉里选的。
+    // ---- 语言判定（需求 3：整条链路必须一致） ----
     //
-    // 这样「选日语 + 查『开心』」不会再被当成日语词——中文词会走中文源、
-    // 打上「中文」标签，日语词（含假名）走日语源。纯拉丁字母（英/法/德…）
-    // 无法区分，仍尊重用户选择，所以下拉依然是有效的手动开关。
-    let requested = lang.unwrap_or_else(|| cfg.target_lang.clone());
-    let lang = crate::dict::detect_lang(&word)
-        .map(|s| s.to_string())
-        .unwrap_or(requested);
+    // 优先级：
+    //   1. 调用方显式传入的 lang（会话内临时指定）；
+    //   2. 配置里的**源语言**（顶部方向选择器的左半边），`auto` 表示交给检测；
+    //   3. 检测结果 —— 只在没被显式指定时才用。
+    //
+    // 这里刻意保留一条「以检测结果为准」的纠正规则：用户把方向选成
+    // 「日语 → 中文」却又输入了中文词时，硬按日语去查只会拿到一堆
+    // 英文解释（这正是用户报的「选日语却返回英语」）。所以当书写系统能
+    // **强判定**（中日韩俄等）且与用户所选冲突时，以检测为准，并把这次
+    // 纠正通过 `lang_note` 如实告诉用户。
+    let cfg_src = cfg.source_lang.trim().to_string();
+    let requested = lang
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .or_else(|| {
+            if cfg_src.is_empty() || cfg_src == crate::translate::AUTO {
+                None
+            } else {
+                Some(cfg_src.clone())
+            }
+        });
+
+    let detected = crate::dict::detect_lang(&word).map(|s| s.to_string());
+    let (lang, lang_note) = match (detected.clone(), requested.clone()) {
+        // 没指定源语言：用检测结果，检测不出（纯拉丁字母）默认英语
+        (Some(d), None) => (d, None),
+        (None, None) => ("en".to_string(), None),
+        // 指定了且与检测一致：正常
+        (Some(d), Some(r)) if d == r => (d, None),
+        // 指定了但检测是强判定且不一致：以检测为准并提示
+        (Some(d), Some(r)) => {
+            let note = format!(
+                "检测到输入的是{}，已按{}查询（方向里的源语言是{}）",
+                crate::translate::lang_name(&d),
+                crate::translate::lang_name(&d),
+                crate::translate::lang_name(&r)
+            );
+            (d, Some(note))
+        }
+        // 检测不出（英/法/德/西… 都是拉丁字母）：尊重用户选择
+        (None, Some(r)) => (r, None),
+    };
 
     if force_refresh.unwrap_or(false) {
         // 强制刷新时清掉这个词的缓存
@@ -449,6 +528,9 @@ pub async fn cmd_lookup(
     )
     .await
     .map_err(err)?;
+
+    let mut result = result;
+    result.lang_note = lang_note;
 
     state.db.log_search(&result.word, timeutil::now_ts()).ok();
     Ok(result)
@@ -708,6 +790,7 @@ pub fn cmd_start_session(
     size: Option<i64>,
     leech_only: Option<bool>,
     lang: Option<String>,
+    def_lang: Option<String>,
 ) -> Result<SessionInfo, String> {
     let cfg = state.cfg();
     let lang = lang.unwrap_or(cfg.target_lang.clone());
@@ -715,6 +798,7 @@ pub fn cmd_start_session(
     let limit = size.unwrap_or(cfg.study.batch_size).clamp(1, 200);
     let mode = mode.unwrap_or_default();
     let leech_only = leech_only.unwrap_or(false);
+    let def_lang = def_lang.unwrap_or_default();
 
     let mut picked: Vec<WordEntry> = Vec::new();
     let mut seen = std::collections::BTreeSet::new();
@@ -783,6 +867,7 @@ pub fn cmd_start_session(
         s.wrong = 0;
         s.started_at = now;
         s.leech_only = leech_only;
+        s.def_lang = def_lang;
     }
 
     Ok(SessionInfo {
@@ -822,7 +907,7 @@ pub fn cmd_current_question(
     lang: Option<String>,
 ) -> Result<Option<QuizCard>, String> {
     let lang = lang.unwrap_or_else(|| state.cfg().target_lang);
-    let (entry, mode, index, is_leech, total, correct, wrong) = {
+    let (entry, mode, index, is_leech, total, correct, wrong, def_lang) = {
         let s = state.session.read();
         if !s.is_active() {
             return Ok(None);
@@ -850,6 +935,7 @@ pub fn cmd_current_question(
             s.total(),
             s.correct,
             s.wrong,
+            s.def_lang.clone(),
         )
     };
     let card = build_card(
@@ -864,6 +950,7 @@ pub fn cmd_current_question(
             correct,
             wrong,
         },
+        &def_lang,
     )?;
     Ok(Some(card))
 }
@@ -876,10 +963,14 @@ fn build_card(
     lang: &str,
     is_leech: bool,
     progress: CardProgress,
+    def_lang: &str,
 ) -> Result<QuizCard, String> {
+    // 题面/答案里的「释义」统一走 def_lang：背日语词库时显示中文释义，
+    // 而不是词典源顺手返回的英文解释。
+    let def = || entry.definition_in(def_lang);
     let (prompt, answer) = match mode {
         QuizMode::EnToZh => {
-            let a = entry.primary_definition();
+            let a = def();
             let a = if a.trim().is_empty() {
                 "（暂无释义，点击查询）".to_string()
             } else {
@@ -888,7 +979,7 @@ fn build_card(
             (entry.word.clone(), a)
         }
         QuizMode::ZhToEn => {
-            let q = entry.primary_definition();
+            let q = def();
             let q = if q.trim().is_empty() {
                 entry.word.clone()
             } else {
@@ -896,9 +987,9 @@ fn build_card(
             };
             (q, entry.word.clone())
         }
-        // 拼写：题面给中文释义，答案是要拼的单词
+        // 拼写：题面给释义，答案是要拼的单词
         QuizMode::Spelling | QuizMode::ListenSpell => {
-            let q = entry.primary_definition();
+            let q = def();
             let q = if q.trim().is_empty() {
                 "（暂无释义）".to_string()
             } else {
@@ -908,7 +999,7 @@ fn build_card(
         }
         // 例句选义：题面是挖空例句，答案是释义
         QuizMode::ExToZh => {
-            let a = entry.primary_definition();
+            let a = def();
             let a = if a.trim().is_empty() {
                 "（暂无释义）".to_string()
             } else {
@@ -925,7 +1016,7 @@ fn build_card(
             let q = entry
                 .first_example()
                 .map(|(t, _)| mask_word(&t, &entry.word))
-                .unwrap_or_else(|| entry.primary_definition());
+                .unwrap_or_else(|| entry.definition_in(def_lang));
             (q, entry.word.clone())
         }
     };
@@ -938,7 +1029,7 @@ fn build_card(
             break;
         }
         let cand = match mode {
-            QuizMode::EnToZh | QuizMode::ExToZh => p.primary_definition(),
+            QuizMode::EnToZh | QuizMode::ExToZh => p.definition_in(def_lang),
             _ => p.word.clone(),
         };
         if cand.trim().is_empty() || cand == answer || options.contains(&cand) {
@@ -1032,6 +1123,7 @@ pub fn build_card_public(
     total: usize,
     correct: i32,
     wrong: i32,
+    def_lang: &str,
 ) -> Result<QuizCard, String> {
     build_card(
         state,
@@ -1040,6 +1132,7 @@ pub fn build_card_public(
         lang,
         is_leech,
         CardProgress { index, total, correct, wrong },
+        def_lang,
     )
 }
 

@@ -6,6 +6,8 @@
 //! - `db`       SQLite 存储层
 //! - `dict`     词典源抽象与 JSON 字段映射（小语种扩展点）
 //! - `llm`      LM Studio / OpenAI 兼容客户端
+//! - `graph`    知识图谱：词关系抽取与 AI 发散
+//! - `localllm` 本地大模型一键部署（llama.cpp 托管 + 模型下载）
 //! - `search`   在线搜索与知识获取
 //! - `net`      HTTP 基础设施
 //! - `state`    应用共享状态
@@ -16,7 +18,9 @@
 pub mod commands;
 pub mod db;
 pub mod dict;
+pub mod graph;
 pub mod llm;
+pub mod localllm;
 pub mod models;
 pub mod net;
 pub mod search;
@@ -24,6 +28,7 @@ pub mod seed;
 pub mod srs;
 pub mod state;
 pub mod timeutil;
+pub mod translate;
 pub mod windows;
 
 /// 库入口：供 main.rs 调用。
