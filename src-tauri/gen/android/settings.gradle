@@ -1,0 +1,22 @@
+// plugins.gradle.org（Gradle 插件门户 / Gradle Central Plugin Repository）
+// 在国内直连不通 —— 实测：直连超时、走本地 HTTP 代理 40s 也超时，
+// 于是 buildSrc 的 `kotlin-dsl` 插件解析失败：
+//   Plugin [id: 'org.gradle.kotlin.kotlin-dsl', version: '6.6.4'] was not found
+//   Searched in the following repositories: Gradle Central Plugin Repository
+//
+// 阿里云这份是插件门户的完整镜像（实测 200）。放在前面，官方源保留作后备 ——
+// 境外网络下前面的解析失败会自动回落到 gradlePluginPortal()，不影响结果。
+//
+// 注意：buildSrc 是 Gradle 隐式创建的**独立构建**，读不到这里的配置，
+// 那边必须单独再写一份（buildSrc/settings.gradle.kts）。
+// 同理 build.gradle.kts 里的 google() / mavenCentral() 实测直连正常，未改。
+pluginManagement {
+    repositories {
+        maven { url 'https://maven.aliyun.com/repository/gradle-plugin' }
+        gradlePluginPortal()
+    }
+}
+
+include ':app'
+
+apply from: 'tauri.settings.gradle'

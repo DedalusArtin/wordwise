@@ -12,6 +12,19 @@ Cargo.lock.bak
 installer/output/
 !installer/output/.gitkeep
 
+# ★ Android 正式发布签名密钥。
+#
+# 为什么单独列出来强调：这个密钥的身份（SHA256 指纹）决定了「老版本能否
+# 覆盖安装新版本」。android:sharedUserId / 包名相同但签名不同的 APK，
+# Android 会直接拒绝安装（报 "App not installed / 签名不一致"），
+# 用户只能先卸载 —— 而卸载会连词库和背诵进度一起删掉。
+#
+# 所以它必须长期妥善保管（至少备份到两处，例如私有仓库 + 加密网盘），
+# 但**绝不能进公开 git**：任何人拿到它就能冒名发布"官方升级包"。
+# 缺这两个文件时 Gradle 会跳过签名（照常出包，但产物是 -unsigned.apk）。
+installer/android/*.jks
+installer/android/keystore.properties
+
 # 本地数据与缓存
 /wordwise-data/
 *.db
@@ -30,6 +43,8 @@ Thumbs.db
 # 临时文件
 *.log
 *.tmp
+# 构建诊断日志目录（android 构建的完整输出等），只在本机看，不入库
+/.logs/
 installer/build_iss.bat
 /tmp/
 *.7z
