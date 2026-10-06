@@ -89,7 +89,43 @@ pub fn cmd_tts_status(state: State<'_, Arc<AppState>>) -> Result<serde_json::Val
         "installed": installed,
         "voices": voices,
         "config": cfg.tts,
+        // ── 本平台能不能真的跑 Piper ──
+        // Piper 和 llama-server 一样是外部二进制，Android 的 W^X 规则
+        // 同样拦它。界面据此把「下载语音引擎 / 语音包」收起来，
+        // 免得用户先下 60 MB，再发现永远合成不出来。
+        "supported": piper_supported(),
+        "unsupported_reason": piper_unsupported_reason(),
     }))
+}
+
+/// 本地神经语音（Piper）在本平台能不能跑。
+#[cfg(not(target_os = "android"))]
+pub fn piper_supported() -> bool {
+    true
+}
+#[cfg(target_os = "android")]
+pub fn piper_supported() -> bool {
+    false
+}
+
+/// 不支持时给用户的解释。
+#[cfg(not(target_os = "android"))]
+pub fn piper_unsupported_reason() -> Option<&'static str> {
+    None
+}
+#[cfg(target_os = "android")]
+pub fn piper_unsupported_reason() -> Option<&'static str> {
+    Some("Android 不允许 App 执行自带的外部二进制（W^X），Piper 神经语音在移动端不可用。朗读会走系统语音。")
+}
+
+/// 移动端早退：装了也用不了，别让用户白下几十 MB。
+fn reject_if_unsupported() -> Result<(), String> {
+    if !piper_supported() {
+        return Err(piper_unsupported_reason()
+            .unwrap_or("本平台不支持本地神经语音")
+            .to_string());
+    }
+    Ok(())
 }
 
 /// 安装 Piper 引擎（下载 zip → 解压到 `<models_dir>/tts/`）。
@@ -98,6 +134,7 @@ pub async fn cmd_tts_install_engine(
     state: State<'_, Arc<AppState>>,
     app: AppHandle,
 ) -> Result<serde_json::Value, String> {
+    reject_if_unsupported()?;
     let dir = models_dir(&state);
     let exedir = app_dir();
     if let Some(e) = tts::resolve_engine(&exedir, &dir) {
@@ -167,6 +204,7 @@ pub async fn cmd_tts_install_voice(
     app: AppHandle,
     voice_id: String,
 ) -> Result<serde_json::Value, String> {
+    reject_if_unsupported()?;
     let spec = tts::spec(&voice_id).ok_or_else(|| format!("未知的语音：{voice_id}"))?;
     let dir = models_dir(&state);
     let vdir = tts::voice_dir(&dir, &voice_id);

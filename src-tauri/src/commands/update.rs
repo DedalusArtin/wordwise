@@ -531,12 +531,17 @@ fn open_dir(p: &Path) -> Result<(), String> {
             .spawn()
             .map_err(|e| format!("打开文件夹失败：{e}"))?;
     }
-    #[cfg(all(unix, not(target_os = "macos")))]
+    // ★ 显式排除 android：见 `commands::maint::cmd_open_dir` 里同样的说明。
+    #[cfg(all(unix, not(any(target_os = "macos", target_os = "android"))))]
     {
         std::process::Command::new("xdg-open")
             .arg(p.as_os_str())
             .spawn()
             .map_err(|e| format!("打开文件夹失败：{e}"))?;
+    }
+    #[cfg(target_os = "android")]
+    {
+        return Err("移动端没有系统文件管理器入口".to_string());
     }
     Ok(())
 }

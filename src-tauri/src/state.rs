@@ -202,6 +202,12 @@ pub enum DataDirSource {
     BesideExe,
     /// ⑥ 系统用户目录（兜底）
     Fallback,
+    /// ⑦ 由宿主系统分配的应用私有目录（Android / iOS）
+    ///
+    /// 移动端没有「exe 同级」这种概念：`std::env::current_exe()` 在 Android 上
+    /// 返回的是 `/system/bin/app_process*`，`dirs::data_dir()` 也不可靠。
+    /// 唯一正确的是 Tauri 在 setup 阶段给出的 `app.path().app_data_dir()`。
+    System,
 }
 
 impl DataDirSource {
@@ -214,6 +220,7 @@ impl DataDirSource {
             DataDirSource::Existing => "沿用系统用户目录里已有的学习数据",
             DataDirSource::BesideExe => "软件所在目录（默认，跟着程序走）",
             DataDirSource::Fallback => "系统用户目录（兜底）",
+            DataDirSource::System => "应用私有目录（由系统分配）",
         }
     }
 

@@ -751,30 +751,25 @@ pub fn cmd_dict_links(
 
 /// 用系统默认浏览器打开外部链接（辞书跳转用）。
 #[tauri::command]
-pub fn cmd_open_url(url: String) -> Result<(), String> {
+pub fn cmd_open_url(app: tauri::AppHandle, url: String) -> Result<(), String> {
     let u = url.trim();
     if !(u.starts_with("http://") || u.starts_with("https://")) {
         return Err("只允许打开 http(s) 链接".into());
     }
-    open_in_browser(u).map_err(err)
+    open_in_browser(&app, u).map_err(err)
 }
 
 /// 跨平台打开浏览器。
-fn open_in_browser(url: &str) -> anyhow::Result<()> {
-    #[cfg(target_os = "windows")]
-    {
-        std::process::Command::new("cmd")
-            .args(["/C", "start", "", url])
-            .spawn()?;
-    }
-    #[cfg(target_os = "macos")]
-    {
-        std::process::Command::new("open").arg(url).spawn()?;
-    }
-    #[cfg(all(unix, not(target_os = "macos")))]
-    {
-        std::process::Command::new("xdg-open").arg(url).spawn()?;
-    }
+///
+/// 走 tauri-plugin-opener，而不是自己 spawn 外部程序：
+///  - Windows 要 `cmd /C start`，macOS 要 `open`，桌面 Linux 要 `xdg-open`；
+///  - **Android 是 unix 但不是桌面 Linux**，上面这三个它一个都没有。
+///    按 `cfg(all(unix, not(macos)))` 分派会落到 `xdg-open` 上，
+///    在那里 spawn 一个不存在的程序 —— 表现是点了链接毫无反应。
+///    插件在移动端走 Intent，这才是正确路径。
+fn open_in_browser(app: &tauri::AppHandle, url: &str) -> anyhow::Result<()> {
+    use tauri_plugin_opener::OpenerExt;
+    app.opener().open_url(url, None::<&str>)?;
     Ok(())
 }
 

@@ -1,19 +1,35 @@
 //! 窗口管理与应用启动。
 //!
-//! 包含三部分：
+//! **桌面端**（Windows）包含三部分：
 //! - 主窗口：完整功能界面
-//! - **侧边栏窗口（需求 7）**：可长期挂起的窄条窗口，置顶、无边框、
-//!   随时查词与学习，双击图标可收起/展开
+//! - **侧边栏窗口**：可长期挂起的窄条窗口，置顶、无边框、随时查词与学习
 //! - 系统托盘：快速唤出侧边栏、开始复习、退出
+//!
+//! **移动端**（Android）只有系统给的那一个窗口：没有第二个窗口、没有托盘，
+//! 也没有「关掉主窗口退到托盘」这回事。这批能力用 `#[cfg(desktop)]` 整段
+//! 圈起来，移动端留下的是**可用的子集**，而不是「编译能过、一点就崩」。
+//!
+//! 之所以按 `desktop` / `mobile` 切而不是按 `windows` 切：菜单、托盘、
+//! 多窗口这三类 API 在 Tauri 里是按「桌面 vs 移动」分发的，macOS / Linux
+//! 与 Windows 共用同一套；只有「弹原生消息框」「读注册表代理」这类才是
+//! 真正的 `cfg(windows)`。
 
 use crate::commands;
-use crate::state::{resolve_data_dir_ex, AppState};
+#[cfg(desktop)]
+use crate::state::resolve_data_dir_ex;
+// 两个平台都要建状态，所以 `AppState` 无条件引入；
+// `DataDirSource::System` 只有移动端用得到。
+#[cfg(mobile)]
+use crate::state::DataDirSource;
+use crate::state::AppState;
 use std::sync::Arc;
+#[cfg(desktop)]
 use tauri::{
     menu::{Menu, MenuItem, PredefinedMenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder, WindowEvent,
+    Emitter, WebviewUrl, WebviewWindowBuilder, WindowEvent,
 };
+use tauri::{AppHandle, Manager};
 
 /// 侧边栏窗口标签
 pub const SIDEBAR_LABEL: &str = "sidebar";
@@ -183,7 +199,11 @@ fn build_invoke_handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync +
     ]
 }
 
-/// 创建主窗口。
+/// 创建主窗口（仅桌面端）。
+///
+/// 移动端不建窗口：Android 的 WebView 由 Activity 创建并托管，这里再建
+/// 一个只会得到一个不显示的空壳，还会把 `MAIN_LABEL` 占住。
+#[cfg(desktop)]
 fn create_main_window(app: &AppHandle) -> tauri::Result<()> {
     if app.get_webview_window(MAIN_LABEL).is_some() {
         return Ok(());
@@ -203,7 +223,11 @@ fn create_main_window(app: &AppHandle) -> tauri::Result<()> {
     Ok(())
 }
 
-/// 创建侧边栏窗口（需求 7）：始终置顶的窄条，长期挂起。
+/// 创建侧边栏窗口：始终置顶的窄条，长期挂起（仅桌面端）。
+///
+/// 移动端没有「第二个窗口」这一说，`always_on_top` / `skip_taskbar`
+/// 这类窗口属性在 Android 上也不存在。
+#[cfg(desktop)]
 fn create_sidebar_window(app: &AppHandle) -> tauri::Result<()> {
     if app.get_webview_window(SIDEBAR_LABEL).is_some() {
         return Ok(());
@@ -237,6 +261,7 @@ fn create_sidebar_window(app: &AppHandle) -> tauri::Result<()> {
 }
 
 /// 显示侧边栏。
+#[cfg(desktop)]
 #[tauri::command]
 fn sidebar_show(app: AppHandle) -> Result<(), String> {
     let win = app
@@ -267,6 +292,7 @@ fn sidebar_show(app: AppHandle) -> Result<(), String> {
 }
 
 /// 隐藏侧边栏。
+#[cfg(desktop)]
 #[tauri::command]
 fn sidebar_hide(app: AppHandle) -> Result<(), String> {
     if let Some(win) = app.get_webview_window(SIDEBAR_LABEL) {
@@ -276,6 +302,7 @@ fn sidebar_hide(app: AppHandle) -> Result<(), String> {
 }
 
 /// 切换侧边栏显隐。
+#[cfg(desktop)]
 #[tauri::command]
 fn sidebar_toggle(app: AppHandle) -> Result<bool, String> {
     let win = app
@@ -292,6 +319,7 @@ fn sidebar_toggle(app: AppHandle) -> Result<bool, String> {
 }
 
 /// 显示并聚焦主窗口。
+#[cfg(desktop)]
 #[tauri::command]
 fn main_show(app: AppHandle) -> Result<(), String> {
     if let Some(win) = app.get_webview_window(MAIN_LABEL) {
@@ -304,7 +332,11 @@ fn main_show(app: AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-/// 构建系统托盘。
+/// 构建系统托盘（仅桌面端）。
+///
+/// 移动端没有托盘图标这个系统概念，`tauri::tray` 模块在 Android 目标上
+/// 根本不存在（连 `use` 都会编译失败），所以整段圈进 `cfg(desktop)`。
+#[cfg(desktop)]
 fn build_tray(app: &AppHandle) -> tauri::Result<()> {
     let open_main = MenuItem::with_id(app, "open_main", "打开主界面", true, None::<&str>)?;
     let toggle_side = MenuItem::with_id(app, "toggle_sidebar", "显示/隐藏侧边栏", true, None::<&str>)?;
@@ -355,33 +387,117 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
     Ok(())
 }
 
-/// 应用主入口。
-pub fn run_app() {
-    let (data_dir, data_dir_source) = resolve_data_dir_ex();
-    println!(
-        "WordWise 数据目录：{}（{}）",
-        data_dir.display(),
-        data_dir_source.label()
-    );
+/* ---------------- 移动端替身 ---------------- */
+/*
+   这四个命令在移动端仍然要**存在**，因为 `build_invoke_handler` 里按名字
+   引用了它们，而前端的按钮也不分平台。删掉会编译失败；留一个「能过但
+   一点就崩」的实现更糟 —— 所以这里给出明确返回 Err 的替身，前端拿到
+   的是一句人话，而不是一个 ReferenceError。
 
-    let state = match AppState::with_source(data_dir, data_dir_source) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("初始化失败：{}", e);
-            // 用系统消息框提示后退出
-            show_fatal(&format!("WordWise 启动失败：\n{}", e));
-            return;
+   注意返回的是 Err 而不是 Ok(())：静默成功会让界面以为侧边栏已经弹出来了。
+*/
+#[cfg(mobile)]
+mod mobile_stubs {
+    use super::{MAIN_LABEL, SIDEBAR_LABEL};
+    use tauri::AppHandle;
+
+    const UNAVAILABLE: &str = "侧边栏是桌面端能力，移动端没有常驻窗口";
+
+    #[tauri::command]
+    pub fn sidebar_show(_app: AppHandle) -> Result<(), String> {
+        Err(UNAVAILABLE.to_string())
+    }
+
+    #[tauri::command]
+    pub fn sidebar_hide(_app: AppHandle) -> Result<(), String> {
+        Err(UNAVAILABLE.to_string())
+    }
+
+    #[tauri::command]
+    pub fn sidebar_toggle(_app: AppHandle) -> Result<bool, String> {
+        Err(UNAVAILABLE.to_string())
+    }
+
+    /// 移动端只有一个窗口，且它一定在前台 —— 无事可做，返回成功。
+    #[tauri::command]
+    pub fn main_show(app: AppHandle) -> Result<(), String> {
+        if let Some(win) = app.get_webview_window(MAIN_LABEL) {
+            win.set_focus().ok();
+        }
+        // 抑制未使用告警：标签常量在替身里只为保持语义对称而保留
+        let _ = SIDEBAR_LABEL;
+        Ok(())
+    }
+}
+
+#[cfg(mobile)]
+use mobile_stubs::{main_show, sidebar_hide, sidebar_show, sidebar_toggle};
+
+/// 应用主入口。
+///
+/// 桌面端与移动端的差别集中在两处：
+///  - **数据目录怎么定**：桌面端在构造 Builder 之前就能定下来（环境变量 /
+///    便携标记 / 指针文件 / 老数据 / exe 同级 / 系统目录）；移动端必须等到
+///    setup 里 Tauri 给出应用私有目录才有正确答案。
+///  - **窗口与托盘**：桌面端专有，见本文件顶部说明。
+pub fn run_app() {
+    // ---- 桌面端：数据目录先定下来，再交给 Tauri 托管 ----
+    #[cfg(desktop)]
+    let desktop_state = {
+        let (data_dir, data_dir_source) = resolve_data_dir_ex();
+        println!(
+            "WordWise 数据目录：{}（{}）",
+            data_dir.display(),
+            data_dir_source.label()
+        );
+        match AppState::with_source(data_dir, data_dir_source) {
+            Ok(s) => Some(s),
+            Err(e) => {
+                eprintln!("初始化失败：{}", e);
+                show_fatal(&format!("WordWise 启动失败：\n{}", e));
+                None
+            }
         }
     };
+    #[cfg(desktop)]
+    if desktop_state.is_none() {
+        return;
+    }
 
-    tauri::Builder::default()
+    let mut builder = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_shell::init())
-        .manage(state)
-        .invoke_handler(build_invoke_handler())
-        .setup(|app| {
-            let handle = app.handle().clone();
+        .invoke_handler(build_invoke_handler());
 
+    #[cfg(desktop)]
+    {
+        if let Some(state) = desktop_state {
+            builder = builder.manage(state);
+        }
+    }
+
+    builder = builder.setup(|app| {
+        // ---- 移动端：数据目录只能在这一步定 ----
+        //
+        // ★ 不能复用桌面端那套解析：Android 上 `std::env::current_exe()`
+        //   返回的是 `/system/bin/app_process*`，`dirs::data_dir()` 也不可靠，
+        //   照搬会得到「数据写进系统目录」这种既没权限又不可能备份的结果。
+        #[cfg(mobile)]
+        {
+            let data_dir = app
+                .path()
+                .app_data_dir()
+                .map_err(|e| format!("取不到应用数据目录：{e}"))?;
+            println!("WordWise 数据目录：{}（应用私有目录）", data_dir.display());
+            let state =
+                AppState::with_source(data_dir, DataDirSource::System).map_err(|e| e.to_string())?;
+            app.manage(state);
+        }
+
+        let handle = app.handle().clone();
+
+        #[cfg(desktop)]
+        {
             create_main_window(&handle)?;
             // 侧边栏预先创建但隐藏，点托盘时才显示
             if let Err(e) = create_sidebar_window(&handle) {
@@ -390,31 +506,41 @@ pub fn run_app() {
             if let Err(e) = build_tray(&handle) {
                 eprintln!("创建托盘失败：{}", e);
             }
+        }
 
-            // 首次启动且词库为空时，写入示例词库，保证开箱即用
-            let st = handle.state::<Arc<AppState>>();
-            let lang = st.cfg().target_lang.clone();
-            if st.db.word_count(&lang).unwrap_or(0) == 0 {
-                let entries = crate::seed::demo_words(&lang);
-                let now = crate::timeutil::now_ts();
-                let _ = st.db.bulk_upsert_words(&entries, now);
-                for e in &entries {
-                    let _ = st
-                        .db
-                        .upsert_state(&crate::models::StudyState::new(&e.word, &lang, now));
-                }
-                println!("已写入 {} 条示例词库", entries.len());
+        // 首次启动且词库为空时，写入示例词库，保证开箱即用
+        let st = handle.state::<Arc<AppState>>();
+        let lang = st.cfg().target_lang.clone();
+        if st.db.word_count(&lang).unwrap_or(0) == 0 {
+            let entries = crate::seed::demo_words(&lang);
+            let now = crate::timeutil::now_ts();
+            let _ = st.db.bulk_upsert_words(&entries, now);
+            for e in &entries {
+                let _ = st
+                    .db
+                    .upsert_state(&crate::models::StudyState::new(&e.word, &lang, now));
             }
+            println!("已写入 {} 条示例词库", entries.len());
+        }
 
-            // 用户开过「自动启动」时，后台悄悄把本地模型服务拉起来。
-            // 这里只是派发线程，不会阻塞窗口显示。
-            commands::localllm::spawn_autostart(st.inner().clone());
+        // 用户开过「自动启动」时，后台悄悄把本地模型服务拉起来。
+        // 这里只是派发线程，不会阻塞窗口显示。
+        //
+        // ★ 移动端不走这条路：llama-server 是外部二进制，而 Android 从
+        //   API 29 起禁止 App 执行自己数据目录里的可执行文件（W^X）。
+        //   照搬桌面端逻辑只会得到一串启动失败，而不是可用的本地模型 ——
+        //   这就是「APK 版本模型能力下降」的技术根因，不是参数没调好。
+        #[cfg(desktop)]
+        commands::localllm::spawn_autostart(st.inner().clone());
 
-            Ok(())
-        })
-        .on_window_event(|window, event| match event {
+        Ok(())
+    });
+
+    // 主窗口关闭时退到托盘，保持「随时查词」能力可用（移动端没有这回事）
+    #[cfg(desktop)]
+    {
+        builder = builder.on_window_event(|window, event| match event {
             WindowEvent::CloseRequested { api, .. } if window.label() == MAIN_LABEL => {
-                // 主窗口关闭时退到托盘，保持「随时查词」能力可用
                 api.prevent_close();
                 let _ = window.hide();
 
@@ -426,20 +552,31 @@ pub fn run_app() {
                 }
             }
             _ => {}
-        })
-        .build(tauri::generate_context!())
-        .expect("WordWise 构建失败")
-        .run(|_handle, event| {
-            // ★ 退出时必须回收托管的 llama-server 子进程。
-            //   漏掉这一步，用户关掉应用后本地模型服务会变成孤儿进程，
-            //   继续占着上 GB 内存 —— 在低配机器上等于「关不掉」。
-            if let tauri::RunEvent::Exit = event {
-                commands::localllm::cleanup_on_exit();
-            }
         });
+    }
+
+    let app = builder
+        .build(tauri::generate_context!())
+        .expect("WordWise 构建失败");
+
+    #[cfg(desktop)]
+    app.run(|_handle, event| {
+        // ★ 退出时必须回收托管的 llama-server 子进程。
+        //   漏掉这一步，用户关掉应用后本地模型服务会变成孤儿进程，
+        //   继续占着上 GB 内存 —— 在低配机器上等于「关不掉」。
+        if let tauri::RunEvent::Exit = event {
+            commands::localllm::cleanup_on_exit();
+        }
+    });
+
+    #[cfg(mobile)]
+    app.run(|_handle, _event| {});
 }
 
 /// 致命错误弹窗（不依赖任何 GUI 库）。
+///
+/// 桌面端专有：移动端的启动失败走 setup 返回 Err，由宿主系统记录日志。
+#[cfg(desktop)]
 fn show_fatal(msg: &str) {
     #[cfg(windows)]
     {

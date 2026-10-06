@@ -195,19 +195,34 @@ pub fn cmd_open_dir(path: String) -> Result<(), String> {
         p.parent().map(|x| x.to_path_buf()).unwrap_or(p)
     };
 
-    #[cfg(windows)]
+    #[cfg(target_os = "windows")]
     {
         std::process::Command::new("explorer")
             .arg(target.as_os_str())
             .spawn()
             .map_err(|e| format!("打开文件夹失败：{e}"))?;
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open")
+            .arg(target.as_os_str())
+            .spawn()
+            .map_err(|e| format!("打开文件夹失败：{e}"))?;
+    }
+    // ★ 必须显式排除 android：它是 unix 但不是桌面 Linux，`xdg-open`
+    //   在手机上根本不存在，按 unix 兜底会 spawn 一个空命令然后静默失败。
+    #[cfg(all(unix, not(any(target_os = "macos", target_os = "android"))))]
     {
         std::process::Command::new("xdg-open")
             .arg(target.as_os_str())
             .spawn()
             .map_err(|e| format!("打开文件夹失败：{e}"))?;
+    }
+    #[cfg(target_os = "android")]
+    {
+        // 移动端没有「在文件管理器里打开」这个系统入口（沙箱里也看不到），
+        // 明确报错比假装成功好 —— 界面才能如实告诉用户这件事做不到。
+        return Err("移动端没有系统文件管理器入口".to_string());
     }
     Ok(())
 }

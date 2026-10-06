@@ -95,7 +95,57 @@ pub fn cmd_local_llm_status(
         "auto_start": cfg.auto_start_local_llm,
         // 引擎没有随包分发时，只能走镜像下载 —— 提前把预期告诉用户
         "engine_needs_download": !bundled.join(localllm::server_exe_name()).is_file(),
+        // ── 本平台到底能不能跑本地模型 ──
+        // 见 `mobile_unsupported_reason()` 里那句解释：这不是「没装好」，
+        // 而是平台不允许。状态里写明，界面才能把按钮直接置灰。
+        "supported": local_model_supported(),
+        "unsupported_reason": local_model_unsupported_reason(),
     }))
+}
+
+/// 本地模型在本平台能不能真的跑起来。
+#[cfg(not(target_os = "android"))]
+pub fn local_model_supported() -> bool {
+    true
+}
+
+/// Android：**不能**。
+///
+/// 根因是 Android 从 API 29 起禁止 App 执行自己数据目录里的外部二进制
+/// （W^X，即「可写就不可执行」）。llama-server 是 `std::process::Command`
+/// 拉起的独立可执行文件，无论把它放在应用的哪个私有目录下，都会在执行那
+/// 一步被系统拒绝 —— 这不是权限没申请、也不是参数没调好，是平台规则。
+///
+/// 所以 APK 版本的「模型能力」必然低于桌面版：只能用在线 API，本机模型
+/// 这条路在移动端是封死的。与其让用户点「一键部署」然后收到一串看不懂的
+/// spawn 失败，不如在状态里就说清楚。
+#[cfg(target_os = "android")]
+pub fn local_model_supported() -> bool {
+    false
+}
+
+/// 不支持时给用户的解释（支持时为 `None`）。
+#[cfg(not(target_os = "android"))]
+pub fn local_model_unsupported_reason() -> Option<&'static str> {
+    None
+}
+#[cfg(target_os = "android")]
+pub fn local_model_unsupported_reason() -> Option<&'static str> {
+    Some("Android 不允许 App 执行自带的外部二进制（W^X），本地模型在移动端无法启动。请改用在线 API。")
+}
+
+/// 移动端早退：本地模型在 Android 上根本起不来（见 `local_model_supported`）。
+///
+/// 放在命令入口而不是放在 spawn 之后：spawn 失败时用户看到的是
+/// 「Permission denied (os error 13)」这种和真实原因隔着三层的报错，
+/// 而这里能直接说「平台不支持，请改用在线 API」。
+fn reject_if_unsupported() -> Result<(), String> {
+    if !local_model_supported() {
+        return Err(local_model_unsupported_reason()
+            .unwrap_or("本平台不支持本地模型")
+            .to_string());
+    }
+    Ok(())
 }
 
 /// 可选模型清单。
@@ -116,6 +166,7 @@ pub async fn cmd_local_llm_install_engine(
     state: State<'_, Arc<AppState>>,
     app: AppHandle,
 ) -> Result<serde_json::Value, String> {
+    reject_if_unsupported()?;
     let data_dir = state.data_dir.clone();
     let dir = app_dir();
 
@@ -305,6 +356,7 @@ pub fn cmd_local_llm_start(
     state: State<'_, Arc<AppState>>,
     model_id: Option<String>,
 ) -> Result<serde_json::Value, String> {
+    reject_if_unsupported()?;
     start_managed(&state, model_id.as_deref())
 }
 
