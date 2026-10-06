@@ -33,7 +33,6 @@ Thumbs.db
 installer/build_iss.bat
 /tmp/
 *.7z
-/src-tauri/gen/
 
 # 随包分发的 llama.cpp 引擎（vendor\llama，约 118 MB）。
 #
