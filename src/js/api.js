@@ -1264,7 +1264,7 @@ const Mock = (() => {
       // 在线更新（调试模式：假装已经有一个新版本，方便看「有更新」的样子）
       case 'cmd_check_update':
         return {
-          current: '0.41.0', repo: 'DedalusArtin/wordwise',
+          current: '0.42.0', repo: 'DedalusArtin/wordwise',
           latest: '0.42.0', tag: 'v0.42.0', has_update: true, prerelease: false,
           name: 'WordWise v0.42.0',
           notes: '## 调试模式\n\n- 这是一条示例更新说明\n- 真实数据来自 GitHub Releases',

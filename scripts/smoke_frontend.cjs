@@ -1884,6 +1884,64 @@ const cases = [
     return ids.join(',');
   }],
 
+  // ---- 版本号一致性 ----
+  //
+  // 为什么要这道检查：版本号散在四处（tauri.conf.json / Cargo.toml /
+  // build.ps1 兜底 / installer 兜底），而 wordwise.iss 自己的注释就写着
+  // 「两处各写一个版本号必然会漂移，表现是安装包文件名、界面显示、程序属性
+  // 三个版本号对不上」。靠人记去同步迟早出错，这里一次性钉死。
+  ['版本号：四处来源必须完全一致（防止安装包文件名 / 界面 / 程序属性对不上）', () => {
+    const read = (p) => fs.readFileSync(path.join(ROOT, p), 'utf8');
+    const conf = JSON.parse(read('src-tauri/tauri.conf.json')).version;
+    const cargo = /^version\s*=\s*"([^"]+)"/m.exec(read('src-tauri/Cargo.toml'))[1];
+    const issc = /#define MyAppVersion\s+"([^"]+)"/.exec(read('installer/wordwise.iss'))[1];
+    const ps = /\$AppVersion\s*=\s*"([^"]+)"/.exec(read('build.ps1'))[1];
+    const bad = [
+      ['tauri.conf.json', conf], ['Cargo.toml', cargo],
+      ['wordwise.iss', issc], ['build.ps1', ps],
+    ].filter(([, v]) => v !== conf);
+    if (bad.length) {
+      throw new Error('版本号不一致：' + bad.map(([k, v]) => `${k}=${v}`).join(' / ') +
+        `，基准取 tauri.conf.json 的 ${conf}`);
+    }
+    // 顺带校验形如 x.y.z
+    if (!/^\d+\.\d+\.\d+$/.test(conf)) throw new Error('版本号格式应为三段式，实际 ' + conf);
+    return conf;
+  }],
+  ['安装包：下载用的 tag 与 Rust 侧常量一致（漂了会 404，且极易误判成网络问题）', () => {
+    const read = (p) => fs.readFileSync(path.join(ROOT, p), 'utf8');
+    const iss = read('installer/wordwise.iss');
+    const loc = read('src-tauri/src/localllm/mod.rs');
+    const tts = read('src-tauri/src/tts/mod.rs');
+    const pick = (src, name) => {
+      const m = new RegExp('pub const ' + name + ': &str = "([^"]+)"').exec(src);
+      return m ? m[1] : null;
+    };
+    const want = {
+      LlamaTag: pick(loc, 'ENGINE_TAG'),
+      PiperTag: pick(tts, 'ENGINE_TAG'),
+      VoiceTag: pick(tts, 'VOICE_TAG'),
+    };
+    for (const k of Object.keys(want)) {
+      if (!want[k]) throw new Error('没在 Rust 侧找到常量 ' + k);
+      const got = new RegExp('#define ' + k + '\\s+"([^"]+)"').exec(iss);
+      if (!got) throw new Error('wordwise.iss 里缺 #define ' + k);
+      if (got[1] !== want[k]) {
+        throw new Error(`${k} 漂移：iss=${got[1]} vs Rust=${want[k]}`);
+      }
+    }
+    // 模型文件名：localllm 里 models() 中 **qwen3-0.6b** 那条。
+    // ★ 必须按 id 精确取：清单里第一条是推荐的 1.7B，而安装包装的是 0.6B
+    //   （400MB 量级才适合安装时下载，1.1GB 放进去没人受得了）。
+    //   只取「第一个 file:」会因为换档位而误报。
+    const mf = /id:\s*"qwen3-0\.6b"[\s\S]{0,300}?file:\s*"([^"]+\.gguf)"\.into\(\)/.exec(loc);
+    if (!mf) throw new Error('没在 Rust 侧找到 qwen3-0.6b 的模型文件名');
+    const issMf = /#define ModelFile\s+"([^"]+)"/.exec(iss);
+    if (!issMf) throw new Error('wordwise.iss 里缺 #define ModelFile');
+    if (issMf[1] !== mf[1]) throw new Error(`模型文件名漂移：iss=${issMf[1]} vs Rust=${mf[1]}`);
+    return want.LlamaTag + ' / ' + want.PiperTag + ' / ' + want.VoiceTag;
+  }],
+
   // ---- 背诵：错词攻坚 ----
   //
   // 为什么用「连对」而不是「累计答对 3 次」：累计计数会让 对/错/对/错

@@ -9,7 +9,7 @@
 ;    .\build.ps1 -IsccPath "<你的路径>\ISCC.exe"      ; 装在别处时
 ;
 ;  产物：
-;    installer\output\WordWise-Setup-0.41.0.exe
+;    installer\output\WordWise-Setup-0.42.0.exe
 ;
 ;  前置条件：
 ;    先执行 cargo build --release，确保 wordwise.exe 已生成
@@ -33,13 +33,63 @@
 ; ★ 要改版本号请改 tauri.conf.json —— 两处各写一个版本号必然会漂移，
 ;   表现是「安装包文件名 / 界面显示 / 程序属性」三个版本号对不上。
 #ifndef MyAppVersion
-  #define MyAppVersion "0.41.0"
+  #define MyAppVersion "0.42.0"
 #endif
 
 ; 相对本 .iss 文件定位构建产物；若使用自定义 target 目录，
 ; 可通过 /DMySourceDir=... 覆盖
 #ifndef MySourceDir
   #define MySourceDir "..\src-tauri\target\release"
+#endif
+
+; ============================================================
+;  离线 / 在线 两种装法，由本机有没有 vendor 决定
+; ============================================================
+;  打包机上如果已经准备好了 vendor\llama / vendor\piper / vendor\tts-voices，
+;  就按老办法**随包带走**（离线安装，装完就能用）；
+;  没有的话，那些模块改成**安装时联网下载**（[Code] 里的下载页负责抓）。
+;
+;  ★ 两种装法落到的是同一个目录（{app}\vendor\...），所以同一份 [Files]
+;    不能同时出现「随包」和「下载」两条 —— 否则两条都往同一个 DestDir 写，
+;    会出现「文件被谁覆盖」这种说不清的问题。这里用预处理开关二选一。
+#ifndef OfflineLlama
+  #ifexist "..\vendor\llama\llama-server.exe"
+    #define OfflineLlama
+  #endif
+#endif
+#ifndef OfflinePiper
+  #ifexist "..\vendor\piper\piper.exe"
+    #define OfflinePiper
+  #endif
+#endif
+#ifndef OfflineVoice
+  #ifexist "..\vendor\tts-voices\en_US-amy-medium\en_US-amy-medium.onnx"
+    #define OfflineVoice
+  #endif
+#endif
+
+; ============================================================
+;  可选模块的「版本标记」——**必须与 Rust 侧完全一致**
+; ============================================================
+;  这几处是第三、第四个版本号，最容易漂：
+;    LlamaTag  ← src-tauri\src\localllm\mod.rs 的 ENGINE_TAG
+;    PiperTag  ← src-tauri\src\tts\mod.rs      的 ENGINE_TAG
+;    VoiceTag  ← src-tauri\src\tts\mod.rs      的 VOICE_TAG
+;    ModelFile ← src-tauri\src\localllm\mod.rs 里 models() 的 file 字段
+;  漂了的表现是「安装到一半下载 404」，而界面上显示的版本号还是对的，
+;  排查时极容易误判成网络问题。scripts/smoke_frontend.cjs 有一道用例
+;  直接比对双方，改错会当场失败。
+#ifndef LlamaTag
+  #define LlamaTag "b11414"
+#endif
+#ifndef PiperTag
+  #define PiperTag "tts-engine-v1"
+#endif
+#ifndef VoiceTag
+  #define VoiceTag "tts-voices-v1"
+#endif
+#ifndef ModelFile
+  #define ModelFile "Qwen3-0.6B-Q4_K_M.gguf"
 #endif
 
 [Setup]
@@ -73,11 +123,17 @@ SetupIconFile=..\src-tauri\icons\icon.ico
 UninstallDisplayIcon={app}\{#MyAppExeName}
 UninstallDisplayName={#MyAppName}
 
-; 界面：支持简体中文与英文
-WizardStyle=modern
+;  界面：支持简体中文与英文
+;  ★ modern dynamic：在线安装要用 Inno 7 自带的下载进度页（CreateDownloadPage），
+;    它只在 modern 系列风格下可用；dynamic 让向导在下载阶段能正确换文案。
+WizardStyle=modern dynamic
 ShowLanguageDialog=auto
 PrivilegesRequired=lowest
 PrivilegesRequiredOverridesAllowed=dialog
+
+; 在线安装下载的 zip（llama.cpp 引擎 / Piper 语音）允许 [Files] 直接自动解压，
+; 省掉「下载完再手工解一层」的步骤。见下面 [Files] 里的 extractarchive。
+ArchiveExtraction=auto
 
 ; 架构限制
 ArchitecturesInstallIn64BitMode=x64compatible
@@ -95,6 +151,23 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 Name: "quicklaunchicon"; Description: "{cm:CreateQuickLaunchIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
 Name: "startup"; Description: "开机时自动启动 WordWise 侧边栏（随时查词）"; GroupDescription: "启动选项:"
 
+; ============================================================
+;  组件选择
+; ============================================================
+;  主程序之外的东西都不进安装包本体（它们动辄上百 MB，全塞进去会让
+;  安装包从 18 MB 变成 600 MB+，而大多数人其实并不需要全部）。
+;  所以这里给一个组件页，让用户自己挑；**勾了什么就装时联网下载什么**。
+;
+;  ★ 全部默认不勾：不下载任何一项，程序照样能用（查词 / 翻译 / 背诵 / 图谱
+;    都不依赖本地模型或本地语音）。用户后面想加，软件内的「一键部署」和
+;    「语音包管理」随时能补，走的是同一批镜像源。
+[Components]
+Name: "core"; Description: "主程序与说明文档（必需）"; Flags: fixed
+Name: "opt"; Description: "可选模块 —— 勾选后在安装过程中联网下载（也可之后在软件内下载）"; Flags: checkablealone
+Name: "opt\engine"; Description: "本地大模型推理引擎 llama.cpp（约 118 MB，离线 AI 讲解要用）"
+Name: "opt\voice"; Description: "本地神经语音引擎 Piper + 英文语音（约 85 MB，离线朗读要用）"
+Name: "opt\model"; Description: "Qwen3-0.6B 模型权重（约 378 MB，下载后即可离线 AI 讲解）"
+
 [Files]
 ; 主程序
 Source: "{#MySourceDir}\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreversion
@@ -103,11 +176,45 @@ Source: "{#MySourceDir}\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreversion
 ; 若采用「未内嵌前端」的构建方式，可放开下面这行
 ; Source: "{#MySourceDir}\..\..\src\*"; DestDir: "{app}\src"; Flags: ignoreversion recursesubdirs createallsubdirs
 
-; 随包 llama.cpp 引擎（本地大模型一键部署）
-;  运行时从 GitHub Release 下引擎要 14 分钟（镜像限速），所以直接随包。
-;  缺失时只是回退到联网下载，不影响主程序 → 用 skipifsourcedoesntexist。
-Source: "..\vendor\llama\*.exe"; DestDir: "{app}\vendor\llama"; Flags: ignoreversion skipifsourcedoesntexist
-Source: "..\vendor\llama\*.dll"; DestDir: "{app}\vendor\llama"; Flags: ignoreversion skipifsourcedoesntexist
+; ---- 可选模块一：本地大模型推理引擎（llama.cpp） ----
+;   llama.cpp 的发行包是**平铺**的（zip 里直接就是 dll/exe，没有外层目录），
+;   Inno 的 extractarchive 解到 {app}\vendor\llama 正好是程序要的层级。
+#ifdef OfflineLlama
+Source: "..\vendor\llama\*.exe"; DestDir: "{app}\vendor\llama"; Components: opt\engine; Flags: ignoreversion skipifsourcedoesntexist
+Source: "..\vendor\llama\*.dll"; DestDir: "{app}\vendor\llama"; Components: opt\engine; Flags: ignoreversion skipifsourcedoesntexist
+#else
+Source: "{tmp}\llama-engine.zip"; DestDir: "{app}\vendor\llama"; Components: opt\engine; \
+  Flags: external extractarchive recursesubdirs ignoreversion skipifsourcedoesntexist
+#endif
+
+; ---- 可选模块二：本地神经语音（Piper 引擎 + 英文语音） ----
+;   ★ piper_windows_amd64.zip 的顶层就是 piper\ 这一层，所以解压目标必须是
+;     {app}\vendor（解出来变成 vendor\piper）；写成 vendor\piper 会多套一层。
+;     这个目录层级是踩过坑的，别凭直觉改。
+#ifdef OfflinePiper
+Source: "..\vendor\piper\*"; DestDir: "{app}\vendor\piper"; Components: opt\voice; \
+  Flags: ignoreversion recursesubdirs createallsubdirs skipifsourcedoesntexist
+#else
+Source: "{tmp}\piper_windows_amd64.zip"; DestDir: "{app}\vendor"; Components: opt\voice; \
+  Flags: external extractarchive recursesubdirs ignoreversion skipifsourcedoesntexist
+#endif
+
+#ifdef OfflineVoice
+Source: "..\vendor\tts-voices\*"; DestDir: "{app}\vendor\tts-voices"; Components: opt\voice; \
+  Flags: ignoreversion recursesubdirs createallsubdirs skipifsourcedoesntexist
+#else
+Source: "{tmp}\en_US-amy-medium.onnx"; DestDir: "{app}\vendor\tts-voices\en_US-amy-medium"; Components: opt\voice; \
+  Flags: external ignoreversion skipifsourcedoesntexist
+Source: "{tmp}\en_US-amy-medium.onnx.json"; DestDir: "{app}\vendor\tts-voices\en_US-amy-medium"; Components: opt\voice; \
+  Flags: external ignoreversion skipifsourcedoesntexist
+#endif
+
+; ---- 可选模块三：模型权重 ----
+;   新装时数据目录默认就是 {app}\data，所以放在 {app}\data\models 是程序
+;   认得的位置；**升级安装**时数据目录可能在别处（老版本在 AppData），
+;   那种情况 [Code] 里会先问过用户再决定要不要下。
+Source: "{tmp}\Qwen3-0.6B-Q4_K_M.gguf"; DestDir: "{app}\data\models"; Components: opt\model; \
+  Flags: external ignoreversion skipifsourcedoesntexist
 
 ; 附带文档
 Source: "..\README.md"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist; DestName: "README.md"
@@ -136,7 +243,176 @@ Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#StringChang
 Type: filesandordirs; Name: "{app}\logs"
 
 [Code]
-// ---------- 默认安装目录：优先非 C 盘 ----------
+// ============================================================
+//  常量：可选模块的下载地址
+// ============================================================
+//  ★ 这些地址必须与 Rust 侧保持一致：
+//    - llama.cpp 的 tag 来自 src-tauri\src\localllm\mod.rs 的 ENGINE_TAG
+//    - Piper / 语音来自 src-tauri\src\tts\mod.rs 的 ENGINE_TAG / VOICE_TAG
+//    - 模型来自同文件 models() 里的 urls
+//    这里是第二处，改了那边忘了这边会直接 404，用户看到的是「装到一半报错」。
+//    scripts/smoke_frontend.cjs 里有一道用例专门比对这几处，会当场失败。
+const
+  LlamaTag = '{#LlamaTag}';
+  LlamaUrl = 'https://gh-proxy.com/https://github.com/ggml-org/llama.cpp/releases/download/{#LlamaTag}/llama-{#LlamaTag}-bin-win-vulkan-x64.zip';
+  PiperUrl = 'https://github.com/DedalusArtin/wordwise/releases/download/{#PiperTag}/piper_windows_amd64.zip';
+  VoiceUrlBase = 'https://github.com/DedalusArtin/wordwise/releases/download/{#VoiceTag}';
+  ModelUrl = 'https://www.modelscope.cn/models/unsloth/Qwen3-0.6B-GGUF/resolve/master/{#ModelFile}';
+
+// 检测到的旧安装信息
+var
+  PrevDir: String;      // 旧安装目录（空 = 没检测到）
+  PrevVer: String;      // 旧版本号
+  PrevWhere: String;    // 从哪类来源检测到的，提示给用户看
+  IsUpgrade: Boolean;   // 是否属于「原地升级」
+  DownloadPage: TDownloadWizardPage;
+  WarnedOffPrevDir: Boolean;
+
+// ---------- 版本号比较 ----------
+//
+//  不用系统提供的比较函数：Inno 各版本提供的实现不一样，而这里只需要
+//  「谁大谁小」这一个结论。自己拆段比，行为可控、在任何版本上都一样。
+//  返回：1 = A 新，-1 = B 新，0 = 一样。非数字段按 0 处理。
+function CompareVer(A, B: String): Integer;
+var
+  I: Integer;
+  Va, Vb: Longint;
+begin
+  Result := 0;
+  // 最多比 4 段（x.y.z.w）。逐段削掉已比过的部分 —— Pascal Script 没有 Split。
+  for I := 1 to 4 do
+  begin
+    Va := StrToIntDef(Copy(A, 1, Pos('.', A + '.') - 1), 0);
+    Vb := StrToIntDef(Copy(B, 1, Pos('.', B + '.') - 1), 0);
+    if Va > Vb then begin Result := 1; Exit; end;
+    if Va < Vb then begin Result := -1; Exit; end;
+    // 削掉已比的一段，继续下一段
+    A := Copy(A, Pos('.', A + '.') + 1, MaxInt);
+    B := Copy(B, Pos('.', B + '.') + 1, MaxInt);
+  end;
+end;
+
+// ---------- 从卸载命令里反推安装目录 ----------
+//  形如 "D:\WordWise\unins000.exe" → "D:\WordWise"
+function DirFromUninstallString(S: String): String;
+var
+  I, Last: Integer;
+  T: String;
+begin
+  Result := '';
+  T := Trim(S);
+  if T = '' then Exit;
+  // 去掉可能存在的引号与参数
+  if (Copy(T, 1, 1) = '"') then
+  begin
+    Delete(T, 1, 1);
+    I := Pos('"', T);
+    if I > 0 then T := Copy(T, 1, I - 1);
+  end else
+  begin
+    I := Pos('.exe', Lowercase(T));
+    if I > 0 then T := Copy(T, 1, I + 3);
+  end;
+  // 去尾部的反斜杠，再砍掉最后一级（unins000.exe / uninstall.exe）
+  Last := 0;
+  for I := 1 to Length(T) do
+    if T[I] = '\' then Last := I;
+  if Last > 0 then Result := Copy(T, 1, Last - 1);
+end;
+
+// ---------- 扫描「卸载」注册表项 ----------
+//
+//  为什么要自己扫：Inno 只认**自己那套 AppId** 的卸载项。而历史上这份
+//  软件还被 Tauri 的 NSIS / MSI 打包器产出过，AppId 与卸载项命名都不一样；
+//  用户从那种包升到本包时，Inno 会当成全新安装，把程序装到另一个目录 ——
+//  结果就是「装完桌面上出现两个 WordWise，进度还在老的那个里」。
+//  所以这里按 DisplayName 含 WordWise 全量扫一遍。
+function ScanUninstallKeys(Root: Integer): Boolean;
+var
+  Names: TArrayOfString;
+  I: Integer;
+  Sub, Disp, Loc, Ver, Uninst: String;
+  Dir: String;
+begin
+  Result := False;
+  if not RegGetSubkeyNames(Root, 'SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall', Names) then Exit;
+  for I := 0 to GetArrayLength(Names) - 1 do
+  begin
+    Sub := 'SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\' + Names[I];
+    Disp := '';
+    if not RegQueryStringValue(Root, Sub, 'DisplayName', Disp) then Disp := '';
+    // 只认 WordWise，避免把名字里带这个词的别家软件当成自己
+    if Pos('WordWise', Disp) > 0 then
+    begin
+      Loc := ''; Ver := ''; Uninst := '';
+      RegQueryStringValue(Root, Sub, 'InstallLocation', Loc);
+      RegQueryStringValue(Root, Sub, 'DisplayVersion', Ver);
+      RegQueryStringValue(Root, Sub, 'UninstallString', Uninst);
+
+      Dir := Trim(Loc);
+      // InstallLocation 经常是空的（MSI 包尤其如此），那就从卸载程序路径反推
+      if (Dir = '') and (Uninst <> '') then Dir := DirFromUninstallString(Uninst);
+      if (Dir <> '') and not DirExists(Dir) then Dir := '';
+
+      // 版本空着也要认：有些卸载项没写 DisplayVersion，只写目录
+      if (PrevDir = '') and (Dir <> '') then PrevDir := Dir;
+      if (PrevVer = '') and (Ver <> '') then PrevVer := Ver;
+      if (Dir <> '') or (Ver <> '') then
+      begin
+        PrevWhere := '卸载项';
+        Result := True;
+      end;
+    end;
+  end;
+end;
+
+// ---------- 兜底：App Paths + 常见安装位置 ----------
+function ScanFallbackLocations(): Boolean;
+var
+  S: String;
+  Candidates: array[0..3] of String;
+  I: Integer;
+begin
+  Result := False;
+  // App Paths 里的路径值（有些安装器只写这里）
+  if RegQueryStringValue(HKLM, 'SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\{#MyAppExeName}', '', S) then
+  begin
+    if (S <> '') and DirExists(S) then
+    begin
+      PrevDir := S;
+      PrevWhere := 'App Paths';
+      Result := True;
+      Exit;
+    end;
+  end;
+  // 常见的几个落点（含 Tauri NSIS 默认目录与非 C 盘习惯）
+  Candidates[0] := ExpandConstant('{localappdata}\Programs\{#MyAppName}');
+  Candidates[1] := ExpandConstant('{autopf}\{#MyAppName}');
+  Candidates[2] := 'D:\{#MyAppName}';
+  Candidates[3] := 'D:\Program Files\{#MyAppName}';
+  for I := 0 to 3 do
+  begin
+    if DirExists(Candidates[I]) and FileExists(Candidates[I] + '\{#MyAppExeName}') then
+    begin
+      PrevDir := Candidates[I];
+      PrevWhere := '常见安装位置';
+      Result := True;
+      Exit;
+    end;
+  end;
+end;
+
+// ---------- 汇总检测 ----------
+procedure DetectPreviousInstall();
+begin
+  PrevDir := ''; PrevVer := ''; PrevWhere := ''; IsUpgrade := False;
+  ScanUninstallKeys(HKCU);
+  if PrevDir = '' then ScanUninstallKeys(HKLM64);
+  if PrevDir = '' then ScanUninstallKeys(HKLM32);
+  if PrevDir = '' then ScanFallbackLocations();
+  IsUpgrade := PrevDir <> '';
+end;
+
 //
 //  用户的要求是「默认不要写 C 盘」。而 PrivilegesRequired=lowest 时
 //  localappdata 一定在 C 盘；所以这里在向导初始化时把它改成第一个
@@ -172,18 +448,171 @@ procedure InitializeWizard();
 var
   I: Integer;
   Roots: array[0..2] of String;
+  Note: String;
 begin
-  // 只看 D / E / F：这三者覆盖了绝大多数国产整机的「数据盘」，
-  // 再往后找就容易碰到临时插上的 U 盘了
-  Roots[0] := 'D:\';
-  Roots[1] := 'E:\';
-  Roots[2] := 'F:\';
-  for I := 0 to 2 do
+  // ---- 1) 先查本机有没有装过（决定是「全新安装」还是「原地升级」）----
+  DetectPreviousInstall();
+
+  if IsUpgrade then
   begin
-    if not DirExists(Roots[I]) then Continue;
-    if TryUseDriveAsDefault(Roots[I]) then Break;
+    // ★ 自动合并升级：目录沿用旧的那份，文件覆盖上去，数据一概不动。
+    //   这一步是新装/升级两套路径唯一的分叉点 —— 选错目录就会出现
+    //   「两个 WordWise 并存，进度还在老的那个里」。
+    WizardForm.DirEdit.Text := PrevDir;
+
+    if PrevVer <> '' then
+      Note := '检测到已安装的 WordWise v' + PrevVer + '（' + PrevWhere + '：' + PrevDir + '）'
+    else
+      Note := '检测到已安装的 WordWise（' + PrevWhere + '：' + PrevDir + '）';
+    Note := Note + #13#10 + '将升级到 v{#MyAppVersion}，保留原有词库与背诵进度。';
+  end
+  else
+  begin
+    // ---- 2) 全新安装：默认目录优先非 C 盘 ----
+    // 只看 D / E / F：这三者覆盖了绝大多数国产整机的「数据盘」，
+    // 再往后找就容易碰到临时插上的 U 盘了
+    Roots[0] := 'D:\';
+    Roots[1] := 'E:\';
+    Roots[2] := 'F:\';
+    for I := 0 to 2 do
+    begin
+      if DirExists(Roots[I]) and TryUseDriveAsDefault(Roots[I]) then Break;
+    end;
+    // 一个都没成功 → 保持 localappdata 原默认，安装照常进行
   end;
-  // 一个都没成功 → 保持 localappdata 原默认，安装照常进行
+
+  // ---- 3) 在线安装用的下载页（Inno 7 内置，带进度与校验）----
+  DownloadPage := CreateDownloadPage(SetupMessage(msgWizardPreparing), SetupMessage(msgPreparingDesc), nil);
+  // 显示文件名而不是一长串 URL，用户才知道「现在在下什么」
+  DownloadPage.ShowBaseNameInsteadOfUrl := True;
+
+  // 把升级提示放到欢迎页第二行，用户一进来就能看见
+  if IsUpgrade then
+    WizardForm.WelcomeLabel2.Caption := Note;
+end;
+
+// ---------- 按用户勾选组织下载清单 ----------
+//
+//  只把「勾了」且「本机没随包版本」的模块加进下载页。随包版本由预处理器
+//  开关（OfflineLlama / OfflinePiper / OfflineVoice）决定，所以离线装法
+//  下这段代码里对应的分支根本不会被编译进去。
+function BuildDownloadList(): Boolean;
+var
+  DoModel: Boolean;
+begin
+  Result := False;
+  DownloadPage.Clear;
+
+#ifndef OfflineLlama
+  if WizardIsComponentSelected('opt\engine') then
+  begin
+    DownloadPage.Add(LlamaUrl, 'llama-engine.zip', '');
+    Result := True;
+  end;
+#endif
+
+#ifndef OfflinePiper
+  if WizardIsComponentSelected('opt\voice') then
+  begin
+    DownloadPage.Add(PiperUrl, 'piper_windows_amd64.zip', '');
+    Result := True;
+  end;
+#endif
+
+#ifndef OfflineVoice
+  if WizardIsComponentSelected('opt\voice') then
+  begin
+    DownloadPage.Add(VoiceUrlBase + '/en_US-amy-medium.onnx', 'en_US-amy-medium.onnx', '');
+    DownloadPage.Add(VoiceUrlBase + '/en_US-amy-medium.onnx.json', 'en_US-amy-medium.onnx.json', '');
+    Result := True;
+  end;
+#endif
+
+  if WizardIsComponentSelected('opt\model') then
+  begin
+    DoModel := True;
+    // ★ 升级安装时 {app}\data\models 未必是用户正用着的那个数据目录：
+    //   老版本把数据放在 %APPDATA%\WordWise，而解析顺序里「已有 AppData 数据」
+    //   优先于「exe 同级 data」。所以先问一句再下 —— 白等 400 MB 之后
+    //   才发现放错位置，是不可接受的体验。
+    if IsUpgrade then
+    begin
+      DoModel := MsgBox(
+        '这是升级安装：你当前的学习数据可能不在新目录里。' + #13#10#13#10 +
+        '模型将下载到 ' + ExpandConstant('{app}') + '\data\models' + #13#10 +
+        '（如果旧版本的数据目录是 %APPDATA%\WordWise，模型应改在软件内下载，' +
+        '软件会放到它真正在用的那一份目录。）' + #13#10#13#10 +
+        '仍然现在下载到新目录吗？', mbConfirmation, MB_YESNO) = IDYES;
+    end;
+    if DoModel then
+    begin
+      DownloadPage.Add(ModelUrl, '{#ModelFile}', '');
+      Result := True;
+    end;
+  end;
+end;
+
+// ---------- 页面推进：目录纠偏 + 触发下载 ----------
+function NextButtonClick(CurPageID: Integer): Boolean;
+var
+  Error: String;
+  Has: Boolean;
+begin
+  Result := True;
+
+  // 升级场景：用户把目录改到了别处 → 提醒一次。
+  // 只提醒一次、且给「改回原目录」的按钮：目的不是拦他，是让他知道
+  // 「装到别处 = 两个独立副本，进度不会跟过去」。
+  if (CurPageID = wpSelectDir) and IsUpgrade and not WarnedOffPrevDir then
+  begin
+    if CompareText(WizardForm.DirEdit.Text, PrevDir) <> 0 then
+    begin
+      if MsgBox('已安装的 WordWise 在：' + #13#10 + PrevDir + #13#10#13#10 +
+                '你现在选的是：' + #13#10 + WizardForm.DirEdit.Text + #13#10#13#10 +
+                '装到别的目录会变成两个独立副本，原有的词库与背诵进度不会跟过去。' + #13#10#13#10 +
+                '改为覆盖升级到原目录吗？', mbConfirmation, MB_YESNO) = IDYES then
+      begin
+        WizardForm.DirEdit.Text := PrevDir;
+        Result := False;   // 留在本页，让用户确认一眼再点下一步
+      end
+      else
+        WarnedOffPrevDir := True;   // 用户执意装别处，不再追问
+    end;
+  end;
+
+  // 点「安装」之后、真正写文件之前：先把勾了的可选模块下载到 {tmp}
+  if CurPageID = wpReady then
+  begin
+    Has := BuildDownloadList();
+    if Has then
+    begin
+      DownloadPage.Show;
+      try
+        try
+          DownloadPage.Download;   // 下载到 {tmp}
+        except
+          if DownloadPage.AbortedByUser then
+          begin
+            Log('用户取消了下载');
+            Result := False;
+          end
+          else
+          begin
+            Error := Format('%s: %s', [DownloadPage.LastBaseNameOrUrl, GetExceptionMessage]);
+            // ★ 下载失败**绝不阻断主程序安装**：没有这些可选模块，
+            //   查词 / 翻译 / 背诵 / 图谱全都照常可用，之后在软件内的
+            //   「一键部署」「语音包管理」随时能补，走的是同一批镜像源。
+            Result := MsgBox('下载失败：' + AddPeriod(Error) + #13#10#13#10 +
+              '可选模块下载失败不影响主程序安装。' + #13#10#13#10 +
+              '是否继续安装（之后可在软件内再下载这些模块）？',
+              mbError, MB_YESNO) = IDYES;
+          end;
+        end;
+      finally
+        DownloadPage.Hide;
+      end;
+    end;
+  end;
 end;
 
 { ---------- 安装前：结束正在运行的实例 ---------- }
