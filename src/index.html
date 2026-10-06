@@ -205,6 +205,19 @@
           </div>
         </div>
 
+        <!-- 今日复习：进站即背的统一入口 -->
+        <div class="today-cta">
+          <div class="tc-main">
+            <button class="primary-btn lg" id="btn-today">开始今日复习</button>
+            <p class="muted" id="today-hint">正在统计…</p>
+          </div>
+          <div class="tc-keys">
+            背的时候可以完全不动鼠标：
+            <kbd>1</kbd>–<kbd>8</kbd> / <kbd>A</kbd>–<kbd>H</kbd> 选答案 ·
+            <kbd>空格</kbd> 发音 · <kbd>回车</kbd> 立即下一题
+          </div>
+        </div>
+
         <div class="two-col">
           <div class="panel">
             <h3 class="panel-title">开始新的一轮</h3>
@@ -253,6 +266,7 @@
           <div class="quiz-counters">
             <span class="pill ok">对 <b id="q-correct">0</b></span>
             <span class="pill bad">错 <b id="q-wrong">0</b></span>
+            <span class="pill streak">连对 <b id="q-streak">0</b></span>
             <button class="ghost-btn xs" id="btn-end-session">结束本轮</button>
           </div>
         </div>

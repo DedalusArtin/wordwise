@@ -1850,11 +1850,145 @@ const cases = [
     sandbox.I18n.setLang('zh-CN', { persist: false });
     return '';
   }],
+  ['界面语言：今日复习与错词攻坚的动态文案能翻成英文（多占位符按顺序回填）', () => {
+    sandbox.I18n.setLang('en', { persist: false });
+    const tr = (s) => sandbox.I18n.translate(s);
+    const want = [
+      ['开始今日复习', "Start today's review"],
+      ['开始今日复习（4 词）', "Start today's review (4 words)"],
+      ['连对 3 次', '3 correct in a row'],
+      ['攻坚中：再连对 2 次出队', '2 more correct in a row to clear it'],
+      ['正在统计…', 'Counting…'],
+    ];
+    for (const [src, exp] of want) {
+      const got = tr(src);
+      if (got !== exp) throw new Error(`${src} → ${got}，应为 ${exp}`);
+    }
+    // ★ 两个占位符：先「到期」后「常错」，顺序错了提示语就反了
+    const two = tr('到期 3 词 + 常错 1 词。系统会先排到期与常错词，再补薄弱词与新词。');
+    if (!/^3 due \+ 1 frequently missed\./.test(two)) {
+      throw new Error('多占位符没按顺序回填：' + two);
+    }
+    // 攻坚出队那条第一个占位符是**单词**不是数字，同样要接住
+    const done = tr('攻坚成功，ambiguous 已出队 —— 连对 3 次');
+    if (!done.includes('ambiguous') || !done.includes('3')) {
+      throw new Error('出队回执丢了词头或次数：' + done);
+    }
+    sandbox.I18n.setLang('zh-CN', { persist: false });
+    return two;
+  }],
   ['界面语言：语言清单里必须有 zh-CN 和 en 两档', () => {
     const ids = sandbox.I18n.LANGS.map(l => l.id);
     if (!ids.includes('zh-CN')) throw new Error('缺简体中文');
     if (!ids.includes('en')) throw new Error('缺 English');
     return ids.join(',');
+  }],
+
+  // ---- 背诵：错词攻坚 ----
+  //
+  // 为什么用「连对」而不是「累计答对 3 次」：累计计数会让 对/错/对/错
+  // 这种摇摆也慢慢出队，而它其实根本没记住。下面第 3 步就是钉死这条。
+  ['背诵：错词攻坚按「连对」出队，中途答错必须重新计数', () => {
+    const S = sandbox.Study;
+    S.state.grind = {};
+    const w = 'ambiguous';
+    const N = S.state.GRIND_TARGET;
+    if (!(N >= 2)) throw new Error('GRIND_TARGET 至少要是 2，实际 ' + N);
+
+    // ① 答错 → 入队并归零
+    let note = S.grindNote(w, false);
+    if (S.state.grind[w] !== 0) throw new Error('答错后应入队且计数为 0，实际 ' + S.state.grind[w]);
+    if (!note.includes('攻坚')) throw new Error('入队时该给提示，实际 ' + note);
+
+    // ② 连对 1 次 → 计数 1，提示写明还差几次
+    note = S.grindNote(w, true);
+    if (S.state.grind[w] !== 1) throw new Error('连对 1 次后计数应为 1，实际 ' + S.state.grind[w]);
+    if (!note.includes(String(N - 1))) throw new Error(`提示应写明还差 ${N - 1} 次，实际 ` + note);
+
+    // ③ ★ 关键：中间错一次要清零 —— 累计答对会在这里悄悄放它出队
+    S.grindNote(w, false);
+    if (S.state.grind[w] !== 0) throw new Error('答错必须重新计数，实际 ' + S.state.grind[w]);
+
+    // ④ 重新连对 N 次 → 出队，且从队列里删掉（不是留个 0 在那儿）
+    for (let i = 0; i < N - 1; i++) S.grindNote(w, true);
+    note = S.grindNote(w, true);
+    if (Object.prototype.hasOwnProperty.call(S.state.grind, w)) {
+      throw new Error(`连对 ${N} 次应当出队，却还在队列里（计数 ${S.state.grind[w]}）`);
+    }
+    if (!note.includes('出队')) throw new Error('出队该有回执，实际 ' + note);
+    return `连对 ${N} 次出队`;
+  }],
+  ['背诵：不在攻坚队列里的词答对了不打扰（提示不该刷屏）', () => {
+    const S = sandbox.Study;
+    S.state.grind = {};
+    // 从来没答错过的词，答对了不该凭空冒出「攻坚中」
+    if (S.grindNote('ordinary', true) !== '') throw new Error('没入队的词不该给提示');
+    if ('ordinary' in S.state.grind) throw new Error('没入队就不该进队列');
+    // 脏数据（空词头）同样只返回空串，不该抛
+    if (S.grindNote('', false) !== '') throw new Error('空词头应当返回空串');
+    if (S.grindNote(null, true) !== '') throw new Error('null 词头应当返回空串');
+    return '';
+  }],
+
+  // ---- 背诵：手感与键盘流 ----
+  ['背诵：下一题可被回车抢先，且推进只发生一次（定时器与手动互斥）', () => {
+    const src = fs.readFileSync(path.join(ROOT, 'src/js/study.js'), 'utf8');
+    // ① 推进定时器必须存在 state 上，否则取消不掉
+    if (!/state\.advanceTimer\s*=\s*setTimeout\(/.test(src)) {
+      throw new Error('finishAnswer 没把定时器存到 state.advanceTimer，回车抢不了先');
+    }
+    // ② 手动入口要挂出来，并且能被清掉 —— 清不掉就会「按一次回车跳两题」
+    if (!/state\.advanceNow\s*=\s*advance/.test(src)) throw new Error('没挂出 state.advanceNow');
+    if (!/state\.advanceNow\s*=\s*null/.test(src)) throw new Error('clearAdvance 没清 advanceNow');
+    // ③ 三个入口都得清。漏掉任何一处，现象都是
+    //    「正在答第 N 题，上一题的定时器把第 N+1 题推上来」。
+    //    ★ 取函数体必须裁到下一个顶层函数：靠固定字符窗口会因为
+    //      start() 前面那段选项读取而漏判，把窗口拉大又会误判到别的函数身上。
+    const bodyOf = (name) => {
+      const at = src.indexOf('function ' + name + '(');
+      if (at < 0) throw new Error('找不到函数 ' + name);
+      const rest = src.slice(at);
+      const stop = rest.search(/\n  (?:async )?function \w/);
+      return rest.slice(0, stop < 0 ? rest.length : stop);
+    };
+    for (const fn of ['start', 'end', 'nextQuestion']) {
+      if (!bodyOf(fn).includes('clearAdvance()')) {
+        throw new Error(`${fn}() 里没调 clearAdvance`);
+      }
+    }
+    return 'start / end / nextQuestion';
+  }],
+  ['背诵：空格在任意模式都发音（不再是绑在 listen_spell 上的死分支）', () => {
+    const src = fs.readFileSync(path.join(ROOT, 'src/js/study.js'), 'utf8');
+    // 旧写法 `e.key === ' ' && state.mode === 'listen_spell'` 排在
+    // `if (meta().typing) return;` 之后，而 listen_spell 的 typing 恰为 true
+    // —— 于是这句永远执行不到。这里钉死它不再复活。
+    if (/e\.key === ' ' && state\.mode === 'listen_spell'/.test(src)) {
+      throw new Error('空格还绑在 listen_spell 上 —— 那是一段执行不到的死分支');
+    }
+    const i = src.indexOf('function bindKeys');
+    if (i < 0) throw new Error('找不到 bindKeys');
+    const keys = src.slice(i, i + 3000);
+    // 未作答 / 已作答 两态都要能按空格重听（答错的词尤其需要）
+    const spaces = (keys.match(/e\.key === ' '/g) || []).length;
+    if (spaces < 2) throw new Error(`空格分支应覆盖「未作答」与「已作答」两态，实际 ${spaces} 处`);
+    // 回车立即下一题：只在已作答、且确实有推进入口时生效（收尾阶段不该有反应）
+    if (!/e\.key === 'Enter' && state\.advanceNow/.test(keys)) throw new Error('缺回车立即下一题');
+    return spaces + ' 处空格分支';
+  }],
+  ['背诵：今日复习入口把「到期 + 常错」合成一个数字（进站即背，不用自己加）', async () => {
+    // Mock 的 stats：due_today=3 / leeches=1 → 今天该背 4 个
+    await sandbox.refreshStudy();
+    const btn = elById('btn-today');
+    if (!btn.textContent.includes('4')) {
+      throw new Error('按钮上没写今天该背的总数：' + btn.textContent);
+    }
+    if (btn.dataset.todo !== '4') throw new Error('todo 该落进 dataset，实际 ' + btn.dataset.todo);
+    const hint = elById('today-hint').textContent;
+    if (!hint.includes('到期 3') || !hint.includes('常错 1')) {
+      throw new Error('提示没把两类词拆开说清楚：' + hint);
+    }
+    return btn.textContent;
   }],
 
   // ---- 整应用启动链路 ----

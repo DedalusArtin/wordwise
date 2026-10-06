@@ -108,6 +108,21 @@ const Study = (() => {
     learnedCount: 0,     // 本轮已答对计数（用于自动发音）
     bookLangById: {},    // 词库 id → 语言
 
+    /* ---- 手感：连对计数 + 错词攻坚 ---- */
+    // 连对次数。答错立即归零。它存在的意义不是统计，是**给反馈**：
+    // 一个数字在往上走，比任何「加油」都更能让人多背几个。
+    streak: 0,
+    bestStreak: 0,       // 本轮最高连对，结束时一并告知
+    // 攻坚队列：word → 这个词在答错之后又连对了几次。
+    // ★ 为什么是「答错后才入队」：不强求全库错词本与这里同步，
+    //   本轮答错 = 现在确实不会，立刻就地盯住它，反馈最直接。
+    grind: {},
+    GRIND_TARGET: 3,     // 连对这么多次就出队（3 次是「记住了」的最低可接受值）
+    // 下一题的定时器与「立即推进」函数。回车 / 空格能抢在定时器前面走，
+    // 这是键盘流最关键的一下 —— 否则背得快的用户只能干等 0.9 秒。
+    advanceTimer: null,
+    advanceNow: null,
+
     /* ---- 底部区域：上一个单词 + 已背单词折叠列表 ---- */
     // 本轮已作答的单词（含完整词条，所以列表里能直接看释义、点详情、听发音）。
     // 只存内存：它是「这一轮的过程」，重开一轮就该清空。
@@ -245,10 +260,17 @@ const Study = (() => {
       return;
     }
 
+    clearAdvance();
     state.running = true;
     state.learnedCount = 0;
     // 新的一轮 = 新的过程记录。上一轮的词不该再出现在「上一个」里。
     state.history = [];
+    // 连对与攻坚都是「本轮」的概念：上一轮的连对不该延续到这一轮，
+    // 攻坚队列同理（新的一轮重新开始盯，才盯得住）。
+    state.streak = 0;
+    state.bestStreak = 0;
+    state.grind = {};
+    updateStreakUI();
     document.getElementById('study-idle').classList.add('hidden');
     document.getElementById('study-run').classList.remove('hidden');
     updateCounters(info.correct, info.wrong);
@@ -259,6 +281,7 @@ const Study = (() => {
 
   async function end() {
     try { await API.endSession(); } catch (e) { /* 忽略 */ }
+    clearAdvance();
     state.running = false;
     state.card = null;
     document.getElementById('study-idle').classList.remove('hidden');
@@ -274,6 +297,9 @@ const Study = (() => {
   }
 
   async function nextQuestion() {
+    // 上一题的推进定时器理论上已被 clearAdvance 清掉，这里再兜一次：
+    // 漏清的后果是「正在答第 N 题，定时器把第 N+1 题推上来」。
+    clearAdvance();
     state.answered = false;
     state.hintLevel = 0;
     let card;
@@ -522,6 +548,25 @@ const Study = (() => {
 
     showFeedback(correct, card, grade);
 
+    // ---- 连对计数 + 错词攻坚 ----
+    if (correct) {
+      state.streak++;
+      if (state.streak > state.bestStreak) state.bestStreak = state.streak;
+    } else {
+      state.streak = 0;
+    }
+    updateStreakUI();
+
+    const note = grindNote(card && card.entry && card.entry.word, correct);
+    if (note) {
+      const box = document.getElementById('q-feedback');
+      if (box) {
+        box.classList.remove('hidden');
+        box.insertAdjacentHTML('beforeend',
+          `<div class="fb-grind ${correct ? 'ok' : 'bad'}">${note}</div>`);
+      }
+    }
+
     // 自动发音
     if (correct) {
       state.learnedCount++;
@@ -553,20 +598,43 @@ const Study = (() => {
       }
     }
 
-    const delay = correct ? 900 : 1500;
-    setTimeout(async () => {
-      const info = await safeSessionInfo();
-      if (!info) {
-        const cc = res ? res.correct_count : 0;
-        const wc = res ? res.wrong_count : 0;
-        const total = res ? res.total : 0;
-        U().toast(`本轮完成！共 ${total} 题，答对 ${cc} 题，答错 ${wc} 题`, 'ok');
-        if (total) updateProgress(total, total);
-        return end();
-      }
-      updateProgress(info.index, info.total);
-      await nextQuestion();
-    }, delay);
+    // 自动进入下一题，但允许用户抢在定时器前面自己按回车推进。
+    //
+    // 原先这里是一个「设了就不管」的 setTimeout：答完想立刻看下一题只能干等
+    // 0.9 秒（答错 1.5 秒）。一轮几十个词，这段等待累积起来就是节奏的断点。
+    // 现在推进动作抽成 runAdvance 并挂到 state.advanceNow，定时器只负责
+    // 「到点了替用户按一下」。两者互斥，谁先跑到谁清掉对方。
+    clearAdvance();
+    const advance = () => {
+      clearAdvance();
+      return runAdvance(res);
+    };
+    state.advanceNow = advance;
+    state.advanceTimer = setTimeout(advance, correct ? 900 : 1500);
+  }
+
+  /** 清掉「自动进入下一题」的定时器与手动入口。 */
+  function clearAdvance() {
+    if (state.advanceTimer) {
+      clearTimeout(state.advanceTimer);
+      state.advanceTimer = null;
+    }
+    state.advanceNow = null;
+  }
+
+  /** 进入下一题（或收尾本轮）。由定时器或用户按回车触发，谁先谁生效。 */
+  async function runAdvance(res) {
+    const info = await safeSessionInfo();
+    if (!info) {
+      const cc = res ? res.correct_count : 0;
+      const wc = res ? res.wrong_count : 0;
+      const total = res ? res.total : 0;
+      U().toast(`本轮完成！共 ${total} 题，答对 ${cc} 题，答错 ${wc} 题`, 'ok');
+      if (total) updateProgress(total, total);
+      return end();
+    }
+    updateProgress(info.index, info.total);
+    await nextQuestion();
   }
 
   async function safeSessionInfo() {
@@ -646,6 +714,41 @@ const Study = (() => {
     if (fill) fill.style.width = pct + '%';
     const text = document.getElementById('q-progress-text');
     if (text) text.textContent = `${Math.min(index, total)} / ${total}`;
+  }
+
+  /** 连对计数。数字在动，比任何鼓励文案都管用。 */
+  function updateStreakUI() {
+    const el = document.getElementById('q-streak');
+    if (el) el.textContent = state.streak || 0;
+    const pill = el && el.parentElement;
+    // 连对 ≥3 时高亮一下：这是一个「我在状态里」的信号
+    if (pill) pill.classList.toggle('hot', (state.streak || 0) >= 3);
+  }
+
+  /**
+   * 错词攻坚：答错就地入队，之后**连对** 3 次才出队。
+   *
+   * 为什么用「连对」而不是「累计答对 3 次」：累计计数会让
+   * 对、错、对、错 这种摇摆也慢慢出队，而它其实根本没记住。
+   * 连对才出队，恰好等价于「连续几次都想起来了」。
+   *
+   * @returns {string} 给用户的提示语（空串表示不显示）
+   */
+  function grindNote(word, correct) {
+    if (!word) return '';
+    if (!correct) {
+      state.grind[word] = 0;
+      return `已加入攻坚：这个词要<b>连对 ${state.GRIND_TARGET} 次</b>才出队（答错会重新计数）`;
+    }
+    const n = state.grind[word];
+    if (n === undefined) return '';          // 本来就不在攻坚队列里，不打扰
+    const next = n + 1;
+    if (next >= state.GRIND_TARGET) {
+      delete state.grind[word];
+      return `攻坚成功，${word} 已出队 —— 连对 ${next} 次`;
+    }
+    state.grind[word] = next;
+    return `攻坚中：再连对 ${state.GRIND_TARGET - next} 次出队`;
   }
 
   /* ---------------- 词库下拉 ---------------- */
@@ -879,7 +982,26 @@ const Study = (() => {
       const page = document.getElementById('page-study');
       if (!page || !page.classList.contains('active')) return;
 
-      if (!state.running || state.answered || !state.card) return;
+      if (!state.running) return;
+
+      // ---- 已作答：1~8 / A~H 已经没意义（选项禁用），接管的是空格与回车 ----
+      if (state.answered) {
+        if (e.key === ' ') {
+          e.preventDefault();
+          speakCurrent();   // 答错的词尤其需要再听一遍
+          return;
+        }
+        // 回车 = 不等 0.9 秒的定时器，立刻下一题。
+        // advanceNow 只在等待窗口内存在，收尾或已推进时为 null，此时回车不做事。
+        if (e.key === 'Enter' && state.advanceNow) {
+          e.preventDefault();
+          const go = state.advanceNow;
+          go();
+        }
+        return;
+      }
+
+      if (!state.card) return;
       if (meta().typing) return; // 拼写模式由输入框自己处理
       const key = e.key.toUpperCase();
       const idx = '12345678'.indexOf(key) >= 0
@@ -887,9 +1009,13 @@ const Study = (() => {
         : 'ABCDEFGH'.indexOf(key);
       if (idx >= 0) {
         const btns = document.querySelectorAll('#q-options .opt-btn');
-        if (btns[idx]) { e.preventDefault(); btns[idx].click(); }
+        if (btns[idx]) { e.preventDefault(); btns[idx].click(); return; }
       }
-      if (e.key === ' ' && state.mode === 'listen_spell') {
+      // 空格在**任意**模式下都发音。
+      // 原来只在「听音拼写」里生效，而那句判断又排在 `meta().typing` 的 return
+      // 之后 —— 听音拼写 typing 为 true，于是它从来没被执行过（死分支）。
+      // 其它模式同样需要「先听一遍再选」，所以这里统一放开。
+      if (e.key === ' ') {
         e.preventDefault();
         speakCurrent();
       }
@@ -972,6 +1098,9 @@ const Study = (() => {
     bind, start, end, setMode, setBook, startWithBook, loadBookOptions,
     applyLangUI, setDefLang, langInfo, modePromptLabel, modeButtonText,
     renderPrev, renderLearned, renderFoot, loadRecent, defLine,
+    // 攻坚队列与推进定时器都是**有状态**的，光看代码看不出是否自洽，
+    // 必须能直接驱动才能验（冒烟测试靠这两个入口）。
+    grindNote, clearAdvance, updateStreakUI,
     state,
   };
 })();

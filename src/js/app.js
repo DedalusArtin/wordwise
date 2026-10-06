@@ -66,6 +66,25 @@ async function refreshStudy() {
   set('s-mastered', s.mastered);
   set('s-streak', s.streak_days);
 
+  // ---- 今日复习统一入口 ----
+  //
+  //  为什么要把「到期 + 常错」合成一个数字放到主按钮上：原来页面上只有泛泛的
+  //  「开始背诵」，用户得自己看懂「待复习 / 强化记忆」两张卡、在心里加起来，
+  //  才知道今天到底该背多少 —— 而这两类词恰恰就是今天该背的全部。
+  //  进站即背的入口只有一个，就不存在「先研究再开始」这一步。
+  const todo = (s.due_today || 0) + (s.leeches || 0);
+  const cta = document.getElementById('btn-today');
+  if (cta) {
+    cta.textContent = todo > 0 ? `开始今日复习（${todo} 词）` : '开始今日复习';
+    cta.dataset.todo = String(todo);
+  }
+  const hint = document.getElementById('today-hint');
+  if (hint) {
+    hint.textContent = todo > 0
+      ? `到期 ${s.due_today || 0} 词 + 常错 ${s.leeches || 0} 词。系统会先排到期与常错词，再补薄弱词与新词。`
+      : '今天没有到期词，可以学点新词，或者去复习薄弱词。';
+  }
+
   const greet = document.getElementById('study-greeting');
   if (greet) {
     const info = window.App && window.App.info;
@@ -233,6 +252,18 @@ const App = (() => {
         U().toast(`已载入 ${n} 个示例单词`, 'ok');
         refreshStudy();
       } catch (e) { U().toast(e.message, 'err'); }
+    });
+
+    // 今日复习统一入口：进站即背，省掉「先读懂两张卡再决定背多少」这一步。
+    // 已经在背的时候不重开一轮 —— 重开会丢弃当前进度，这时只把页面切过去。
+    document.getElementById('btn-today')?.addEventListener('click', () => {
+      Pages.go('study');
+      if (window.Study && window.Study.state && window.Study.state.running) {
+        document.getElementById('quiz-card')
+          ?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        return;
+      }
+      Study.start();
     });
 
     // 互译方向选择器要先于各页面绑定：查词页与翻译页都靠它驱动

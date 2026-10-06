@@ -353,6 +353,61 @@ code {
 .sc-value small { font-size: 13px; font-weight: 500; color: var(--text-3); margin-left: 3px; }
 .sc-hint { font-size: 11.5px; color: var(--text-3); margin-top: 6px; }
 
+/* ---------------- 今日复习统一入口 ---------------- */
+/*
+  这一块是背诵页的「主行动区」。它和上面四张统计卡的区别是：
+  统计卡是**状态**（告诉你现在什么样），这里是**动作**（点一下就开始背）。
+  所以给它实心蓝底而非白卡 —— 进站第一眼要落在按钮上，不是落在数字上。
+*/
+.today-cta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+  margin-top: 14px;
+  padding: 16px 20px;
+  background: linear-gradient(135deg, var(--blue-soft), var(--panel) 68%);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-1);
+}
+.today-cta .tc-main { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+.today-cta .tc-main .muted { margin: 0; max-width: 460px; }
+.primary-btn.lg {
+  padding: 11px 24px;
+  font-size: 15px;
+  border-radius: 10px;
+  flex: none;
+}
+/* 键盘提示：默认收着，鼠标移上去才展开 ——
+   它教的是「怎么背」，不是「背什么」，不该和主按钮抢注意力。 */
+.today-cta .tc-keys {
+  flex: none;
+  font-size: 12px;
+  color: var(--text-3);
+  line-height: 1.9;
+  text-align: right;
+  opacity: .85;
+}
+.today-cta:hover .tc-keys { opacity: 1; }
+.today-cta kbd {
+  display: inline-block;
+  min-width: 20px;
+  padding: 1px 5px;
+  margin: 0 1px;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-2);
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-bottom-width: 2px;
+  border-radius: 5px;
+}
+@media (max-width: 900px) {
+  .today-cta { flex-direction: column; align-items: flex-start; }
+  .today-cta .tc-keys { text-align: left; }
+}
+
 /* ---------------- 表单 ---------------- */
 .field { display: flex; flex-direction: column; gap: 5px; margin-bottom: 12px; }
 .field > span { font-size: 12px; color: var(--text-3); font-weight: 500; }
@@ -618,11 +673,44 @@ code {
   font-size: 13.5px;
   line-height: 1.7;
   display: flex; align-items: flex-start; gap: 10px;
+  /* 允许换行：错词攻坚提示是答题后才追加进来的子节点，
+     不 wrap 的话它会作为 flex 项挤到图标右边的同一行上。 */
+  flex-wrap: wrap;
 }
 .qc-feedback.ok { background: var(--green-soft); color: #0d7a54; }
 .qc-feedback.bad { background: var(--red-soft); color: #b3252a; }
 .qc-feedback .fb-icon { font-size: 15px; flex-shrink: 0; }
 .qc-feedback b { font-weight: 700; }
+
+/* ---------------- 连对计数 / 错词攻坚 ---------------- */
+/*
+  连对默认是「灰计数器」——和 对/错 两个彩色 pill 相比它只是个数字。
+  连对 ≥3 才点亮：这时它表达的是「我在状态里」，不是「我又对了一个」。
+  配色用主色蓝而非橙/绿，为的是不跟 对=绿、错=红 撞语义。
+*/
+.pill.streak {
+  background: var(--panel);
+  color: var(--text-2);
+  border: 1px solid var(--border);
+  font-variant-numeric: tabular-nums;
+  transition: background .18s, color .18s, border-color .18s;
+}
+.pill.streak.hot {
+  background: var(--blue-soft);
+  color: var(--blue-dark);
+  border-color: var(--blue);
+}
+/* flex-basis 100% + 容器的 wrap = 独占一行，排在反馈正文下面。
+   颜色不另设，继承反馈框的绿/红，读起来就是反馈的一部分。 */
+.fb-grind {
+  flex: 0 0 100%;
+  margin-top: 9px;
+  padding-top: 8px;
+  border-top: 1px dashed rgba(128, 140, 160, .38);
+  font-size: 12.5px;
+  line-height: 1.65;
+}
+.fb-grind b { font-weight: 700; }
 
 .qc-actions { display: flex; justify-content: center; gap: 10px; margin-top: 22px; flex-wrap: wrap; }
 .grade-btn {

@@ -274,11 +274,26 @@
     '☾ 深色': '☾ Dark',
     '查询语言（要学习的语言）': 'Lookup language (the language you are learning)',
 
+    // ---- 背诵：今日复习入口 / 连对 / 错词攻坚 ----
+    '连对': 'Streak',
+    '正在统计…': 'Counting…',
+    '开始今日复习': "Start today's review",
+    '背的时候可以完全不动鼠标：': 'You never have to touch the mouse while reciting:',
+
     // ---- 模板键（含 {n}，会把中间那段当值塞回译文同一位置）----
     '已载入 {n} 个示例单词': '{n} sample words loaded',
     '共 {n} 条': '{n} in total',
     '第 {n} 题': 'Question {n}',
     '还剩 {n} 个': '{n} remaining',
+    // 多占位符按顺序回填：m[1] → 第一个 {n}，m[2] → 第二个 {n}
+    '开始今日复习（{n} 词）': "Start today's review ({n} words)",
+    '到期 {n} 词 + 常错 {n} 词。系统会先排到期与常错词，再补薄弱词与新词。':
+      '{n} due + {n} frequently missed. Due and missed words come first, then weak and new ones.',
+    // 攻坚提示里的 `<b>连对 3 次</b>` 是一个独立文本节点，只能靠模板键接住，
+    // 精确键「连对」匹配不上它（多了一个数字）。
+    '连对 {n} 次': '{n} correct in a row',
+    '攻坚中：再连对 {n} 次出队': '{n} more correct in a row to clear it',
+    '攻坚成功，{n} 已出队 —— 连对 {n} 次': 'Got it — {n} cleared after {n} correct in a row',
   };
 
   /** `EN` 里所有含 `{n}` 的键，抽出来是为了跳过无关的精确键、少跑几次正则。 */
