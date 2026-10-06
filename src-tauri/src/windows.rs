@@ -192,6 +192,13 @@ fn build_invoke_handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync +
         commands::tts::cmd_tts_speak,
         commands::tts::cmd_tts_clear_cache,
         // 窗口
+        //
+        // 这四个名字在**两个平台上都存在**，只是来源不同：
+        //   桌面端 → 上面那批 `#[cfg(desktop)] fn sidebar_show ...`（真窗口操作）
+        //   移动端 → 下面那批 `#[cfg(mobile)] fn sidebar_show ...`（返回人话 Err 的替身）
+        // 所以这里**不能**加 `#[cfg(desktop)]` —— 加了的话移动端就不再注册这四个
+        // 命令，前端 `invoke("sidebar_toggle")` 会拿到 "command not found"，
+        // 而不是替身精心准备的那句中文字。见文件下方「移动端替身」段落。
         sidebar_show,
         sidebar_hide,
         sidebar_toggle,
@@ -390,48 +397,64 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
 /* ---------------- 移动端替身 ---------------- */
 /*
    这四个命令在移动端仍然要**存在**，因为 `build_invoke_handler` 里按名字
-   引用了它们，而前端的按钮也不分平台。删掉会编译失败；留一个「能过但
-   一点就崩」的实现更糟 —— 所以这里给出明确返回 Err 的替身，前端拿到
-   的是一句人话，而不是一个 ReferenceError。
+   引用了它们，而前端的按钮也不分平台。直接 cfg 掉会编译失败；留一个
+   「能过但一点就崩」的实现更糟 —— 所以这里给出明确返回 Err 的替身，
+   前端拿到的是一句人话，而不是一个 ReferenceError。
 
    注意返回的是 Err 而不是 Ok(())：静默成功会让界面以为侧边栏已经弹出来了。
+
+   ★ 替身必须定义在**本模块根、且不加 `pub`**，不能另起一层 `mod`。
+   原因在 `tauri::command` 生成的 `__cmd__xxx` / `__tauri_command_name_xxx`
+   这两个 macro_rules 宏上，它们带不带 `#[macro_export]` 由函数可见性决定
+   （tauri-macros 的 wrapper.rs）：
+
+       pub fn  → 加 `#[macro_export]` → 宏被挂到 **crate 根**，
+                 在 windows.rs 里反而看不见，得 `use crate::__cmd__xxx`
+       私有 fn → 不加 → 宏留在定义它的模块内，同模块里（包括展开后的
+                 `generate_handler!`）可以直接按名调用
+
+   桌面端那四个是真身且都是**私有 fn**，走的是第二条路；替身原来是
+   `pub fn` 且藏在 `mod mobile_stubs` 里 —— 宏被搬到 crate 根、定义又在
+   别的模块，两条路都不占，于是编译报：
+
+       error: cannot find macro `__cmd__sidebar_show` in this scope
+
+   挪到模块根、去掉 `pub`，就和桌面端完全同构了。
 */
+
+/// 移动端调用这四个命令时统一给出的话。
 #[cfg(mobile)]
-mod mobile_stubs {
-    use super::{MAIN_LABEL, SIDEBAR_LABEL};
-    use tauri::AppHandle;
+const MOBILE_WINDOW_UNAVAILABLE: &str = "侧边栏是桌面端能力，移动端没有常驻窗口";
 
-    const UNAVAILABLE: &str = "侧边栏是桌面端能力，移动端没有常驻窗口";
-
-    #[tauri::command]
-    pub fn sidebar_show(_app: AppHandle) -> Result<(), String> {
-        Err(UNAVAILABLE.to_string())
-    }
-
-    #[tauri::command]
-    pub fn sidebar_hide(_app: AppHandle) -> Result<(), String> {
-        Err(UNAVAILABLE.to_string())
-    }
-
-    #[tauri::command]
-    pub fn sidebar_toggle(_app: AppHandle) -> Result<bool, String> {
-        Err(UNAVAILABLE.to_string())
-    }
-
-    /// 移动端只有一个窗口，且它一定在前台 —— 无事可做，返回成功。
-    #[tauri::command]
-    pub fn main_show(app: AppHandle) -> Result<(), String> {
-        if let Some(win) = app.get_webview_window(MAIN_LABEL) {
-            win.set_focus().ok();
-        }
-        // 抑制未使用告警：标签常量在替身里只为保持语义对称而保留
-        let _ = SIDEBAR_LABEL;
-        Ok(())
-    }
+#[cfg(mobile)]
+#[tauri::command]
+fn sidebar_show(_app: AppHandle) -> Result<(), String> {
+    Err(MOBILE_WINDOW_UNAVAILABLE.to_string())
 }
 
 #[cfg(mobile)]
-use mobile_stubs::{main_show, sidebar_hide, sidebar_show, sidebar_toggle};
+#[tauri::command]
+fn sidebar_hide(_app: AppHandle) -> Result<(), String> {
+    Err(MOBILE_WINDOW_UNAVAILABLE.to_string())
+}
+
+#[cfg(mobile)]
+#[tauri::command]
+fn sidebar_toggle(_app: AppHandle) -> Result<bool, String> {
+    Err(MOBILE_WINDOW_UNAVAILABLE.to_string())
+}
+
+/// 移动端只有一个窗口，且它一定在前台 —— 无事可做，返回成功。
+#[cfg(mobile)]
+#[tauri::command]
+fn main_show(app: AppHandle) -> Result<(), String> {
+    if let Some(win) = app.get_webview_window(MAIN_LABEL) {
+        win.set_focus().ok();
+    }
+    // 抑制未使用告警：标签常量在替身里只为保持语义对称而保留
+    let _ = SIDEBAR_LABEL;
+    Ok(())
+}
 
 /// 应用主入口。
 ///

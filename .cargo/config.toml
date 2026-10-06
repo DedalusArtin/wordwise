@@ -1,19 +1,24 @@
 # WordWise 项目级 Cargo 配置
 #
-# 这里解决的问题：
-#   indexmap 1.9.x 的 build script 用 autocfg 探测 sysroot 中是否存在 std，
-#   在部分环境（受限的 rustup 安装 / 非标准 sysroot）下探测会失败，于是
-#   indexmap 被编译成 no_std 版本 —— IndexMap 变成 `<K, V, S>` 三个泛型参数。
-#   这会连锁导致 schemars 0.8.22 的 `pub type Map<K, V> = IndexMap<K, V>;`
-#   报 E0107。而 tauri-utils 2.x 硬性锁定 schemars =0.8.22，无法升级规避。
+# 作用：给 **本地（不跨编译）** 构建注入 `has_std` cfg，让 indexmap 1.9.x 走 std 分支。
 #
-#   直接注入 `has_std` cfg，让 indexmap 走 std 分支：
-#     #[cfg(has_std)]
-#     pub struct IndexMap<K, V, S = RandomState> { ... }
-#   泛型参数带默认值后，`IndexMap<K, V>` 就能正常编译。
+# 为什么需要：indexmap 1.9.x 的 build script 用 autocfg 探测 sysroot 里有没有 std；
+# 探测失败时 indexmap 会被编成 no_std 版本 —— IndexMap 变成 `<K, V, S>` 三个泛型
+# 参数且 S 没有默认值。这会连锁让 schemars 0.8.22 里的
+#     pub type Map<K, V> = indexmap::IndexMap<K, V>;
+# 报 E0107（只有 schemars 开了 `preserve_order` 时 Map 才指向 IndexMap）。
 #
-# 该 cfg 对不相关 crate 无副作用（rustc 忽略未知 cfg 名称，且已用
-# check-cfg 声明）。
+# ★ 但这份配置**修不了 Android**：跨编译时 `[build] rustflags` 不作用于 host 单元。
+#   实测判据：本文件 + `cargo build --target aarch64-linux-android`，schemars 依旧
+#   E0107；同一份配置做本地构建则顺利通过。
+#   而真正报错的那份 indexmap 恰好是 host 单元 —— schemars 是 `tauri-build` 的依赖，
+#   tauri-build 又是 tauri 的 build-dependency，整条链都在 host 组。
+#   试过按 `[target.<triple>] rustflags` 再补一遍，实测同样无效，故不再写。
+#
+#   → Android 侧的正解见 `src-tauri/Cargo.toml` 的 `[build-dependencies] indexmap`：
+#     直接打开 indexmap 的 `std` feature，走确定性分支，不依赖 autocfg 探测。
+#
+# 本文件保留的意义：桌面端的构建一直靠它工作，行为已验证，不动。
 #
 # 若将来 indexmap / tauri 升级到不再需要此补丁的版本，可删除本文件。
 

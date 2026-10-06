@@ -12,6 +12,47 @@ default-run = "wordwise"
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
+# indexmap 1.9 —— **本项目不直接使用它**，加这一行只是为了打开它的 `std` feature。
+# （★ 必须在 [build-dependencies]，不能挪到 [dependencies]，原因见注释最后一段。）
+#
+# 不修会怎样：Android 构建报
+#   error[E0107]: struct takes 3 generic arguments but 2 generic arguments were supplied
+#     --> schemars-0.8.22/src/lib.rs:12:32
+#     pub type Map<K, V> = indexmap::IndexMap<K, V>;
+#
+# 成因链：
+#   1. schemars 0.8.22 里 Map 有两个定义：
+#        #[cfg(not(feature = "preserve_order"))] Map = BTreeMap
+#        #[cfg(feature = "preserve_order")]     Map = indexmap::IndexMap   ← 报错的是这条
+#      tauri 2.x 会打开 preserve_order，所以躲不掉。
+#   2. indexmap 1.9.x 的 IndexMap 也有两套定义：
+#        #[cfg(has_std)]      pub struct IndexMap<K, V, S = RandomState>  ← Map<K,V> 能用
+#        #[cfg(not(has_std))] pub struct IndexMap<K, V, S>               ← S 无默认值 → E0107
+#   3. `has_std` 由 indexmap 自己的 build.rs 决定：
+#        CARGO_FEATURE_STD 有值 → autocfg::emit("has_std")   ← 确定性，不做探测
+#        否则                   → autocfg 探测 sysroot 里有没有 std
+#   4. indexmap 1.9.3 的 [features] 里**没有** `default = ["std"]`，schemars 也没开它，
+#      于是必然走探测那条不确定的路。
+#
+# 为什么探测会失败：autocfg 是把探测源码通过 **stdin 管道** 喂给 rustc 的
+#   （autocfg/src/lib.rs 的 `probe_fmt`：`command.arg("-").stdin(Stdio::piped())`）。
+# 在受限的进程环境（沙箱、句柄受限）下，带 stdin 管道的 spawn 会直接失败：
+#   Os { code: 231, "All pipe instances are busy" }
+# 探测于是恒为 false —— indexmap 被编成 no_std 版本，E0107 随之而来。
+#
+# 修法：显式打开 `std` feature，走上面那条确定性分支，彻底不依赖探测。
+#
+# ★ 为什么必须写在 [build-dependencies]：
+#   schemars 是 `tauri-build` 的依赖，而 tauri-build 又是 tauri 的 build-dependency，
+#   所以 schemars（连同它用的 indexmap）属于 **host 组**。
+#   resolver v2 下 host 组与 target 组的 feature **不合并** —— 写进 [dependencies]
+#   只影响交叉编译时 target 组里那份 indexmap，救不了真正报错的 host 那份。
+#
+# 注：项目级 `.cargo/config.toml` 里另有一份 `--cfg has_std` 注入。实测它对
+#   **本地**构建有效（桌面端因此一直没暴露本问题），但跨编译时 `[build] rustflags`
+#   不作用于 host 单元，对 Android 无效 —— 所以它替代不了本行。
+indexmap = { version = "1.9", features = ["std"] }
+
 [dependencies]
 tauri = { version = "2", features = ["tray-icon", "image-png", "protocol-asset"] }
 tauri-plugin-opener = "2"
@@ -81,9 +122,6 @@ once_cell = "1"
 parking_lot = "0.12"
 dirs = "5"
 log = "0.4"
-
-# 说明：indexmap / schemars 的构建兼容性问题通过项目级
-# `.cargo/config.toml` 注入 `--cfg has_std` 解决，无需在此声明依赖。
 
 [features]
 # 生产构建默认不开启 devtools

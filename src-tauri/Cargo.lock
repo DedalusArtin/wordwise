@@ -5425,6 +5425,7 @@ dependencies = [
  "chrono",
  "dirs 5.0.1",
  "futures-util",
+ "indexmap 1.9.3",
  "log",
  "once_cell",
  "parking_lot",
