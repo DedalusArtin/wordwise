@@ -73,22 +73,15 @@ const Detail = (() => {
       audioBtn.dataset.speakLang = entry.lang || 'en';
     }
 
-    // 音标（带英/美发音按钮）
-    const ph = entry.phonetic || {};
-    const phItems = [];
-    if (ph.uk) {
-      phItems.push(`<span class="phon-item"><span class="phon-tag">英</span>${U().esc(ph.uk)}${U().speakBtn(entry, 'uk', '英音')}</span>`);
-    }
-    if (ph.us) {
-      phItems.push(`<span class="phon-item"><span class="phon-tag">美</span>${U().esc(ph.us)}${U().speakBtn(entry, 'us', '美音')}</span>`);
-    }
-    // 没有任何音标也允许朗读（TTS 兜底）
-    if (!phItems.length) {
-      phItems.push(`<span class="phon-item">${U().speakBtn(entry, 'us', '发音')}</span>`);
-    }
-    document.getElementById('dc-phonetic').innerHTML = phItems.join('');
+    // 音标：统一走 phoneticHtml —— 语言标注（英/美/拼音/读音/罗马音）、
+    // 斜杠规则、IPA 字体都只有一份实现，改样式只改一处。
+    const phonEl = document.getElementById('dc-phonetic');
+    const phonHtml = U().phoneticHtml(entry, { speak: true });
+    // 一个音标都没有时也留一个纯发音按钮（TTS 兜底），别整块空着
+    phonEl.innerHTML = phonHtml
+      || `<span class="phon-item">${U().speakBtn(entry, 'us', '发音')}</span>`;
     // 让音标行里的 🔊 也能取到词（委托会找最近的 [data-entry-word]）
-    document.getElementById('dc-phonetic').setAttribute('data-entry-word', entry.word || '');
+    phonEl.setAttribute('data-entry-word', entry.word || '');
 
     // 标签
     const tags = [];

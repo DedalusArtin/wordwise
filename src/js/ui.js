@@ -17,6 +17,60 @@ function speakBtn(entry, accent, label) {
   return window.Speak ? window.Speak.btnHtml(entry, accent, label) : '';
 }
 
+/**
+ * 音标 HTML。全项目**所有**显示音标的位置都走它。
+ *
+ * 抽出来的三个理由：
+ *   1. 标注必须跟着**词条语言**走 —— 中文词的拼音、日语词的假名读音、
+ *      韩语词的罗马音，都不该被标成「英 / 美」；
+ *   2. 只有拉丁字母的读音才用斜杠括起来，拼音加斜杠反而像乱码；
+ *   3. IPA 有自己的一套字符（ˈ ɡ ʃ ʊ θ），必须用覆盖得住的字体栈，
+ *      否则在部分机器上会掉成方框。字体在 CSS 的 --font-ipa 里统一配。
+ *
+ * @param {object} entry 词条（读 entry.phonetic 与 entry.lang）
+ * @param {object} [opts] { size: 'sm'，speak: false 可去掉每条读音旁的小喇叭 }
+ */
+function phoneticHtml(entry, opts) {
+  const o = opts || {};
+  const ph = (entry && entry.phonetic) || {};
+  const lg = String((entry && entry.lang) || 'en').toLowerCase().split(/[-_]/)[0];
+  const withSpeak = o.speak !== false;
+
+  const pairs = [];
+  if (lg === 'zh') {
+    const py = ph.uk || ph.us;
+    if (py) pairs.push({ tag: '拼音', ipa: py, accent: 'us' });
+  } else if (lg === 'ja') {
+    const rb = ph.uk || ph.us;
+    if (rb) pairs.push({ tag: '读音', ipa: rb, accent: 'us' });
+  } else if (lg === 'ko') {
+    const rb = ph.uk || ph.us;
+    if (rb) pairs.push({ tag: '罗马音', ipa: rb, accent: 'us' });
+  } else {
+    if (ph.uk) pairs.push({ tag: '英', ipa: ph.uk, accent: 'uk' });
+    if (ph.us) pairs.push({ tag: '美', ipa: ph.us, accent: 'us' });
+  }
+  // 一个都没有时不留一个空壳，交给调用方决定要不要放个纯发音按钮
+  if (!pairs.length) return '';
+
+  const items = pairs.map((p) => {
+    const raw = String(p.ipa == null ? '' : p.ipa).trim().replace(/^\/+|\/+$/g, '');
+    if (!raw) return '';
+    // 斜杠是「音标」的符号。中文的拼音、日语的假名读音、韩语的罗马音都不是音标，
+    // 加斜杠反而像乱码 —— 所以按**词条语言**判断，而不是按字符集猜。
+    const slashed = !['zh', 'ja', 'ko'].includes(lg);
+    const ipa = slashed ? `/${esc(raw)}/` : esc(raw);
+    return `<span class="phon-item">
+      <i class="phon-tag">${esc(p.tag)}</i>
+      <span class="phon-ipa">${ipa}</span>
+      ${withSpeak ? speakBtn(entry, p.accent, p.tag + '发音') : ''}
+    </span>`;
+  }).join('');
+
+  if (!items) return '';
+  return `<span class="phon${o.size === 'sm' ? ' phon-sm' : ''}">${items}</span>`;
+}
+
 /** HTML 转义，防止词条内容破坏结构。 */
 function esc(s) {
   if (s === null || s === undefined) return '';
@@ -99,30 +153,10 @@ function renderEntry(entry, opts = {}) {
   parts.push(`<div class="we-word">${esc(entry.word)}</div>`);
 
   if (o.showPhonetic) {
-    const ph = entry.phonetic || {};
-    const items = [];
-    // 读音标签必须跟着**词条语言**走。
-    //
-    // 老代码不看语言，只要 uk/us 有值就标「英」「美」—— 于是中文词「你好」
-    // 的拼音 `nǐ hǎo` 被标成了英语音标，用户看到的第一眼信息就是错的
-    // （这也正是「选日语却只看到读音」观感问题的来源之一）。
-    // 读音终究只是**附属标注**，主体必须是目标语言的实际文字。
-    const lg = entry.lang || 'en';
-    if (lg === 'zh') {
-      const py = ph.uk || ph.us;
-      if (py) items.push(`<span class="phon-item"><span class="phon-tag">拼音</span>${esc(py)}${speakBtn(entry, 'us', '朗读')}</span>`);
-    } else if (lg === 'ja') {
-      const rb = ph.uk || ph.us;
-      if (rb) items.push(`<span class="phon-item"><span class="phon-tag">读音</span>${esc(rb)}${speakBtn(entry, 'us', '朗读')}</span>`);
-    } else if (lg === 'ko') {
-      const rb = ph.uk || ph.us;
-      if (rb) items.push(`<span class="phon-item"><span class="phon-tag">罗马音</span>${esc(rb)}${speakBtn(entry, 'us', '朗读')}</span>`);
-    } else {
-      if (ph.uk) items.push(`<span class="phon-item"><span class="phon-tag">英</span>${esc(ph.uk)}${speakBtn(entry, 'uk', '英音')}</span>`);
-      if (ph.us) items.push(`<span class="phon-item"><span class="phon-tag">美</span>${esc(ph.us)}${speakBtn(entry, 'us', '美音')}</span>`);
-    }
-    if (!items.length) items.push(`<span class="phon-item">${speakBtn(entry, 'us', '发音')}</span>`);
-    parts.push(`<div class="we-phon">${items.join('')}</div>`);
+    // 统一走 phoneticHtml：语言标注、斜杠规则、IPA 字体都只有一份实现。
+    // 词条一个音标都没有时，至少留一个纯发音按钮，别整块消失。
+    const html = phoneticHtml(entry, { speak: true });
+    parts.push(`<div class="we-phon">${html || speakBtn(entry, 'us', '发音')}</div>`);
   }
 
   const srcs = (entry.source || '').split('+').filter(Boolean);
@@ -635,7 +669,7 @@ function renderPlainText(s) {
 window.WW = window.WW || {};
 Object.assign(window.WW, {
   esc, toast, loadingHtml, renderEntry, collectExamples, sourceLabel, langLabel,
-  splitRelated,
+  splitRelated, phoneticHtml,
   renderMarkdown, renderPlainText, fmtDay, timeAgo, masteryClass, renderBarChart, switchDetailTab, debounce,
   attachListSearch, speakBtn, isTypingTarget,
   speak: (word, opts) => (window.Speak ? window.Speak.speak(word, opts) : null),

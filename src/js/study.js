@@ -107,6 +107,15 @@ const Study = (() => {
     hintLevel: 0,        // 拼写提示等级
     learnedCount: 0,     // 本轮已答对计数（用于自动发音）
     bookLangById: {},    // 词库 id → 语言
+
+    /* ---- 底部区域：上一个单词 + 已背单词折叠列表 ---- */
+    // 本轮已作答的单词（含完整词条，所以列表里能直接看释义、点详情、听发音）。
+    // 只存内存：它是「这一轮的过程」，重开一轮就该清空。
+    history: [],
+    learnedScope: 'session',   // session（本轮） | recent（最近背过，跨会话）
+    recent: null,              // 懒加载：第一次切到「最近背过」才去查库
+    recentLoading: false,
+    _recs: [],                 // 当前列表渲染出来的记录（点「详情」时按下标回查）
   };
 
   /* ---------------- 语言自适应 ---------------- */
@@ -238,10 +247,13 @@ const Study = (() => {
 
     state.running = true;
     state.learnedCount = 0;
+    // 新的一轮 = 新的过程记录。上一轮的词不该再出现在「上一个」里。
+    state.history = [];
     document.getElementById('study-idle').classList.add('hidden');
     document.getElementById('study-run').classList.remove('hidden');
     updateCounters(info.correct, info.wrong);
     updateProgress(0, info.total);
+    renderFoot();
     await nextQuestion();
   }
 
@@ -305,17 +317,41 @@ const Study = (() => {
       promptEl.textContent = card.prompt;
     }
 
-    // 音标：仅「看英选中」显示，且听音拼写时隐藏
+    // 题面朗读按钮。
+    //
+    // 只在「题面上摆着的就是能读的东西」时才出现：
+    //   en_to_zh   题面是单词本身 → 读单词
+    //   ex_to_zh   题面是完整例句 → 读句子
+    // 其余模式题面是释义、「看中选英」这类，读出来毫无意义；
+    // 而 ex_pick_word 的答案就是这个词，读出来等于直接报答案。
+    const say = document.getElementById('q-say');
+    if (say) {
+      const sayWord = state.mode === 'en_to_zh' ? (card.entry.word || '') : '';
+      const sayText = state.mode === 'ex_to_zh' ? (card.example_raw || '') : '';
+      say.dataset.speakWord = sayWord;
+      // closest() 会包含元素自身，所以 [data-speak-text] 挂在按钮上也能被委托读到
+      say.dataset.speakText = sayText;
+      say.dataset.speakLang = card.entry.lang || 'en';
+      say.dataset.speakAudio = (card.entry.phonetic && card.entry.phonetic.audio) || '';
+      say.classList.toggle('hidden', !sayWord && !sayText);
+    }
+
+    // 音标
     const phonEl = document.getElementById('q-phonetic');
+    // 容器带上词条信息：里面所有 .speak-btn 靠事件委托就能取到词与音频，
+    // 不需要给每个按钮单独绑一次。
+    phonEl.dataset.entryWord = card.entry.word || '';
+    phonEl.dataset.speakLang = card.entry.lang || 'en';
+    phonEl.dataset.speakAudio = (card.entry.phonetic && card.entry.phonetic.audio)
+      || card.audio || '';
     phonEl.innerHTML = '';
-    if (state.mode === 'en_to_zh' && study.show_phonetic !== false && card.entry.phonetic) {
-      const p = card.entry.phonetic;
-      phonEl.textContent = [p.uk, p.us].filter(Boolean).join('  ');
-    } else if (state.mode === 'listen_spell') {
-      // 听音模式：放一个「播放」按钮
-      phonEl.innerHTML = `<button class="icon-btn speak-btn big" id="q-play" title="播放发音">&#128266; 播放</button>`;
-      const play = document.getElementById('q-play');
-      if (play) play.addEventListener('click', () => speakCurrent());
+    if (state.mode === 'listen_spell') {
+      // 听音拼写：音标就是答案，绝对不能显示，只给一个播放按钮
+      phonEl.innerHTML = '<button class="speak-btn big" id="q-play" title="播放发音（空格键）">&#128266; 播放</button>';
+    } else if (state.mode === 'en_to_zh' && study.show_phonetic !== false) {
+      // 统一走 phoneticHtml：英/美分标、斜杠规则、IPA 字体只有一份实现
+      phonEl.innerHTML = U().phoneticHtml(card.entry, { speak: true })
+        || '<button class="speak-btn" id="q-play" title="播放发音">&#128266; 播放</button>';
     }
 
     document.getElementById('qc-leech').classList.toggle('hidden', !card.is_leech);
@@ -335,6 +371,9 @@ const Study = (() => {
     if (state.mode === 'listen_spell') {
       setTimeout(() => speakCurrent(), 260);
     }
+
+    // 底部「上一个单词」：此刻 history 的最后一笔就是上一题
+    renderPrev();
   }
 
   function renderOptions(box, card) {
@@ -467,6 +506,20 @@ const Study = (() => {
   async function finishAnswer(correct, grade, elapsed) {
     const card = state.card;
 
+    // 记进本轮历史 —— 底部的「上一个单词」与已背列表都读它。
+    // 记的是**完整词条**，所以列表里能直接看释义、点详情、听发音，
+    // 不需要再为每个词回查一次数据库。
+    if (card && card.entry) {
+      state.history.push({
+        entry: card.entry,
+        correct: !!correct,
+        grade,
+        elapsed,
+        ts: Date.now(),
+      });
+    }
+    renderLearned();
+
     showFeedback(correct, card, grade);
 
     // 自动发音
@@ -558,16 +611,23 @@ const Study = (() => {
       ? `${entry.senses[0].pos || ''} ${entry.senses[0].definition || ''}`.trim()
       : '';
 
+    // 反馈里同样摆出答案词 —— 那就在它旁边放一个朗读按钮。
+    // 容器带 data-entry-word，委托就能取到词，不用单独绑事件。
+    el.dataset.entryWord = entry.word || '';
+    el.dataset.speakLang = entry.lang || 'en';
+    el.dataset.speakAudio = (entry.phonetic && entry.phonetic.audio) || card.audio || '';
+    const sayBtn = `<button class="speak-btn" title="朗读" data-speak-accent="us">&#128266;</button>`;
+
     if (correct) {
       const pace = grade === 'hard' ? '答对了，但有点犹豫，已按「较难」安排下次复习。' : '答对了！';
       el.innerHTML = `<span class="fb-icon">&#10004;</span>
         <div>${pace}
         <div style="margin-top:4px;font-size:12.5px;opacity:.85">
-          <b>${U().esc(entry.word)}</b> —— ${U().esc(def)}
+          <b>${U().esc(entry.word)}</b>${sayBtn} —— ${U().esc(def)}
         </div></div>`;
     } else {
       el.innerHTML = `<span class="fb-icon">&#10008;</span>
-        <div><b>${U().esc(entry.word)}</b> —— ${U().esc(def)}
+        <div><b>${U().esc(entry.word)}</b>${sayBtn} —— ${U().esc(def)}
         <div style="margin-top:4px;font-size:12.5px;opacity:.85">该词已加入强化记忆，稍后会再考你一次。</div></div>`;
     }
     el.classList.remove('hidden');
@@ -612,6 +672,196 @@ const Study = (() => {
     });
     // 下拉建好后，按当前选择刷新一次界面语言
     setBook(state.bookId || '');
+  }
+
+  /* ============================================================
+     底部区域：上一个单词 + 已背单词折叠列表
+
+     两个设计约束：
+     1. **收起状态下也要能发音** —— 所以折叠面板的标题栏（summary）里就放
+        一个 🔊，读的是最近背过的一个词，不用先展开。
+     2. **所有出现单词的地方都要能发音** —— 题面、音标行、反馈、上一个词、
+        列表每一行、详情卡，全都带 .speak-btn。取词一律靠事件委托
+        （Speak.bindDelegate），容器上挂 data-entry-word / data-speak-word，
+        渲染多少次都不会重复绑监听。
+     ============================================================ */
+
+  const $id = (id) => document.getElementById(id);
+
+  /** 取词条第一条释义，作为列表里的一行摘要。 */
+  function defLine(entry) {
+    const s = (entry && entry.senses && entry.senses[0]) || null;
+    if (!s) return '';
+    return `${s.pos ? s.pos + ' ' : ''}${s.definition || ''}`.trim();
+  }
+
+  /**
+   * 「上一个单词」。
+   *
+   * 注意它显示的是**上一题**：每答完一题才 push 进 history，而渲染下一题时
+   * history 的最后一笔正好就是刚才那题，所以不需要额外维护「上一个」指针。
+   */
+  function renderPrev() {
+    const box = $id('prev-word');
+    if (!box) return;
+    const last = state.history[state.history.length - 1];
+    if (!last || !last.entry) { box.classList.add('hidden'); return; }
+    box.classList.remove('hidden');
+
+    const e = last.entry;
+    const audio = (e.phonetic && e.phonetic.audio) || '';
+    // 词 / 音频 / 语言挂在容器上：里面的 🔊 靠委托取词
+    box.dataset.entryWord = e.word || '';
+    box.dataset.speakLang = e.lang || 'en';
+    box.dataset.speakAudio = audio;
+
+    const say = $id('pw-say');
+    if (say) {
+      say.dataset.speakWord = e.word || '';
+      say.dataset.speakLang = e.lang || 'en';
+      say.dataset.speakAudio = audio;
+      say.dataset.speakAccent = 'us';
+    }
+    const w = $id('pw-word'); if (w) w.textContent = e.word || '';
+    const p = $id('pw-phon');
+    if (p) p.innerHTML = U().phoneticHtml(e, { size: 'sm', speak: false });
+    const d = $id('pw-def');
+    if (d) d.textContent = defLine(e) || '（这个词还没有释义）';
+  }
+
+  /** 已背列表里的一行。 */
+  function rowHtml(rec, idx) {
+    const e = (rec && rec.entry) || {};
+    const word = e.word || '';
+    const audio = (e.phonetic && e.phonetic.audio) || '';
+    // 跨会话的学习记录没有「这轮对错」这一笔，标记位留空
+    const mark = rec.correct === true ? '<span class="lw-mark ok">&#10004;</span>'
+      : rec.correct === false ? '<span class="lw-mark bad">&#10008;</span>' : '';
+    return `<div class="lw-row" data-idx="${idx}">
+      <button class="speak-btn" title="朗读 ${U().esc(word)}"
+        data-speak-word="${U().esc(word)}"
+        data-speak-audio="${U().esc(audio)}"
+        data-speak-lang="${U().esc(e.lang || 'en')}"
+        data-speak-accent="us">&#128266;</button>
+      <div class="lw-main" data-act="detail" data-idx="${idx}">
+        <div class="lw-word-line">
+          <b>${U().esc(word)}</b>
+          ${U().phoneticHtml(e, { size: 'sm', speak: false })}
+          ${mark}
+        </div>
+        <div class="lw-def">${U().esc(defLine(e) || '（无释义，点「详情」看完整词条）')}</div>
+      </div>
+      <button class="ghost-btn xs" data-act="detail" data-idx="${idx}">详情</button>
+    </div>`;
+  }
+
+  /** 渲染整个底部区域（开始一轮时调用）。 */
+  function renderFoot() {
+    renderPrev();
+    renderLearned();
+  }
+
+  /**
+   * 已背单词列表：本轮 / 最近背过 两段。
+   *
+   * 渲染完把当次的数组存到 state._recs —— 点击「详情」时按 data-idx 回查，
+   * 比每次重新 reverse 一遍 history 更直接，也不怕两段长得一样。
+   */
+  function renderLearned() {
+    const box = $id('learned-list');
+    if (!box) return;
+
+    document.querySelectorAll('#lb-seg .seg-btn').forEach(b => {
+      b.classList.toggle('active', b.dataset.scope === state.learnedScope);
+    });
+
+    const title = $id('lb-title');
+    const hint = $id('lb-hint');
+    const spoken = $id('lb-speak-last');
+
+    if (state.learnedScope === 'session') {
+      // 最近答的排最上面：用户找的通常是「刚才那个词」
+      const recs = [...state.history].reverse();
+      state._recs = recs;
+      if (title) title.innerHTML = `本轮已背 <b id="lb-count">${recs.length}</b> 个`;
+      if (hint) hint.textContent = recs.length
+        ? '点开可回看释义，每行都能单独发音'
+        : '开始背诵后，这里会按顺序记下每个背过的词';
+
+      const newest = recs[0] && recs[0].entry;
+      if (spoken) {
+        spoken.classList.toggle('hidden', !newest);
+        if (newest) {
+          spoken.dataset.speakWord = newest.word || '';
+          spoken.dataset.speakLang = newest.lang || 'en';
+          spoken.dataset.speakAudio = (newest.phonetic && newest.phonetic.audio) || '';
+          spoken.dataset.speakAccent = 'us';
+        }
+      }
+
+      box.innerHTML = recs.length
+        ? recs.map(rowHtml).join('')
+        : '<div class="muted lw-empty">本轮还没有背过的词</div>';
+      return;
+    }
+
+    // ---- 最近背过（跨会话）----
+    if (state.recentLoading) {
+      box.innerHTML = '<div class="muted lw-empty">正在读取学习记录…</div>';
+      return;
+    }
+    if (!state.recent) {
+      box.innerHTML = '<div class="muted lw-empty">正在读取学习记录…</div>';
+      loadRecent();
+      return;
+    }
+
+    const recs = state.recent.map(r => ({ entry: r.entry || r, correct: null }));
+    state._recs = recs;
+    if (title) title.innerHTML = `最近背过 <b id="lb-count">${recs.length}</b> 个`;
+    if (hint) hint.textContent = '来自本机学习记录，包含以前几轮背过的词';
+    if (spoken) {
+      const newest = recs[0] && recs[0].entry;
+      spoken.classList.toggle('hidden', !newest);
+      if (newest) {
+        spoken.dataset.speakWord = newest.word || '';
+        spoken.dataset.speakLang = newest.lang || 'en';
+        spoken.dataset.speakAudio = (newest.phonetic && newest.phonetic.audio) || '';
+      }
+    }
+    box.innerHTML = recs.length
+      ? recs.map(rowHtml).join('')
+      : '<div class="muted lw-empty">学习记录里还没有背过的词</div>';
+  }
+
+  /** 读「最近背过」（懒加载，读完缓存；点刷新会清缓存重读）。 */
+  async function loadRecent() {
+    if (state.recentLoading) return;
+    state.recentLoading = true;
+    try {
+      const lang = state.bookLang || defaultLang();
+      const rows = await API.reviewedWords(lang, 200, 0);
+      state.recent = Array.isArray(rows) ? rows : [];
+    } catch (e) {
+      state.recent = [];
+      U().toast('读取学习记录失败：' + e.message, 'err');
+    }
+    state.recentLoading = false;
+    if (state.learnedScope === 'recent') renderLearned();
+  }
+
+  /** 打开某个已背单词的完整词条。 */
+  function openRec(idx) {
+    const rec = (state._recs || [])[parseInt(idx, 10)];
+    if (!rec || !rec.entry || !window.Detail) return;
+    Detail.open(rec.entry, {
+      reason: rec.correct === false ? '这轮答错过，再看一遍' : '已背单词的完整词条',
+    });
+  }
+
+  function onLearnedClick(e) {
+    const b = e.target.closest('[data-act]');
+    if (b && b.dataset.act === 'detail') openRec(b.dataset.idx);
   }
 
   /* ---------------- 键盘操作 ---------------- */
@@ -661,14 +911,67 @@ const Study = (() => {
 
     document.getElementById('study-def-lang')?.addEventListener('change', (e) => setDefLang(e.target.value));
 
+    bindFoot();
     bindKeys();
     applyLangUI(defaultLang());
     loadBookOptions();
   }
 
+  /** 绑定底部「上一个单词 / 已背单词」这一块。 */
+  function bindFoot() {
+    // ★ 一次事件委托覆盖整个背诵页：题面、音标行、反馈、上一个词、
+    //   已背列表里所有 .speak-btn 都靠它取词。按渲染次数逐个绑监听
+    //   必然会重复绑定并泄漏，这条路走不通。
+    U().speakBind(document.getElementById('page-study'));
+
+    // 「上一个单词」：点右侧那块打开完整词条
+    $id('prev-open')?.addEventListener('click', () => {
+      const last = state.history[state.history.length - 1];
+      if (last && last.entry && window.Detail) {
+        Detail.open(last.entry, { reason: '上一个单词的完整词条' });
+      }
+    });
+
+    // 本轮 / 最近背过
+    document.getElementById('lb-seg')?.addEventListener('click', (e) => {
+      const b = e.target.closest('.seg-btn');
+      if (!b || !b.dataset.scope) return;
+      state.learnedScope = b.dataset.scope;
+      renderLearned();
+    });
+
+    // 刷新：清掉缓存强制重读。点它同时切到「最近背过」——
+    // 只有这一段是查库来的，刷新「本轮」没有意义。
+    $id('lb-refresh')?.addEventListener('click', () => {
+      state.recent = null;
+      if (state.learnedScope !== 'recent') {
+        state.learnedScope = 'recent';
+        renderLearned();
+      } else {
+        renderLearned();
+      }
+    });
+
+    document.getElementById('learned-list')?.addEventListener('click', onLearnedClick);
+
+    // 标题栏里的 🔊：声音由委托负责放，这里只负责**别让它顺手把面板折叠掉**。
+    // 委托里已经 preventDefault 过一次，但不同内核下 summary 默认行为的
+    // 时机不完全一致，所以点完再校正一次开合状态，成本几乎为零。
+    $id('lb-speak-last')?.addEventListener('click', () => {
+      const box = $id('learned-box');
+      if (!box) return;
+      const wasOpen = box.hasAttribute('open');
+      setTimeout(() => {
+        if (wasOpen) box.setAttribute('open', '');
+        else box.removeAttribute('open');
+      }, 0);
+    });
+  }
+
   return {
     bind, start, end, setMode, setBook, startWithBook, loadBookOptions,
     applyLangUI, setDefLang, langInfo, modePromptLabel, modeButtonText,
+    renderPrev, renderLearned, renderFoot, loadRecent, defLine,
     state,
   };
 })();

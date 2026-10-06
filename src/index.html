@@ -5,6 +5,11 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>WordWise · 背单词与 AI 讲解</title>
 <link rel="stylesheet" href="css/app.css" />
+<!--
+  主题必须在 <head> 里、同步加载：它要在第一次绘制之前把 data-mode /
+  data-accent 写到 <html> 上。放到 body 末尾的话，深色模式启动会先闪一帧白。
+-->
+<script src="js/theme.js"></script>
 </head>
 <body data-view="main">
 
@@ -15,6 +20,7 @@
     <span class="tb-name">WordWise</span>
   </div>
   <div class="tb-right">
+    <button class="tb-btn" id="btn-theme-toggle" title="切换深色 / 浅色">&#9790;</button>
     <button class="tb-btn" id="btn-minimize" title="最小化">&#8211;</button>
     <button class="tb-btn" id="btn-maximize" title="最大化 / 还原">&#9633;</button>
     <button class="tb-btn" id="btn-close-win" title="隐藏到托盘">&#10005;</button>
@@ -251,11 +257,57 @@
         <div class="quiz-card" id="quiz-card">
           <div class="qc-badge hidden" id="qc-leech">强化记忆</div>
           <div class="qc-label" id="q-label">请选择正确的中文释义</div>
-          <div class="qc-prompt" id="q-prompt">—</div>
+          <!-- 题面 + 朗读按钮：单词出现的地方就应该能听，不用先答完 -->
+          <div class="qc-prompt-row">
+            <div class="qc-prompt" id="q-prompt">—</div>
+            <button class="speak-btn accent-us hidden" id="q-say" title="朗读题面" data-speak-accent="us">&#128266;</button>
+          </div>
           <div class="qc-phonetic" id="q-phonetic"></div>
           <div class="qc-options" id="q-options"></div>
           <div class="qc-feedback hidden" id="q-feedback"></div>
           <div class="qc-actions" id="q-actions"></div>
+        </div>
+
+        <!--
+          底部：上一个单词 + 本轮已背单词（折叠）
+
+          「上一个单词」整条可点 → 打开完整词条详情卡；
+          折叠面板收起时，标题栏右侧那个 🔊 读的是最近背过的一个词，
+          所以**收起状态下同样能发音**，不用先展开。
+        -->
+        <div class="quiz-foot" id="quiz-foot">
+          <!--
+            注意：这里外层是 div 而不是 button —— 里面还有一个 🔊 按钮，
+            按钮套按钮是非法的 HTML，浏览器渲染会乱。
+          -->
+          <div class="prev-word hidden" id="prev-word">
+            <span class="pw-label">上一个</span>
+            <button class="speak-btn accent-us" id="pw-say" title="朗读上一个单词" data-speak-accent="us">&#128266;</button>
+            <button class="pw-open" id="prev-open" title="点击查看完整释义">
+              <span class="pw-word" id="pw-word"></span>
+              <span class="pw-phon" id="pw-phon"></span>
+              <span class="pw-def" id="pw-def"></span>
+              <span class="pw-more">完整释义 &#8250;</span>
+            </button>
+          </div>
+
+          <details class="learned-box" id="learned-box">
+            <summary>
+              <span class="lb-title" id="lb-title">本轮已背 <b id="lb-count">0</b> 个</span>
+              <span class="lb-hint" id="lb-hint">点开可回看释义，随时听发音</span>
+              <button class="speak-btn accent-us" id="lb-speak-last" title="朗读最近背过的单词" data-speak-accent="us">&#128266;</button>
+            </summary>
+            <div class="lb-body">
+              <div class="lb-tools">
+                <div class="seg seg-sm" id="lb-seg">
+                  <button class="seg-btn active" data-scope="session">本轮</button>
+                  <button class="seg-btn" data-scope="recent">最近背过</button>
+                </div>
+                <button class="ghost-btn xs" id="lb-refresh" title="重新拉取最近背过的单词">刷新</button>
+              </div>
+              <div class="learned-list" id="learned-list"></div>
+            </div>
+          </details>
         </div>
       </div>
     </section>
@@ -713,6 +765,29 @@
       </header>
 
       <div class="two-col settings-cols">
+        <!-- 外观与主题：明暗 × 主题色，点一下立即生效并记住 -->
+        <div class="panel span-2" id="panel-theme">
+          <div class="panel-head-row">
+            <h3 class="panel-title">外观与主题</h3>
+            <div class="btn-row">
+              <button class="ghost-btn sm" id="btn-theme-quick">&#9790; 深色</button>
+            </div>
+          </div>
+          <p class="muted">
+            先在「明暗」里选浅色、深色或跟随系统，再挑一个主题色。
+            主题色只换强调色，不改布局；两项都是<strong>点一下立即生效并记住</strong>，
+            下次启动直接就是你选的样子。
+          </p>
+          <div class="theme-row">
+            <span class="theme-row-label">明暗</span>
+            <div class="seg seg-sm" id="theme-modes"></div>
+          </div>
+          <div class="theme-row">
+            <span class="theme-row-label">主题色</span>
+            <div class="accent-list" id="theme-accents"></div>
+          </div>
+        </div>
+
         <!-- 记忆辅助开关（需求 3） -->
         <div class="panel">
           <h3 class="panel-title">记忆辅助内容</h3>

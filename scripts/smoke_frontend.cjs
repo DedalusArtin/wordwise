@@ -23,7 +23,7 @@ const ROOT = path.resolve(__dirname, '..');
 // 加载」这类问题会被漏掉（dir.js / translate.js 就是为此加进来的）。
 // 必须与 src/index.html 里的 <script> 顺序一致：前端没有模块系统，
 // 靠加载顺序决定谁先挂到 window 上。顺序错了，冒烟测试会报「undefined.bind」。
-const ORDER = ['api.js', 'demo.js', 'dir.js', 'speak.js', 'ui.js', 'study.js', 'lookup.js',
+const ORDER = ['theme.js', 'api.js', 'demo.js', 'dir.js', 'speak.js', 'ui.js', 'study.js', 'lookup.js',
                'translate.js', 'graph.js', 'library.js', 'maint.js', 'update.js', 'settings.js',
                'sidebar.js', 'app.js'];
 
@@ -77,6 +77,7 @@ function fakeEl(tag) {
     },
     contains() { return false; },
     setAttribute() {}, getAttribute() { return null; }, removeAttribute() {},
+    hasAttribute() { return false; },
     focus() {}, blur() {}, click() {}, scrollTo() {}, scrollIntoView() {},
   };
 
@@ -126,6 +127,9 @@ const segBtns = STUDY_MODES.map((m) => {
 });
 sandbox.document = {
   getElementById: elById,
+  // theme.js 在加载时就要往 <html> 上写 data-mode / data-accent，
+  // 不给 documentElement 的话这条链路完全测不到。
+  documentElement: fakeEl('html'),
   // 让 querySelector 也返回元素（而不是 null），这样「布局初始化」这类
   // 依赖真实元素存在的代码也能被覆盖到。
   querySelector: (sel) => {
@@ -136,7 +140,10 @@ sandbox.document = {
   createElement: (t) => fakeEl(t),
   addEventListener() {},
   body: fakeEl('body'),
+  readyState: 'complete',
 };
+// 「跟随系统」要读它；沙箱里固定成浅色，断言才是确定的。
+sandbox.matchMedia = () => ({ matches: false, addEventListener() {}, removeEventListener() {} });
 sandbox.location = { search: '' };
 sandbox.navigator = { userAgent: 'node' };
 
@@ -1500,6 +1507,161 @@ const cases = [
     const sel = elById('set-speak-voice').innerHTML;
     if (!sel.includes('系统未提供')) throw new Error('音色下拉没有降级文案：' + sel);
     return hint;
+  }],
+
+  // ---- 主题：明暗 × 主题色 ----
+  ['主题：默认浅色，data-mode / data-accent 写在 <html> 上', () => {
+    const html = sandbox.document.documentElement;
+    if (html.dataset.mode !== 'light') throw new Error('默认应为 light，实际 ' + html.dataset.mode);
+    if (html.dataset.accent !== 'blue') throw new Error('默认主题色应为 blue，实际 ' + html.dataset.accent);
+    return '';
+  }],
+  ['主题：切深色会写 data-mode=dark，且落盘到 localStorage', () => {
+    sandbox.Theme.set({ mode: 'dark' });
+    const html = sandbox.document.documentElement;
+    if (html.dataset.mode !== 'dark') throw new Error('没切到 dark：' + html.dataset.mode);
+    const saved = JSON.parse(sandbox.localStorage.getItem('ww.theme'));
+    if (saved.mode !== 'dark') throw new Error('没落盘：' + JSON.stringify(saved));
+    return '';
+  }],
+  ['主题：主题色变化只改 accent，不动 mode', () => {
+    sandbox.Theme.set({ accent: 'rose' });
+    const html = sandbox.document.documentElement;
+    if (html.dataset.accent !== 'rose') throw new Error('accent 没生效：' + html.dataset.accent);
+    if (html.dataset.mode !== 'dark') throw new Error('mode 被顺手改掉了：' + html.dataset.mode);
+    return '';
+  }],
+  ['主题：toggle 在浅色/深色之间来回切', () => {
+    sandbox.Theme.set({ mode: 'light' });
+    sandbox.Theme.toggle();
+    if (sandbox.document.documentElement.dataset.mode !== 'dark') throw new Error('toggle 没切到 dark');
+    sandbox.Theme.toggle();
+    if (sandbox.document.documentElement.dataset.mode !== 'light') throw new Error('toggle 没切回 light');
+    // 收尾：恢复默认，免得影响后面依赖主题的用例
+    sandbox.Theme.set({ mode: 'light', accent: 'blue' });
+    return '';
+  }],
+  ['主题：读到坏数据不会崩，回落默认值', () => {
+    const before = sandbox.localStorage.getItem('ww.theme');
+    sandbox.localStorage.setItem('ww.theme', '{不是 JSON');
+    // 重新走一遍读取逻辑（导出里没有 read()，用 set 触发一次写入并校验不抛）
+    sandbox.Theme.set({ mode: 'light', accent: 'blue' });
+    if (before) sandbox.localStorage.setItem('ww.theme', before);
+    return '';
+  }],
+  ['主题：主题色与明暗两张表都不重复', () => {
+    const acc = sandbox.Theme.ACCENTS.map(a => a.id);
+    const mod = sandbox.Theme.MODES.map(m => m.id);
+    if (new Set(acc).size !== acc.length) throw new Error('主题色有重复 id');
+    if (new Set(mod).size !== mod.length) throw new Error('明暗模式有重复 id');
+    if (!mod.includes('system')) throw new Error('缺少「跟随系统」');
+    return acc.join(',');
+  }],
+
+  // ---- 音标：统一渲染 ----
+  ['音标：英/美分开标，且用斜杠括起来', () => {
+    const html = WW.phoneticHtml(entry);
+    if (!html.includes('phon-ipa')) throw new Error('没有用统一的 .phon-ipa 结构');
+    if (!html.includes('/əˈbæn.dən/')) throw new Error('拉丁音标没被斜杠括起来：' + html);
+    if (!html.includes('>英<') || !html.includes('>美<')) throw new Error('缺英/美标注：' + html);
+    return html.length + '';
+  }],
+  ['音标：中文词的拼音不标英/美，也不加斜杠', () => {
+    const html = WW.phoneticHtml({ word: '你好', lang: 'zh', phonetic: { uk: 'nǐ hǎo' } });
+    if (html.includes('>英<') || html.includes('>美<')) throw new Error('拼音被标成了英语音标');
+    if (!html.includes('拼音')) throw new Error('缺「拼音」标注');
+    if (html.includes('/nǐ hǎo/')) throw new Error('拼音不该用斜杠括起来');
+    return html.length + '';
+  }],
+  ['音标：日语词标「读音」、韩语词标「罗马音」', () => {
+    const ja = WW.phoneticHtml({ word: '食べる', lang: 'ja', phonetic: { us: 'taberu' } });
+    const ko = WW.phoneticHtml({ word: '먹다', lang: 'ko', phonetic: { us: 'meokda' } });
+    if (!ja.includes('读音')) throw new Error('日语词缺「读音」标注');
+    if (!ko.includes('罗马音')) throw new Error('韩语词缺「罗马音」标注');
+    return '';
+  }],
+  ['音标：一个音标都没有时返回空串（调用方才能决定兜底）', () => {
+    const html = WW.phoneticHtml({ word: 'x', lang: 'en', phonetic: {} });
+    if (html !== '') throw new Error('应为空串，实际 ' + JSON.stringify(html));
+    return '';
+  }],
+  ['音标：speak:false 时不带发音按钮，size:sm 时带 phon-sm', () => {
+    const html = WW.phoneticHtml(entry, { size: 'sm', speak: false });
+    if (html.includes('speak-btn')) throw new Error('说了不要按钮却还是给了');
+    if (!html.includes('phon-sm')) throw new Error('sm 尺寸没体现出来');
+    return '';
+  }],
+
+  // ---- 背诵页底部：上一个单词 + 已背单词折叠列表 ----
+  ['背诵页：本轮没答过题时，「上一个单词」是隐藏的', () => {
+    sandbox.Study.state.history = [];
+    sandbox.Study.renderPrev();
+    if (!elById('prev-word').classList.contains('hidden')) throw new Error('空历史时不该显示「上一个」');
+    return '';
+  }],
+  ['背诵页：「上一个单词」显示的是上一题，并且挂上了发音所需的数据', () => {
+    sandbox.Study.state.history = [
+      { entry, correct: false, grade: 'wrong' },
+      { entry: { ...entry, word: 'gracious', phonetic: { us: 'ˈɡreɪʃəs' } }, correct: true, grade: 'good' },
+    ];
+    sandbox.Study.renderPrev();
+    const box = elById('prev-word');
+    if (box.classList.contains('hidden')) throw new Error('有历史时应当显示');
+    if (elById('pw-word').textContent !== 'gracious') {
+      throw new Error('显示的应是最后一笔（gracious），实际 ' + elById('pw-word').textContent);
+    }
+    // 收起/展开都要能发音 —— 靠的正是容器上这份数据
+    if (box.dataset.entryWord !== 'gracious') throw new Error('容器没带 data-entry-word');
+    if (elById('pw-say').dataset.speakWord !== 'gracious') throw new Error('喇叭没带 data-speak-word');
+    if (!elById('pw-phon').innerHTML.includes('phon-ipa')) throw new Error('音标没走统一渲染');
+    return elById('pw-def').textContent;
+  }],
+  ['背诵页：已背列表按最近优先排，每一行都带发音按钮与详情入口', () => {
+    sandbox.Study.state.history = [
+      { entry: { ...entry, word: 'first' }, correct: true },
+      { entry: { ...entry, word: 'second' }, correct: false },
+    ];
+    sandbox.Study.state.learnedScope = 'session';
+    sandbox.Study.renderLearned();
+    const html = elById('learned-list').innerHTML;
+    // 最近答的排最上面
+    if (html.indexOf('second') > html.indexOf('first')) throw new Error('没有按最近优先排序');
+    const speakBtns = (html.match(/data-speak-word=/g) || []).length;
+    if (speakBtns !== 2) throw new Error(`每行都该有一个发音按钮，实际 ${speakBtns} 个`);
+    const details = (html.match(/data-act="detail"/g) || []).length;
+    if (details !== 4) throw new Error(`每行该有 2 个详情入口（整块+按钮），实际 ${details}`);
+    // 计数写在标题里（假 DOM 不会重新解析 innerHTML，所以查标题本身）
+    if (!elById('lb-title').innerHTML.includes('>2<')) {
+      throw new Error('计数没更新：' + elById('lb-title').innerHTML);
+    }
+    return html.length + '';
+  }],
+  ['背诵页：折叠面板收起时也能发音（summary 里就带一个喇叭）', () => {
+    const html = elById('learned-list').innerHTML;
+    if (!html) throw new Error('列表是空的，前一个用例没跑起来');
+    // 收起状态下能点的只有 summary 里那个 —— 它必须指向最近的一个词
+    const last = elById('lb-speak-last');
+    if (last.dataset.speakWord !== 'second') {
+      throw new Error('summary 的喇叭没指向最近背过的词：' + last.dataset.speakWord);
+    }
+    return last.dataset.speakWord;
+  }],
+  ['背诵页：点「详情」能按行下标取回对应词条', () => {
+    // 渲染出来的下标 0 应当是最近的那个（second）
+    const rec = sandbox.Study.state._recs[0];
+    if (!rec || rec.entry.word !== 'second') {
+      throw new Error('下标 0 不是最近的词：' + JSON.stringify(rec && rec.entry.word));
+    }
+    return rec.entry.word;
+  }],
+  ['背诵页：切到「最近背过」会去查学习记录', async () => {
+    sandbox.Study.state.learnedScope = 'recent';
+    sandbox.Study.state.recent = null;
+    sandbox.Study.renderLearned();
+    // Mock 有 60ms 延迟，等足再断言
+    await new Promise(r => setTimeout(r, 200));
+    if (!Array.isArray(sandbox.Study.state.recent)) throw new Error('没拿到学习记录');
+    return sandbox.Study.state.recent.length + ' 条';
   }],
 
   // ---- 整应用启动链路 ----

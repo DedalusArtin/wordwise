@@ -114,7 +114,7 @@ code {
 .nav-logo { display: flex; align-items: center; gap: 10px; padding: 0 6px 18px; }
 .logo-mark {
   width: 34px; height: 34px;
-  background: linear-gradient(135deg, var(--blue), #5b9bff);
+  background: linear-gradient(135deg, var(--blue), var(--accent-2));
   border-radius: 10px;
   color: #fff;
   display: grid; place-items: center;
@@ -522,7 +522,7 @@ code {
 .progress-fill {
   height: 100%;
   width: 0;
-  background: linear-gradient(90deg, var(--blue), #5b9bff);
+  background: linear-gradient(90deg, var(--blue), var(--accent-2));
   border-radius: 4px;
   transition: width .3s ease;
 }
@@ -549,7 +549,7 @@ code {
 .qc-badge {
   position: absolute; top: 16px; right: 18px;
   background: var(--orange-soft);
-  color: #b57500;
+  color: var(--amber-text);
   padding: 4px 11px;
   border-radius: 20px;
   font-size: 11.5px; font-weight: 600;
@@ -637,7 +637,7 @@ code {
 .grade-btn:hover { transform: translateY(-1px); box-shadow: var(--shadow-1); }
 .grade-btn.g-wrong { border-color: var(--red); color: var(--red); }
 .grade-btn.g-wrong:hover { background: var(--red-soft); }
-.grade-btn.g-hard { border-color: var(--orange); color: #b57500; }
+.grade-btn.g-hard { border-color: var(--orange); color: var(--amber-text); }
 .grade-btn.g-hard:hover { background: var(--orange-soft); }
 .grade-btn.g-good { border-color: var(--blue); color: var(--blue); }
 .grade-btn.g-good:hover { background: var(--blue-soft); }
@@ -701,7 +701,7 @@ code {
   border: 1px solid var(--border-2);
 }
 .tag.blue { background: var(--blue-soft); color: var(--blue-dark); border-color: transparent; }
-.tag.orange { background: var(--orange-soft); color: #b57500; border-color: transparent; }
+.tag.orange { background: var(--orange-soft); color: var(--amber-text); border-color: transparent; }
 .tag.green { background: var(--green-soft); color: var(--green); border-color: transparent; }
 
 .we-section { margin-bottom: 16px; }
@@ -760,7 +760,7 @@ code {
   padding: 11px 14px;
   font-size: 13.5px;
   line-height: 1.7;
-  color: #8a5a00;
+  color: var(--amber-text);
 }
 
 /* ---------------- AI 面板 ---------------- */
@@ -987,7 +987,7 @@ h4.md-h, h5.md-h { font-size: 13.5px; font-weight: 600; color: var(--text); }
 .plan-week { font-size: 12px; color: var(--text-3); min-width: 42px; }
 .plan-bar { flex: 1; height: 8px; background: var(--border-2); border-radius: 4px; overflow: hidden; }
 .plan-fill { height: 100%; background: var(--blue); border-radius: 4px; transition: width .4s; }
-.plan-row.today .plan-fill { background: linear-gradient(90deg, var(--blue), #5b9bff); }
+.plan-row.today .plan-fill { background: linear-gradient(90deg, var(--blue), var(--accent-2)); }
 .plan-count { font-size: 12.5px; font-weight: 600; min-width: 62px; text-align: right; font-variant-numeric: tabular-nums; }
 .plan-overdue { font-size: 11px; color: var(--red); font-weight: 600; }
 
@@ -1055,7 +1055,7 @@ h4.md-h, h5.md-h { font-size: 13.5px; font-weight: 600; color: var(--text); }
 .overlay {
   position: fixed;
   inset: 0;
-  background: rgba(20, 28, 45, .42);
+  background: var(--overlay);
   backdrop-filter: blur(3px);
   display: grid;
   place-items: center;
@@ -1165,8 +1165,8 @@ h4.md-h, h5.md-h { font-size: 13.5px; font-weight: 600; color: var(--text); }
   bottom: 28px;
   left: 50%;
   transform: translateX(-50%);
-  background: #1c2434;
-  color: #fff;
+  background: var(--toast-bg);
+  color: var(--toast-fg);
   padding: 11px 20px;
   border-radius: var(--radius-sm);
   font-size: 13px;
@@ -1282,7 +1282,7 @@ h4.md-h, h5.md-h { font-size: 13.5px; font-weight: 600; color: var(--text); }
   cursor: pointer;
   transition: border-color .15s, box-shadow .15s;
 }
-.inline-select:hover { border-color: #cfd6e2; }
+.inline-select:hover { border-color: var(--border-hover); }
 .inline-select:focus { outline: none; border-color: var(--blue); box-shadow: 0 0 0 3px var(--blue-soft); }
 
 .field-block { display: block; margin: 12px 0; }
@@ -1359,7 +1359,7 @@ h4.md-h, h5.md-h { font-size: 13.5px; font-weight: 600; color: var(--text); }
   background: var(--panel);
   transition: border-color .15s, box-shadow .15s, transform .12s;
 }
-.book-node:hover { border-color: #cfd6e2; box-shadow: var(--shadow-1); }
+.book-node:hover { border-color: var(--border-hover); box-shadow: var(--shadow-1); }
 .book-node.lv0 { background: linear-gradient(180deg, #f7faff, var(--panel)); }
 .book-node.lv1 { background: #fafbfe; }
 .bn-main { display: flex; align-items: center; gap: 9px; flex: 1; min-width: 0; }
@@ -1378,7 +1378,7 @@ h4.md-h, h5.md-h { font-size: 13.5px; font-weight: 600; color: var(--text); }
   display: flex; flex-direction: column; gap: 8px;
   transition: border-color .15s, box-shadow .15s, transform .12s;
 }
-.catalog-card:hover { border-color: #cfd6e2; box-shadow: var(--shadow-2); transform: translateY(-1px); }
+.catalog-card:hover { border-color: var(--border-hover); box-shadow: var(--shadow-2); transform: translateY(-1px); }
 .cc-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .cc-name { font-size: 14px; font-weight: 600; }
 .cc-desc { font-size: 12.5px; color: var(--text-2); line-height: 1.6; min-height: 32px; }
@@ -1626,7 +1626,7 @@ body.col-resizing * { cursor: col-resize !important; }
   font-size: 12.5px;
   min-width: 92px;
 }
-.dir-picker .inline-select:hover { border-color: #cfd6e2; }
+.dir-picker .inline-select:hover { border-color: var(--border-hover); }
 .dir-swap {
   width: 26px; height: 26px;
   border-radius: 6px;
@@ -1649,7 +1649,7 @@ body.col-resizing * { cursor: col-resize !important; }
   border-radius: var(--radius-sm);
   font-size: 12.5px;
   line-height: 1.6;
-  color: #8a5a00;
+  color: var(--amber-text);
 }
 /* 降级提示条：查询成功、只是某项增强能力（如本地大模型）没参与。
    刻意做成中性提示而不是错误色 —— 它不是失败。 */
@@ -1695,7 +1695,7 @@ body.col-resizing * { cursor: col-resize !important; }
   font-family: var(--mono);
 }
 .lk-trans-alt { margin-top: 6px; font-size: 12.5px; color: var(--text-2); line-height: 1.7; }
-.lk-trans-note { margin-top: 6px; font-size: 12px; color: #8a5a00; }
+.lk-trans-note { margin-top: 6px; font-size: 12px; color: var(--amber-text); }
 
 /* ============================================================
    翻译页（需求 5）
@@ -1774,9 +1774,9 @@ body.col-resizing * { cursor: col-resize !important; }
   border-radius: 6px;
   font-size: 12px;
   line-height: 1.6;
-  color: #8a5a00;
+  color: var(--amber-text);
 }
-.ai-model.warn { background: var(--orange-soft); color: #8a5a00; }
+.ai-model.warn { background: var(--orange-soft); color: var(--amber-text); }
 
 /* ---- 下区：AI 增强 / 历史 ---- */
 .tr-lower { margin-top: 14px; }
@@ -1987,7 +1987,7 @@ body.col-resizing * { cursor: col-resize !important; }
 .llm-hint {
   margin-top: 8px; padding: 7px 10px;
   background: var(--orange-soft); border-radius: var(--radius-sm);
-  font-size: 12.5px; color: #8a5a00;
+  font-size: 12.5px; color: var(--amber-text);
 }
 .warn { color: var(--orange); }
 
@@ -2347,3 +2347,303 @@ h1 .ver-chip { font-size: 11px; padding: 2px 8px; vertical-align: 4px; }
 .up-md h1, .up-md h2, .up-md h3 { font-size: 13.5px; margin: 10px 0 6px; color: var(--text); }
 .up-md ul, .up-md ol { padding-left: 18px; margin: 6px 0; }
 .up-md code { font-size: 11.5px; }
+
+/* ============================================================
+   主题层 —— 明暗（data-mode）× 主题色（data-accent）
+
+   ★ 为什么整块放在文件末尾而不是去改上面的 :root：
+     属性选择器的特异性高于裸 :root，且同特异性下后者胜，
+     所以放最后既能覆盖旧 token，又不用把 2300 行逐一改写。
+     少数几处硬编码颜色已就地换成 token（--amber-text / --border-hover /
+     --accent-2 / --toast-bg…），深色下才不会有刺眼的亮色残留。
+
+   ★ `--blue` 这一族名字沿用旧名，但它现在是「强调色槽位」而不是字面蓝色：
+     换主题色就是换这一组的值。改名会波及上百处引用，收益为零。
+   ============================================================ */
+
+:root {
+  /* 语义补充 token */
+  --card: #ffffff;
+  --accent-2: var(--accent-2);          /* 与强调色配套的浅一档，用于渐变与进度条 */
+  --border-hover: #c9d2e2;
+  --amber-text: var(--amber-text);        /* 橙色系提示文字：浅底上要够深 */
+  --toast-bg: #1c2434;
+  --toast-fg: #ffffff;
+  --overlay: rgba(20, 28, 45, .42);
+  /* 音标字体：优先能完整覆盖 IPA 的字体，再回落到系统中文字体。
+     缺了这一段，ˈ / ɡ / ʃ / ʊ 在部分机器上会掉成方框。 */
+  --font-ipa: "Charis SIL", "Doulos SIL", "Gentium Plus", "Segoe UI",
+              "Lucida Sans Unicode", "Arial Unicode MS", "Microsoft YaHei UI", sans-serif;
+  /* 稍微大一点的圆角，观感更现代 */
+  --radius: 14px;
+  --radius-sm: 10px;
+}
+
+/* ---------- 主题色变体（浅色） ---------- */
+:root[data-accent="teal"] {
+  --blue: #0d9f9a; --blue-dark: #0a7d79; --blue-soft: #e2f6f4; --accent-2: #4fc7c0;
+}
+:root[data-accent="purple"] {
+  --blue: #7c5cff; --blue-dark: #6344e0; --blue-soft: #f0ecff; --accent-2: #a58bff;
+}
+:root[data-accent="amber"] {
+  --blue: #e08a00; --blue-dark: #b56f00; --blue-soft: #fff5e6; --accent-2: #f5b246;
+}
+:root[data-accent="rose"] {
+  --blue: #e0457b; --blue-dark: #c03367; --blue-soft: #fdecf3; --accent-2: #f47ba3;
+}
+
+/* ---------- 深色模式：中性色 ---------- */
+:root[data-mode="dark"] {
+  --bg: #0e1219;
+  --panel: #161c26;
+  --card: #1b2230;
+  --text: #e6ecf6;
+  --text-2: #a7b2c4;
+  --text-3: #78839a;
+  --border: #262e3c;
+  --border-2: #1d242f;
+  --border-hover: #3a4557;
+  --overlay: rgba(0, 0, 0, .62);
+  --toast-bg: #e8edf6;
+  --toast-fg: #0e1219;
+  --amber-text: #f0b45c;
+
+  /* 强调色在深底上要提亮；--blue-dark 在深色里反而是**更亮**的那一档，
+     因为它总是被当成「浅底上的文字色」用（.tag.blue / .md-h / 门牌标题）。 */
+  --blue: #4d8dff; --blue-dark: #8ab4ff; --blue-soft: #17243a; --accent-2: #7caeff;
+  --orange: #ffb457; --orange-soft: #34260f;
+  --red: #ff6b6b;  --red-soft: #3a1e21;
+  --green: #3fc79a; --green-soft: #12302a;
+  --purple: #b9a3ff; --purple-soft: #241f3d;
+
+  --shadow-1: 0 1px 3px rgba(0, 0, 0, .5), 0 1px 2px rgba(0, 0, 0, .4);
+  --shadow-2: 0 10px 30px rgba(0, 0, 0, .55);
+  --shadow-3: 0 22px 64px rgba(0, 0, 0, .65);
+}
+
+/* ---------- 深色 × 主题色（必须排在纯深色之后） ---------- */
+:root[data-mode="dark"][data-accent="teal"] {
+  --blue: #2ec4bd; --blue-dark: #6fded8; --blue-soft: #12302e; --accent-2: #63d8d2;
+}
+:root[data-mode="dark"][data-accent="purple"] {
+  --blue: #9b83ff; --blue-dark: #bda9ff; --blue-soft: #221d3c; --accent-2: #b9a3ff;
+}
+:root[data-mode="dark"][data-accent="amber"] {
+  --blue: #f0a63a; --blue-dark: #ffc978; --blue-soft: #33260f; --accent-2: #ffc06a;
+}
+:root[data-mode="dark"][data-accent="rose"] {
+  --blue: #f2609a; --blue-dark: #ff97bd; --blue-soft: #35182a; --accent-2: #ff8fb8;
+}
+
+/* ---------- 深色下的几处收尾修正 ---------- */
+/* 白色小圆钮（开关滑块、单选点）在深色里仍是白色，这是对的 */
+:root[data-mode="dark"] .switch input { background: #2b3444; }
+:root[data-mode="dark"] .switch input:checked { background: var(--blue); }
+/* 遮罩要更重，否则弹层和背景糊在一起 */
+:root[data-mode="dark"] .overlay { background: var(--overlay); }
+/* 图谱坐标提示本来就涂深色，深色模式下再压一层保证可读 */
+:root[data-mode="dark"] .graph-tip { background: rgba(0, 0, 0, .86); }
+/* 输入类控件在深色里要自己给底色，否则还是浏览器默认的白 */
+:root[data-mode="dark"] input[type="text"],
+:root[data-mode="dark"] input[type="number"],
+:root[data-mode="dark"] input[type="password"],
+:root[data-mode="dark"] input[type="search"],
+:root[data-mode="dark"] textarea,
+:root[data-mode="dark"] select {
+  background: var(--card);
+  color: var(--text);
+  border-color: var(--border);
+}
+:root[data-mode="dark"] ::placeholder { color: var(--text-3); opacity: .8; }
+/* 深色下按钮的立体感靠边框而非阴影 */
+:root[data-mode="dark"] .primary-btn { box-shadow: 0 2px 10px rgba(0, 0, 0, .45); }
+:root[data-mode="dark"] .seg { background: var(--card); }
+:root[data-mode="dark"] .panel { background: var(--panel); }
+
+/* ============================================================
+   现代化微调（不触碰布局，只动圆角/阴影/过渡）
+   ============================================================ */
+.panel { box-shadow: var(--shadow-1); }
+.panel:hover { box-shadow: var(--shadow-2); }
+.opt-btn { transition: border-color .15s, box-shadow .15s, transform .12s, background .15s; }
+.opt-btn:hover { transform: translateX(2px); }
+.primary-btn, .ghost-btn { transition: background .16s, color .16s, border-color .16s, transform .12s, box-shadow .16s; }
+.primary-btn:active, .ghost-btn:active { transform: translateY(1px); }
+.progress-bar, .progress-fill { transition: width .3s cubic-bezier(.2, .8, .3, 1); }
+
+/* ============================================================
+   设置页：外观与主题面板
+   ============================================================ */
+.theme-row { display: flex; align-items: center; gap: 14px; margin-top: 12px; flex-wrap: wrap; }
+.theme-row-label { font-size: 12.5px; color: var(--text-3); width: 52px; flex: none; }
+.seg-sm .seg-btn { padding: 5px 11px; font-size: 12px; }
+.accent-list { display: flex; gap: 8px; flex-wrap: wrap; }
+.accent-dot {
+  display: inline-flex; align-items: center; gap: 7px;
+  padding: 5px 11px 5px 6px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg);
+  color: var(--text-2);
+  font-size: 12px;
+  transition: border-color .15s, box-shadow .15s, color .15s;
+}
+.accent-dot i {
+  width: 18px; height: 18px; border-radius: 50%;
+  background: var(--dot, #888);
+  display: block;
+  box-shadow: inset 0 0 0 2px rgba(255, 255, 255, .25);
+}
+.accent-dot:hover { border-color: var(--border-hover); color: var(--text); }
+.accent-dot.active { border-color: var(--dot); color: var(--text); box-shadow: 0 0 0 3px color-mix(in srgb, var(--dot) 22%, transparent); }
+.accent-dot.active i { box-shadow: inset 0 0 0 2px rgba(255, 255, 255, .5); }
+
+/* 标题栏 / 侧边栏里的快速明暗切换 */
+#btn-theme-toggle { font-size: 13px; }
+
+/* ============================================================
+   音标：统一走 .phon（ui.js 的 phoneticHtml 产出）
+   全项目所有显示音标的位置都用它，样式与「英/美」标注才一致。
+   ============================================================ */
+.phon { display: inline-flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.phon .phon-item {
+  display: inline-flex; align-items: center; gap: 6px;
+  margin-right: 0;
+  padding: 2px 10px 2px 5px;
+  background: var(--bg);
+  border: 1px solid var(--border-2);
+  border-radius: 999px;
+}
+.phon .phon-tag {
+  font-size: 10px; font-weight: 700; line-height: 1.6;
+  padding: 0 6px; border-radius: 999px;
+  background: var(--blue-soft); color: var(--blue);
+  font-style: normal;
+}
+.phon .phon-ipa {
+  font-family: var(--font-ipa);
+  font-size: 16px;
+  font-weight: 500;
+  letter-spacing: .3px;
+  color: var(--text-2);
+  white-space: nowrap;
+}
+.phon-sm .phon-item { padding: 1px 8px 1px 4px; gap: 5px; }
+.phon-sm .phon-ipa { font-size: 12.5px; }
+.phon-sm .phon-tag { font-size: 9.5px; padding: 0 5px; }
+
+/* 答题卡上的音标比别处再大一档：那是学生真正要盯的地方 */
+.qc-phonetic { margin-bottom: 26px; min-height: 26px; }
+.qc-phonetic .phon { justify-content: center; }
+.qc-phonetic .phon .phon-ipa { font-size: 18px; }
+
+/* ============================================================
+   背诵页底部：上一个单词 + 本轮已背单词（折叠）
+   ============================================================ */
+.quiz-foot { max-width: 720px; margin: 18px auto 0; display: flex; flex-direction: column; gap: 10px; }
+
+/* 「上一个单词」：整条是容器，右侧的 pw-open 才可点（里面还有 🔊 按钮） */
+.prev-word {
+  display: flex; align-items: center; gap: 9px;
+  width: 100%;
+  padding: 9px 13px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--blue);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow-1);
+  transition: border-color .15s, box-shadow .15s, transform .12s;
+}
+.prev-word:hover { box-shadow: var(--shadow-2); transform: translateY(-1px); }
+.pw-label {
+  font-size: 10.5px; font-weight: 700; letter-spacing: .4px;
+  color: var(--blue); background: var(--blue-soft);
+  padding: 2px 7px; border-radius: 999px; flex: none;
+}
+.pw-open {
+  display: flex; align-items: center; gap: 10px;
+  flex: 1; min-width: 0;
+  text-align: left;
+  padding: 2px 0;
+}
+.pw-word { font-size: 15px; font-weight: 700; color: var(--text); flex: none; }
+.pw-open:hover .pw-word { color: var(--blue); }
+.pw-def {
+  font-size: 12.5px; color: var(--text-3); flex: 1;
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.pw-more { font-size: 12px; color: var(--blue); flex: none; }
+.prev-word .speak-btn { flex: none; }
+
+/* 折叠面板 */
+.learned-box {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow-1);
+  overflow: hidden;
+}
+.learned-box > summary {
+  display: flex; align-items: center; gap: 10px;
+  padding: 11px 14px;
+  cursor: pointer;
+  user-select: none;
+  list-style: none;
+  font-size: 13px;
+}
+.learned-box > summary::-webkit-details-marker { display: none; }
+.learned-box > summary::before {
+  content: '\25B8';
+  color: var(--text-3);
+  font-size: 11px;
+  transition: transform .18s;
+  flex: none;
+}
+.learned-box[open] > summary::before { transform: rotate(90deg); }
+.lb-title { font-weight: 600; color: var(--text); }
+.lb-title b { color: var(--blue); }
+.lb-hint { font-size: 11.5px; color: var(--text-3); flex: 1; min-width: 0; }
+.learned-box > summary .speak-btn { flex: none; }
+.learned-box > summary:hover { background: var(--border-2); }
+
+.lb-body { border-top: 1px solid var(--border-2); padding: 10px 12px 12px; }
+.lb-tools { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; flex-wrap: wrap; }
+.lb-tools .ghost-btn { margin-left: auto; }
+
+.learned-list { display: flex; flex-direction: column; gap: 4px; max-height: 320px; overflow: auto; }
+
+.lw-row {
+  display: flex; align-items: flex-start; gap: 9px;
+  padding: 7px 9px;
+  border-radius: 8px;
+  transition: background .14s;
+}
+.lw-row:hover { background: var(--border-2); }
+.lw-row .speak-btn { flex: none; margin-top: 1px; }
+.lw-main { flex: 1; min-width: 0; cursor: pointer; }
+.lw-word-line { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.lw-word-line b { font-size: 14px; color: var(--text); }
+.lw-word-line .lw-mark { font-size: 11px; flex: none; }
+.lw-word-line .lw-mark.ok { color: var(--green); }
+.lw-word-line .lw-mark.bad { color: var(--red); }
+.lw-def {
+  font-size: 12.5px; color: var(--text-2); margin-top: 2px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.lw-empty { padding: 18px 8px; text-align: center; }
+
+/* 题面行：单词居中，右侧一个朗读按钮（只在题面本身是词的时候才显示） */
+.qc-prompt-row {
+  display: flex; align-items: center; justify-content: center; gap: 10px;
+  margin-bottom: 8px;
+}
+.qc-prompt-row .qc-prompt { margin-bottom: 0; min-width: 0; flex: 0 1 auto; }
+.qc-prompt-row .speak-btn { flex: none; }
+
+/* 上一个单词里的音标：空的时候整块收掉，不要留一段空白 */
+.pw-phon { flex: none; }
+.pw-phon:empty { display: none; }
+/* 已背列表行里的音标也跟着收起 */
+.lw-word-line:empty { display: none; }
+.lw-row .phon { flex: none; }
