@@ -144,6 +144,51 @@ pub fn detect_lang(word: &str) -> Option<&'static str> {
     None
 }
 
+/// 书写系统**不含拉丁字母**的语言。
+///
+/// 这些语言与「纯拉丁字母的词」互斥 —— 一个词是 `reality`，它就绝不可能是
+/// 中文 / 日文 / 韩文 / 俄文。反过来，英 / 法 / 德 / 西 之间**无法靠字形区分**
+/// （都是拉丁字母），所以它们**不在**这张表里，必须尊重用户选择。
+const NON_LATIN_LANGS: [&str; 9] =
+    ["zh", "ja", "ko", "ru", "ar", "hi", "th", "el", "he"];
+
+/// 该语言是否使用非拉丁书写系统（据此判断「拉丁字母词」与它互斥）。
+pub fn is_non_latin_lang(lang: &str) -> bool {
+    let l = lang.trim().to_lowercase();
+    let base = l.split(['-', '_']).next().unwrap_or("");
+    NON_LATIN_LANGS.contains(&base)
+}
+
+/// 这个词是否**完全由拉丁字母构成**（含带变音符的拉丁扩展，如 `café`）。
+///
+/// 与 `detect_lang` 的区别：`detect_lang` 回答「是哪种语言」，对拉丁字母返回
+/// `None`（判不出）；这个函数回答「**不可能是**哪些语言」，纯拉丁字母返回
+/// `true` → 可以据此否掉中日韩俄等候选。
+///
+/// 数字、空格、连字符、撇号等非字母字符不影响判定（`"don't"` 仍是拉丁词）。
+/// 一个字母都没有（如 `"123"`）返回 `false`，因为无从判断。
+pub fn is_latin_only(word: &str) -> bool {
+    let mut latin = false;
+    for c in word.chars() {
+        match c as u32 {
+            0x3040..=0x30FF | 0x31F0..=0x31FF => return false, // 假名
+            0x1100..=0x11FF | 0xAC00..=0xD7AF => return false, // 谚文
+            0x3400..=0x4DBF | 0x4E00..=0x9FFF | 0xF900..=0xFAFF => return false, // 汉字
+            0x0400..=0x04FF => return false,                   // 西里尔
+            0x0370..=0x03FF => return false,                   // 希腊
+            0x0E00..=0x0E7F => return false,                   // 泰文
+            0x0590..=0x05FF => return false,                   // 希伯来
+            0x0600..=0x06FF | 0x0750..=0x077F => return false, // 阿拉伯
+            _ => {
+                if c.is_ascii_alphabetic() || (0x00C0..=0x024F).contains(&(c as u32)) {
+                    latin = true;
+                }
+            }
+        }
+    }
+    latin
+}
+
 /// 渲染 URL 模板。
 fn render_url(tpl: &str, word: &str, lang: &str, key: &str) -> String {
     tpl.replace("{word}", &urlencoding::encode(word))
@@ -1581,6 +1626,77 @@ mod tests {
         // 数字/符号等判不出来
         assert_eq!(detect_lang("123"), None);
         assert_eq!(detect_lang(""), None);
+    }
+
+    /// 脚本排他性：纯拉丁字母的词不可能是中日韩俄等语言。
+    ///
+    /// 这是「reality 被识别成中文」的守门测试 —— 方向选成中文后输入英文词，
+    /// 若没有这条规则就会去问《现代汉语规范词典》，释义落空、音标被标成「拼音」。
+    #[test]
+    fn latin_only_rejects_non_latin_scripts() {
+        // 拉丁字母（含变音符）→ true
+        assert!(is_latin_only("reality"));
+        assert!(is_latin_only("apple"));
+        assert!(is_latin_only("café"));
+        assert!(is_latin_only("naïve"));
+        assert!(is_latin_only("don't"));       // 撇号不影响判定
+        assert!(is_latin_only("hello world")); // 空格同理
+        assert!(is_latin_only("well-known"));
+
+        // 非拉丁书写系统 → false
+        assert!(!is_latin_only("开心"));
+        assert!(!is_latin_only("たべる"));
+        assert!(!is_latin_only("カタカナ"));
+        assert!(!is_latin_only("먹다"));
+        assert!(!is_latin_only("привет"));
+        assert!(!is_latin_only("مرحبا"));
+        assert!(!is_latin_only("สวัสดี"));
+        assert!(!is_latin_only("γράμμα"));
+
+        // 一个字母都没有 → 无从判断，不能当成拉丁词
+        assert!(!is_latin_only("123"));
+        assert!(!is_latin_only(""));
+        assert!(!is_latin_only("---"));
+    }
+
+    /// 非拉丁语言表：只拦「字形上不可能」的语言，拉丁语言之间不拦。
+    #[test]
+    fn non_latin_lang_table_is_exclusive_only_where_provable() {
+        for l in ["zh", "ja", "ko", "ru", "ar", "hi", "th", "el", "he"] {
+            assert!(is_non_latin_lang(l), "{} 是非拉丁书写系统，应判为互斥", l);
+        }
+        // 英/法/德/西 等都是拉丁字母，无法靠字形排除，必须交回用户选择
+        for l in ["en", "fr", "de", "es", "it", "pt", "vi", "tr", "nl"] {
+            assert!(!is_non_latin_lang(l), "{} 是拉丁书写系统，不该被拦截", l);
+        }
+        // 大小写与区域码
+        assert!(is_non_latin_lang("ZH"));
+        assert!(is_non_latin_lang("zh-CN"));
+        assert!(is_non_latin_lang("zh_TW"));
+        assert!(!is_non_latin_lang(""));
+    }
+
+    /// 两个判定组合起来，才构成「reality + 中文方向 → 纠正为英语」的依据。
+    #[test]
+    fn latin_word_conflicts_with_chinese_direction() {
+        // 会触发纠正：用户选了中文，但词是纯拉丁字母
+        assert!(is_non_latin_lang("zh") && is_latin_only("reality"));
+        // 不触发：词本身是中文
+        assert!(!(is_non_latin_lang("zh") && is_latin_only("现实")));
+        // 不触发：用户选法语时不纠正 —— 拉丁语言之间字形无法区分
+        assert!(!(is_non_latin_lang("fr") && is_latin_only("realite")));
+    }
+
+    /// 源代码里 `sourceLabel` 的 id 映射键必须与内置源的 id 一一对应，
+    /// 否则界面上会直接露出 `youdao-newhh` 这种原始 id。
+    /// 这里只做「内置源 id 有中文名可查」的守门（前端映射表见 ui.js）。
+    #[test]
+    fn builtin_source_ids_are_stable() {
+        let ids: Vec<String> = builtin::default_sources().iter().map(|s| s.id.clone()).collect();
+        for expect in ["free-dictionary", "wiktionary", "youdao-suggest",
+                       "youdao-jsonapi", "youdao-newhh"] {
+            assert!(ids.iter().any(|i| i == expect), "内置源 id 变了：{}", expect);
+        }
     }
 
     /// 有道 jsonapi 的 `newhh` / `ce` 两段能被正确归一化出中文释义。

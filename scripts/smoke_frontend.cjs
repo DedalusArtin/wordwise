@@ -1348,6 +1348,39 @@ const cases = [
     }
     return '';
   }],
+  ['来源标签：内置源 id 都有中文名，不会把 youdao-newhh 这种 id 直接露给用户', () => {
+    const U = sandbox.WW;
+    const ids = [
+      'free-dictionary', 'wiktionary', 'youdao-suggest', 'youdao-jsonapi',
+      'youdao-newhh', 'libre-translate', 'lmstudio', 'builtin-seed',
+    ];
+    for (const id of ids) {
+      const label = U.sourceLabel(id);
+      if (!label) throw new Error('来源 ' + id + ' 没有中文名');
+      // 回归点：映射表漏了 youdao-newhh / youdao-jsonapi 时，
+      // 界面上会渲染成「中文 youdao-newhh」，用户完全读不懂。
+      if (label === id) throw new Error('来源 ' + id + ' 缺映射，界面会露出原始 id');
+    }
+    if (U.sourceLabel('youdao-newhh') !== '现代汉语规范词典') {
+      throw new Error('youdao-newhh 的中文名不对');
+    }
+    return '';
+  }],
+
+  ['音标标注：英语词标「英/美」并加斜杠（reality 曾被当成中文标成「拼音」）', () => {
+    const U = sandbox.WW;
+    const en = U.phoneticHtml({ lang: 'en', phonetic: { uk: 'riˈæləti' } });
+    if (!en.includes('/riˈæləti/')) throw new Error('英语音标应该用斜杠括起来');
+    if (!en.includes('英')) throw new Error('英语音标应标「英」');
+    if (en.includes('拼音')) throw new Error('英语音标被标成了「拼音」——语言判定串了');
+
+    // 中文词反过来：标「拼音」且**不加**斜杠
+    const zh = U.phoneticHtml({ lang: 'zh', phonetic: { uk: 'nǐ hǎo' } });
+    if (!zh.includes('拼音')) throw new Error('中文词该标「拼音」');
+    if (zh.includes('/nǐ hǎo/')) throw new Error('拼音不该用斜杠括起来');
+    return '';
+  }],
+
   ['查词判定：启发式解析成功 → 数据来源标注「启发式解析」', async () => {
     const API = sandbox.WordWiseAPI.API;
     const orig = API.lookup;

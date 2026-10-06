@@ -246,6 +246,11 @@ function sourceLabel(id) {
     'free-dictionary': 'Free Dictionary',
     'wiktionary': 'Wiktionary',
     'youdao-suggest': '有道',
+    // 下面两个和有道的 suggest 接口同域名，但来源 id 不同。
+    // 不补进映射表的话界面上会直接露出 `youdao-newhh` 这种 id ——
+    // 用户看到的是「中文 youdao-newhh」，完全读不懂。
+    'youdao-jsonapi': '有道释义',
+    'youdao-newhh': '现代汉语规范词典',
     'libre-translate': 'LibreTranslate',
     'lmstudio': '本地大模型',
     'builtin-seed': '内置词库',

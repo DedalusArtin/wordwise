@@ -486,7 +486,24 @@ pub async fn cmd_lookup(
             (d, Some(note))
         }
         // 检测不出（英/法/德/西… 都是拉丁字母）：尊重用户选择
-        (None, Some(r)) => (r, None),
+        (None, Some(r)) => {
+            // 但有一条**脚本排他性**规则高于用户选择：纯拉丁字母的词不可能
+            // 是中文 / 日文 / 韩文 / 俄文。典型现场 —— 方向选成「中文 → 英语」
+            // 后输入 `reality`，硬按中文查会命中《现代汉语规范词典》这个中文
+            // 专用源，释义全落空、音标还被标成「拼音」，也就是「明显是英文却
+            // 识别成中文」。这里纠正为英语并如实说明。
+            // 法语 / 德语 / 西语等拉丁语言之间无法靠字形区分，仍然尊重用户。
+            if crate::dict::is_non_latin_lang(&r) && crate::dict::is_latin_only(&word) {
+                let note = format!(
+                    "检测到输入的是拉丁字母词汇，已按{}查询（方向里的源语言是{}）",
+                    crate::translate::lang_name("en"),
+                    crate::translate::lang_name(&r)
+                );
+                ("en".to_string(), Some(note))
+            } else {
+                (r, None)
+            }
+        }
     };
 
     if force_refresh.unwrap_or(false) {
