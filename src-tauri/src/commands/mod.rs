@@ -555,6 +555,142 @@ pub async fn cmd_lookup(
     Ok(result)
 }
 
+/// 目标语言侧最多取几个候选对应词回查词典。
+///
+/// 译义词有了crow、rook、raven 三个候选，全查一遍既慢又乱；
+/// 取 3 个已经能覆盖「crow 或者其他能表示乌鸦的单词」这类需求。
+const MAX_PAIRS: usize = 3;
+
+/// 双向词条：取回**目标语言侧**的对应词及其完整词条。
+///
+/// 用户需求原文：
+/// > 「这里我是中文转英文，应该下面详细介绍的是 crow 或者其他能表示乌鸦的单词」
+/// > 「仿照有道词典两者都有，不然我输入英文的时候没有英文解释对吧，还有其他语言也要类似」
+///
+/// 流程：`翻译（源 → 目标）` → `拿主译文 + 候选译法` → `并发按目标语言查词典`。
+///
+/// 两端的操作都由 `dict::lookup_multi` 完成，所以对任意语言对都成立
+/// （中→英拿到 crow 的英文详解，英→中拿到「现实」的中文详解），
+/// 而不是为某一种语言写死的特例。
+///
+/// ★ 失败语义：**这里永远不返回 Err**。翻译失败、联网失败、目标语言里查不到，
+/// 都只是「这次没有对应词条」，主词条是完整的。返回 Err 会让前端把它当成
+/// 「查词失败」弹红字，那正是用户抱怨过的「明明查到了却报失败」。
+#[tauri::command]
+pub async fn cmd_lookup_pairs(
+    state: State<'_, Arc<AppState>>,
+    word: String,
+    from: Option<String>,
+    to: Option<String>,
+    already_translated: Option<String>,
+    already_alternatives: Option<Vec<String>>,
+) -> Result<Vec<dict::PairEntry>, String> {
+    let cfg = state.cfg();
+    let word = word.trim().to_string();
+    if word.is_empty() {
+        return Ok(vec![]);
+    }
+
+    let from = from
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| cfg.source_lang.trim().to_string());
+    let to = to
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| cfg.target_lang.trim().to_string());
+
+    // 同语言就没什么「对应词」可言：主词条本身已经是目标语言的内容了
+    if from.is_empty() || to.is_empty() || from == to {
+        return Ok(vec![]);
+    }
+
+    // 1) 候选对应词。
+    //
+    // 前端往往**已经**为了「词级译文」翻过一次（有道接口限频很严，同一个
+    // 656 字符内的词再来一次请求极易撞上 429/411）。所以允许把现成译文传进来，
+    // 传了就直接用，绝不再打一次翻译接口；没传才自己去翻。
+    let mut cands: Vec<String> = Vec::new();
+    if let Some(t) = already_translated {
+        for c in std::iter::once(t).chain(already_alternatives.unwrap_or_default()) {
+            let c = c.trim().to_string();
+            if !c.is_empty() && !cands.iter().any(|x| x.eq_ignore_ascii_case(&c)) {
+                cands.push(c);
+            }
+        }
+    } else {
+        match translate::translate_core(&state, &word, &from, &to, false).await {
+            Ok(t) => {
+                for c in std::iter::once(t.text).chain(t.alternatives) {
+                    let c = c.trim().to_string();
+                    if !c.is_empty() && !cands.iter().any(|x| x.eq_ignore_ascii_case(&c)) {
+                        cands.push(c);
+                    }
+                }
+            }
+            Err(e) => {
+                eprintln!("[pairs] 取对应词失败（{} → {}）：{}", from, to, e);
+                return Ok(vec![]);
+            }
+        }
+    }
+    cands.truncate(MAX_PAIRS);
+    if cands.is_empty() {
+        return Ok(vec![]);
+    }
+
+    // 3) 并发按目标语言回查词典。
+    //
+    // 串行跑会把「单次查询预算 × 候选数」累加成用户肉眼可见的等待
+    // （3 个候选 × 8 秒 = 半分钟），所以这里一次性放出去。
+    let proxy_active = !state.proxy_info().is_direct();
+    let timeout = cfg.network.lookup_timeout_secs.clamp(3, 30);
+    let http = state.http();
+    let srcs = cfg.dict_sources.clone();
+
+    let jobs = cands.iter().enumerate().map(|(i, c)| {
+        let http = http.clone();
+        let srcs = srcs.clone();
+        let to = to.clone();
+        let c = c.clone();
+        async move {
+            let mut tr = Vec::new();
+            let got =
+                dict::lookup_multi(&c, &to, &srcs, &http, timeout, 0, proxy_active, &mut tr).await;
+            (i, c, got)
+        }
+    });
+
+    let mut out: Vec<dict::PairEntry> = Vec::new();
+    for (i, c, got) in futures_util::future::join_all(jobs).await {
+        let Some((mut e, _)) = got else { continue };
+        if !dict::is_meaningful(&e) {
+            continue; // 翻译出了词，但目标语言词典里查不到有效内容
+        }
+        // 词头优先用词典自己给出的规范形式：翻译接口常常返回首字母大写的
+        // 「Crow」，直接拿来当词头会让用户以为这是个专有名词。
+        // 词典没给出时才退回译文原文。
+        let headword = if e.word.trim().is_empty() {
+            c.clone()
+        } else {
+            e.word.trim().to_string()
+        };
+        e.word = headword.clone();
+        e.lang = to.clone();
+        out.push(dict::PairEntry {
+            word: headword,
+            lang: to.clone(),
+            entry: e,
+            via: if i == 0 {
+                "translation".to_string()
+            } else {
+                "alternative".to_string()
+            },
+        });
+    }
+    Ok(out)
+}
+
 /// 输入联想。
 #[tauri::command]
 pub async fn cmd_suggest(

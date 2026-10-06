@@ -122,6 +122,18 @@ const API = {
   // 查词搜索
   lookup: (word, lang, forceRefresh) =>
     invoke('cmd_lookup', { word, lang: lang || null, forceRefresh: !!forceRefresh }),
+  // 双向词条：目标语言侧的对应词及其完整词条（[{ word, lang, entry, via }]）。
+  // 失败一律返回空数组，绝不抛错 —— 没有对应词不等于查词失败。
+  // translated / alternatives 是「已经翻译过了」的意思：查词页的「词级译文」
+  // 会把结果递过来，避免同一个限频很严的翻译接口被打两次。
+  lookupPairs: (word, from, to, translated, alternatives) =>
+    invoke('cmd_lookup_pairs', {
+      word,
+      from: from || null,
+      to: to || null,
+      alreadyTranslated: translated || null,
+      alreadyAlternatives: alternatives && alternatives.length ? alternatives : null,
+    }),
   suggest: (query, lang) => invoke('cmd_suggest', { query, lang: lang || null }),
   search: (query, lang, withWiki) =>
     invoke('cmd_search', { query, lang: lang || null, withWiki: withWiki !== false }),
@@ -589,6 +601,7 @@ const Mock = (() => {
                    from_cache: false, from_llm: false, trace: [] };
         }
         case 'cmd_suggest': return [];
+        case 'cmd_lookup_pairs': return [];
         case 'cmd_search': return { query: args.query, suggestions: [], wiki: null };
         case 'cmd_wiki': return null;
         case 'cmd_dict_links': {

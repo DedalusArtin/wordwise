@@ -74,6 +74,30 @@ pub struct SourceTrace {
     pub elapsed_ms: i64,
 }
 
+/// 双向词条的「另一条腿」：**目标语言侧**的对应词及其完整词条。
+///
+/// 为什么需要它（用户需求原文）：
+/// > 「这里我是中文转英文，应该下面详细介绍的是 crow 或者其他能表示乌鸦的单词」
+/// > 「仿照有道词典两者都有，不然我输入英文的时候没有英文解释对吧，还有其他语言也要类似」
+///
+/// 查「乌鸦」只能拿到中文释义，但用户真正要学的是「乌鸦用目标语言怎么说、
+/// 那个词怎么读、怎么用」。所以这里必须**先翻译出对应词，再按目标语言查一次
+/// 词典**，把完整的英文（或日文、法文…）词条拿回来。这条规则对任意
+/// (源语言, 目标语言) 都成立，不限于中→英。
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct PairEntry {
+    /// 对应词原文，如 `crow`
+    pub word: String,
+    /// 对应词的语言，如 `en`
+    pub lang: String,
+    /// 该词在目标语言下的完整词条
+    pub entry: WordEntry,
+    /// 这个对应词是怎么来的：
+    /// - `translation` 主译文（翻译接口给出的首选译法）
+    /// - `alternative` 其他候选译法
+    pub via: String,
+}
+
 /// 按字符所属书写系统猜测查询词的语言。
 ///
 /// 为什么需要它：界面上的语言下拉只能表达「我打算查哪种语言」，
@@ -457,7 +481,10 @@ fn strip_markup(s: &str) -> String {
 ///
 /// 这是**匹配式**（`FieldMapping` 精确取值）的合格线。达不到不一定是失败，
 /// 见下面的 `is_presentable`。
-fn is_meaningful(e: &WordEntry) -> bool {
+///
+/// 暴露给命令层的原因：`cmd_lookup_pairs`（双向词条）要拿它筛掉
+/// 「翻译出了候选词，但候选词在目标语言里查不到东西」的空结果。
+pub fn is_meaningful(e: &WordEntry) -> bool {
     !e.senses.is_empty() || !e.phonetic.uk.is_empty() || !e.related.is_empty()
 }
 
@@ -1295,8 +1322,11 @@ pub async fn lookup_multi(
                     elapsed_ms: elapsed,
                 });
                 hit_sources.push(cfg.name.clone());
+                // ★ 用 `merge_from_source` 而不是 `merge_from`：后者对 senses
+                // 是「先到先得」，会把慢一步返回的**另一种语言**的释义整段丢掉。
+                // 现场后果就是「查英文词永远只有中文释义、没有英文解释」。
                 match &mut merged {
-                    Some(m) => m.merge_from(e),
+                    Some(m) => m.merge_from_source(e),
                     None => merged = Some(e),
                 }
             }
@@ -1325,6 +1355,12 @@ pub async fn lookup_multi(
         }
     }
 
+    // 合并顺序是按「源优先级」走的，而优先级最高的恰是英英源，
+    // 于是英文释义会排在中文前面。而结果卡 / 详情卡 / 学习卡片的默认释义
+    // 都假设「第一条是母语释义」，这里统一纠正回来。
+    if let Some(m) = merged.as_mut() {
+        m.order_senses_local_first();
+    }
     merged.map(|m| (m, hit_sources))
 }
 

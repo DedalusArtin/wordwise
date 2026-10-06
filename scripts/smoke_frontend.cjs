@@ -1736,6 +1736,78 @@ const cases = [
     return sandbox.Study.state.recent.length + ' 条';
   }],
 
+  // ---- 双向词条（目标语言侧的对应词） ----
+  ['双向词条：中英两种释义都在且不混排（输入英文也要有英文解释）', () => {
+    const e = {
+      word: 'apple', lang: 'en',
+      senses: [
+        { pos: 'n.', definition: '苹果 n. 苹果树', examples: [] },
+        { pos: 'n.', definition: 'A common, round fruit.', examples: [] },
+      ],
+      phonetic: {}, source: 'youdao-suggest+free-dictionary',
+    };
+    const html = WW.renderEntry(e);
+    // 分组标题：母语组「释义」+ 原文组「英语释义」，顺序是母语在前
+    const iZ = html.indexOf('>释义<');
+    const iE = html.indexOf('英语释义');
+    if (iZ < 0) throw new Error('缺「释义」分组标题');
+    if (iE < 0) throw new Error('缺「英语释义」分组标题（这正是用户报的「没有英文解释」）');
+    if (iE < iZ) throw new Error('英文释义不该排在中文释义前面');
+    if (!html.includes('苹果')) throw new Error('中文释义被丢掉了');
+    if (!html.includes('A common, round fruit.')) throw new Error('英文释义被丢掉了');
+    return '';
+  }],
+  ['双向词条：只有一种语言的释义时不硬凑第二块', () => {
+    const html = WW.renderEntry({
+      word: '开心', lang: 'zh',
+      senses: [{ pos: '形容词', definition: '心情愉快；高兴', examples: [] }],
+      phonetic: {},
+    });
+    if ((html.match(/we-section-title/g) || []).length !== 1) {
+      throw new Error('只有一组释义时不该画出第二个分组标题：' + html);
+    }
+    return '';
+  }],
+  ['双向词条：中文词条的分组标题不该写成「中文释义」这种废话', () => {
+    const html = WW.renderEntry({
+      word: '乌鸦', lang: 'zh',
+      senses: [
+        { pos: '名', definition: '一种鸟', examples: [] },
+        { pos: 'n.', definition: 'a large black bird', examples: [] },
+      ],
+      phonetic: {},
+    });
+    if (html.includes('中文释义')) throw new Error('不该用「中文释义」做 sidebar 标题');
+    if (!html.includes('参考释义')) throw new Error('原文组应当落在「参考释义」下');
+    return '';
+  }],
+  ['双向词条：对应词卡片按 via 标主译/其他译法，词头可点击查词', () => {
+    const html = WW.renderPairs([
+      { word: 'crow', lang: 'en', via: 'translation',
+        entry: { word: 'crow', lang: 'en', senses: [{ pos: 'n.', definition: 'a large black bird', examples: [] }], phonetic: { uk: '/kroʊ/' }, source: 'free-dictionary' } },
+      { word: 'rook', lang: 'en', via: 'alternative',
+        entry: { word: 'rook', lang: 'en', senses: [{ pos: 'n.', definition: 'a large black bird', examples: [] }], phonetic: {}, source: 'free-dictionary' } },
+    ]);
+    if (!html.includes('pair-card')) throw new Error('没画出对应词卡片');
+    if (!html.includes('主译')) throw new Error('首选译法没标「主译」');
+    if (!html.includes('其他译法')) throw new Error('候选译法没标「其他译法」');
+    if (!html.includes('data-word="crow"')) throw new Error('词头不能点击就没法单独查询');
+    if (!html.includes('>英语<')) throw new Error('缺语言标签');
+    if (!html.includes('/kroʊ/')) throw new Error('缺英文音标');
+    // 卡片里不应重复画大词头（标题上已经有一次了）
+    if (html.includes('class="we-word"')) throw new Error('卡片内重复画了 we-word 大词头');
+    return '';
+  }],
+  ['双向词条：没有对应词时 renderPairs 返回空串（不画空壳）', () => {
+    if (WW.renderPairs([]) !== '') throw new Error('空数组应当返回空串');
+    if (WW.renderPairs(null) !== '') throw new Error('null 应当返回空串');
+    // 只有 cnt 没有 entry 的脏数据也要滤掉
+    if (WW.renderPairs([{ word: 'x', lang: 'en', via: 'translation' }]) !== '') {
+      throw new Error('缺 entry 的脏数据应当被滤掉');
+    }
+    return '';
+  }],
+
   // ---- 整应用启动链路 ----
   ['App.init()', () => sandbox.App.init()],
   ['Settings.load()', () => sandbox.Settings.load()],

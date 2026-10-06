@@ -78,11 +78,31 @@ pub async fn cmd_translate(
         });
     }
 
+    translate_core(&state, &text, &from, &to, force.unwrap_or(false)).await
+}
+
+/// 翻译正文（不含 tauri 命令外壳）。
+///
+/// 抽出来的目的是给「双向词条」（`cmd_lookup_pairs`）复用同一条三级链路
+/// 与同一份缓存 —— 否则查「乌鸦」时，界面顶部 Already 已经在调用
+/// `cmd_translate` 拿译文，另一侧又各自发一次请求，同一个限频很严的接口
+/// 会被白白打两次，更快撞上限流。
+///
+/// 调用方必须**先确认 `from != to`**，本函数不再重复判断。
+pub async fn translate_core(
+    state: &Arc<AppState>,
+    text: &str,
+    from: &str,
+    to: &str,
+    force: bool,
+) -> Result<TranslateResult, String> {
+    let text = text.trim().to_string();
+    let cfg = state.cfg();
     let now = timeutil::now_ts();
-    let key = cache_key(&from, &to, &text);
+    let key = cache_key(from, to, &text);
 
     // ---- 1) 本地缓存 ----
-    if !force.unwrap_or(false) {
+    if !force {
         if let Ok(Some(json)) = state.db.get_trans_cache(&key, CACHE_TTL, now) {
             if let Ok(mut cached) = serde_json::from_str::<TranslateResult>(&json) {
                 cached.from_cache = true;

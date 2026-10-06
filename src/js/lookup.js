@@ -930,8 +930,14 @@ const Lookup = (() => {
 
     loadDictLinks(res.word, res.lang);
 
-    // 词级译文（需求 2）：与词典查询并行，不阻塞上面已经画好的词条
-    loadWordTranslation(res);
+    // 词级译文（需求 2）：与词典查询并行，不阻塞上面已经画好的词条。
+    //
+    // 译完之后再交给「双向词条」当**种子**：它有道接口限频很严，
+    // 两个功能各自去翻一次会平白多一次请求，还容易撞上 429。
+    // 翻译失败也照样往下走 —— 对应词条自己会补一次翻译。
+    loadWordTranslation(res)
+      .then(seed => loadPairs(res, seed))
+      .catch(() => loadPairs(res, null));
 
     // 自动开始讲解（若开启）
     if (study.ai_explain !== false) {
@@ -996,12 +1002,90 @@ const Lookup = (() => {
           window.Speak.playTts(t.text, t.to, 0, 'lk-trans');
         }
       });
+
+      // 把译文往外递，给「双向词条」当种子，省得它再去打一次翻译接口
+      return { translated: t.text, alternatives: alts };
     } catch (e) {
-      if (my !== transSeq) return;
+      if (my !== transSeq) return null;
       // 翻译失败不该影响已经渲染好的词条，安静地隐藏即可
       box.innerHTML = '';
       box.classList.add('hidden');
       console.warn('[lookup] 词级译文获取失败', e);
+      return null;
+    }
+  }
+
+  /** 双向词条的拉取序号：新查询会作废上一次还没回来的请求。 */
+  let pairsSeq = 0;
+
+  /**
+   * 双向词条：**目标语言侧的对应词及其完整词条**。
+   *
+   * 用户场景（原话）：「这里我是中文转英文，应该下面详细介绍的是 crow
+   * 或者其他能表示乌鸦的单词」「仿照有道词典两者都有，还有其他语言也要类似」。
+   *
+   * 主词条给的是「乌鸦」的中文解释，但用户真正要学的是「乌鸦用英语怎么说、
+   * crow 怎么读、怎么用」。所以这里再按目标语言回查一次词典，把 crow 这类
+   * 候选译法的完整词条挂到主卡片下面。
+   *
+   * `seed` 由「词级译文」那一步顺手递过来（`{ translated, alternatives }`）：
+   * 翻译接口限频很严，同一条链路里不发第二遍请求。
+   *
+   * 与主查询并行发出、且**失败一律静默**：没有对应词只是少一块内容，
+   * 主词条本身是完整的，不该弹出任何错误。
+   */
+  async function loadPairs(res, seed = null) {
+    const box = document.getElementById('lk-pairs');
+    const D = window.DirPicker;
+    if (!box || !D || !res) return;
+
+    // 目标语言与词条语言相同 → 主词条已经是目标语言的了，没有「对应词」可言
+    const to = D.to;
+    if (!to || res.lang === to) {
+      box.innerHTML = '';
+      box.classList.add('hidden');
+      return;
+    }
+
+    box.classList.remove('hidden');
+    box.innerHTML = U().loadingHtml('正在查询对应词条…');
+
+    const my = ++pairsSeq;
+    try {
+      const pairs = await API.lookupPairs(
+        res.word,
+        res.lang,
+        to,
+        seed && seed.translated ? seed.translated : null,
+        seed && seed.alternatives ? seed.alternatives : null,
+      );
+      if (my !== pairsSeq) return;
+      if (!pairs || !pairs.length) {
+        box.innerHTML = '';
+        box.classList.add('hidden');
+        return;
+      }
+
+      box.innerHTML = U().renderPairs(pairs, {
+        showInflections: true,
+        showExamples: true,
+        showPhonetic: true,
+      });
+
+      // 对应词卡里的词头可点击单独查询
+      box.querySelectorAll('.pair-word.clickable').forEach(el => {
+        el.addEventListener('click', () => query(el.dataset.word));
+      });
+      // 卡内的变形词条也要能点（沿用主卡片的 class）
+      box.querySelectorAll('.infl-form.clickable').forEach(f => {
+        f.addEventListener('click', () => query(f.dataset.word));
+      });
+      U().speakBind(box);
+    } catch (e) {
+      if (my !== pairsSeq) return;
+      box.innerHTML = '';
+      box.classList.add('hidden');
+      console.warn('[lookup] 对应词条获取失败', e);
     }
   }
 
@@ -1032,13 +1116,17 @@ const Lookup = (() => {
     // 读音只是它下面的附属标注。查询后由 loadWordTranslation 填充。
     const transBox = '<div id="lk-trans" class="lk-trans hidden"></div>';
 
+    // 双向词条容器：目标语言侧的对应词详解（「乌鸦」→ crow / rook / raven 的完整英文词条）。
+    // 查询后由 loadPairs 填充 —— 与主词条并行拉取，绝不拖慢主结果的出现。
+    const pairsBox = '<div id="lk-pairs" class="lk-pairs hidden"></div>';
+
     box.innerHTML = langNote + degradeNote + transBox + U().renderEntry(res.entry, {
       showInflections: study.show_inflections !== false,
       showExamples: study.show_examples !== false,
       showRelated: study.show_related === true,
       showMnemonic: study.show_mnemonic !== false,
       showPhonetic: study.show_phonetic !== false,
-    }) + '<div id="lk-dictlinks" class="we-section"></div>' + srcLine + `
+    }) + pairsBox + '<div id="lk-dictlinks" class="we-section"></div>' + srcLine + `
     <div class="btn-row" style="margin-top:16px">
       <button class="primary-btn sm" id="lk-ai">AI 讲解</button>
       <button class="ghost-btn sm" id="lk-add">加入词库</button>

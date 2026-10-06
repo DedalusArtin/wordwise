@@ -141,6 +141,9 @@ function renderEntry(entry, opts = {}) {
     showRelated: false,
     showMnemonic: true,
     showPhonetic: true,
+    // 头部只画音标与来源标签、不重复画大词头（双向词条的对应卡片用它，
+    // 因为词头已经画在卡片标题上了，再来一遍就是加倍冗余）
+    compactHead: false,
     ...opts,
   };
   if (!entry) return '<div class="empty-state"><p>无内容</p></div>';
@@ -150,7 +153,9 @@ function renderEntry(entry, opts = {}) {
 
   // 头部：词 + 音标 + 来源标签
   parts.push('<div class="we-head">');
-  parts.push(`<div class="we-word">${esc(entry.word)}</div>`);
+  if (!o.compactHead) {
+    parts.push(`<div class="we-word">${esc(entry.word)}</div>`);
+  }
 
   if (o.showPhonetic) {
     // 统一走 phoneticHtml：语言标注、斜杠规则、IPA 字体都只有一份实现。
@@ -167,27 +172,28 @@ function renderEntry(entry, opts = {}) {
   if (tags.length) parts.push(`<div class="we-src">${tags.join('')}</div>`);
   parts.push('</div>');
 
-  // 释义
+  // 释义：按「这段释文本身是哪种语言写的」分组。
+  //
+  // 为什么要分组而不是混着画：同一个英语词，有道给中文释义、
+  // freedictionaryapi 给英英释义，两条都要留下（用户原话——「仿照有道词典
+  // 两者都有，不然我输入英文的时候没有英文解释对吧」）。但混进一条列表里
+  // 读起来是「中文、英文、中文…」来回跳。有道词典的做法是拆成「释义」与
+  // 「英英释义」两块，这里沿用：母语组在前（用户一眼能读），原文组在后。
   const senses = entry.senses || [];
+  const [localSenses, nativeSenses] = splitSensesByScript(senses);
+
   if (senses.length) {
-    parts.push('<div class="we-section">');
-    parts.push('<div class="we-section-title">释义</div>');
-    for (const s of senses) {
-      parts.push('<div class="sense">');
-      if (s.pos) parts.push(`<div class="sense-pos">${esc(s.pos)}</div>`);
-      parts.push('<div class="sense-def">');
-      parts.push(esc(s.definition));
-      if (o.showExamples && s.examples && s.examples.length) {
-        for (const ex of s.examples.slice(0, 3)) {
-          parts.push('<div class="sense-ex">');
-          parts.push(esc(ex.text));
-          if (ex.translation) parts.push(`<div class="ex-zh">${esc(ex.translation)}</div>`);
-          parts.push('</div>');
-        }
-      }
-      parts.push('</div></div>');
+    if (localSenses.length && nativeSenses.length) {
+      parts.push(senseGroup('释义', localSenses, o));
+      // 原文组的小标题跟着词条语言走：「乌鸦」的原文组本身就是中文，
+      // 标题写成「中文释义」既奇怪又和上一块重复
+      const title = langLabel(entry.lang || '') === '中文' ? '参考释义' : `${langLabel(entry.lang || '')}释义`;
+      parts.push(senseGroup(title, nativeSenses, o));
+    } else if (localSenses.length) {
+      parts.push(senseGroup('释义', localSenses, o));
+    } else {
+      parts.push(senseGroup('释义', nativeSenses, o));
     }
-    parts.push('</div>');
   } else {
     parts.push('<div class="we-section"><div class="muted">暂无释义，可点击「AI 讲解」让本地模型生成。</div></div>');
   }
@@ -225,6 +231,89 @@ function renderEntry(entry, opts = {}) {
     }
   }
 
+  parts.push('</div>');
+  return parts.join('');
+}
+
+/** 一段释义里有没有汉字 —— 用来区分「母语释义」与「原文释义」。 */
+function hasHan(s) {
+  return /[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]/.test(s || '');
+}
+
+/**
+ * 把义项按「释文写成的语言」分成两组。
+ *
+ * @returns {[Array, Array]} `[母语写成的一组, 原文写成的一组]`，任一组可能为空
+ */
+function splitSensesByScript(senses) {
+  const local = [];
+  const native = [];
+  for (const s of (senses || [])) {
+    (hasHan(s.definition) ? local : native).push(s);
+  }
+  return [local, native];
+}
+
+/** 画一组义项（`renderEntry` 与 `renderPairs` 共用，保证版式一致）。 */
+function senseGroup(title, senses, opts = {}) {
+  const parts = ['<div class="we-section">'];
+  parts.push(`<div class="we-section-title">${esc(title)}</div>`);
+  for (const s of senses) {
+    parts.push('<div class="sense">');
+    if (s.pos) parts.push(`<div class="sense-pos">${esc(s.pos)}</div>`);
+    parts.push('<div class="sense-def">');
+    parts.push(esc(s.definition));
+    if (opts.showExamples !== false && s.examples && s.examples.length) {
+      for (const ex of s.examples.slice(0, 3)) {
+        parts.push('<div class="sense-ex">');
+        parts.push(esc(ex.text));
+        if (ex.translation) parts.push(`<div class="ex-zh">${esc(ex.translation)}</div>`);
+        parts.push('</div>');
+      }
+    }
+    parts.push('</div></div>');
+  }
+  parts.push('</div>');
+  return parts.join('');
+}
+
+/**
+ * 渲染「双向词条」的另一半：目标语言侧的对应词及其完整词条。
+ *
+ * 用户需求原文：「这里我是中文转英文，应该下面详细介绍的是 crow 或者
+ * 其他能表示乌鸦的单词」「仿照有道词典两者都有，还有其他语言也要类似」。
+ *
+ * 所以「乌鸦」的主卡片下面是 crow / rook / raven 这几个候选译法各自的
+ * 完整英文词条（英文音标、英文释义、词形变化），而不只是一串词。
+ *
+ * @param {Array} pairs [{ word, lang, entry, via }]
+ */
+function renderPairs(pairs, opts = {}) {
+  const list = (pairs || []).filter(p => p && p.entry);
+  if (!list.length) return '';
+
+  const parts = ['<div class="pair-block">'];
+  parts.push('<div class="pair-block-title">对应词汇</div>');
+  parts.push(`<div class="pair-hint muted">下面是在${esc(langLabel(list[0].lang))}里表示这个词的说法，点击词头可单独查询</div>`);
+  for (const p of list) {
+    parts.push('<div class="pair-card">');
+    parts.push('<div class="pair-card-head">');
+    parts.push(`<span class="pair-word clickable" data-word="${esc(p.word)}">${esc(p.word)}</span>`);
+    parts.push(`<span class="tag blue">${esc(langLabel(p.lang))}</span>`);
+    parts.push(p.via === 'translation'
+      ? '<span class="tag ok">主译</span>'
+      : '<span class="tag">其他译法</span>');
+    parts.push('</div>');
+    parts.push(renderEntry(p.entry, {
+      compactHead: true,
+      showInflections: opts.showInflections !== false,
+      showExamples: opts.showExamples !== false,
+      showRelated: false,
+      showMnemonic: false,
+      showPhonetic: opts.showPhonetic !== false,
+    }));
+    parts.push('</div>');
+  }
   parts.push('</div>');
   return parts.join('');
 }
@@ -674,7 +763,7 @@ function renderPlainText(s) {
 window.WW = window.WW || {};
 Object.assign(window.WW, {
   esc, toast, loadingHtml, renderEntry, collectExamples, sourceLabel, langLabel,
-  splitRelated, phoneticHtml,
+  splitRelated, phoneticHtml, renderPairs, senseGroup, splitSensesByScript, hasHan,
   renderMarkdown, renderPlainText, fmtDay, timeAgo, masteryClass, renderBarChart, switchDetailTab, debounce,
   attachListSearch, speakBtn, isTypingTarget,
   speak: (word, opts) => (window.Speak ? window.Speak.speak(word, opts) : null),

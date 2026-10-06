@@ -40,6 +40,7 @@ fn build_invoke_handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync +
         commands::cmd_set_explain_lang,
         // 查词与搜索
         commands::cmd_lookup,
+        commands::cmd_lookup_pairs,
         commands::cmd_suggest,
         commands::cmd_search,
         commands::cmd_wiki,

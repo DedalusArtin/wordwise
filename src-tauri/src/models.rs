@@ -100,6 +100,12 @@ fn contains_han(s: &str) -> bool {
         .any(|c| matches!(c as u32, 0x3400..=0x4DBF | 0x4E00..=0x9FFF | 0xF900..=0xFAFF))
 }
 
+/// 一条词条最多保留多少个义项。
+///
+/// 多源合并会累积义项（见 [`WordEntry::merge_from_source`]），如果不设上限，
+/// 一个源抽风吐出几十条垃圾释义就会把详情卡撑爆，甚至把正常释义挤到屏幕外。
+pub const MAX_SENSES: usize = 16;
+
 impl WordEntry {
     pub fn new(word: impl Into<String>) -> Self {
         Self {
@@ -107,6 +113,79 @@ impl WordEntry {
             lang: "en".to_string(),
             ..Default::default()
         }
+    }
+
+    /// 多源聚合专用：在 [`WordEntry::merge_from`] 的基础上**保住多语言的义项**。
+    ///
+    /// 为什么必须单独有一条：用户实测反馈「我输入英文的时候没有英文解释」。
+    /// 根因就在多源合并——同一个英语词，`youdao-suggest` 给中文释义、
+    /// `freedictionaryapi` 给英英释义，而旧的 `merge_from` 对 `senses` 是
+    /// **先到先得**（`if self.senses.is_empty()`）。国内直连时有道几乎总是
+    /// 先回来，于是英英释义被整段丢掉，用户永远看不到英文解释。
+    ///
+    /// 有道词典的做法是「中文释义 + 英英释义都给」，这也是用户明确要的：
+    /// 「仿照有道词典两者都有，还有其他语言也要类似」。所以这里按**语言**
+    /// 而不是按「是否已填满」决定要不要收：母语（中文）释义一组、原文释义
+    /// 一组，两组并存，前端据此分组渲染。
+    ///
+    /// 去重按归一化文本（去空白与常见分隔杂符），同一句不同来源只留一条；
+    /// 总量超过 [`MAX_SENSES`] 后停止追加，保证详情卡不会被单个源撑爆。
+    pub fn merge_from_source(&mut self, other: WordEntry) {
+        let incoming = other.senses.clone();
+        self.merge_from(other);
+        self.absorb_senses(incoming);
+    }
+
+    /// 把一组义项并入 `self`，重复的跳过，超出上限就停。
+    fn absorb_senses(&mut self, incoming: Vec<Sense>) {        let key = |s: &str| -> String {
+            s.trim()
+                .to_lowercase()
+                .chars()
+                .filter(|c| !c.is_whitespace() && !matches!(c, '；' | ';' | '，' | ',' | '。' | '.' | '、'))
+                .collect()
+        };
+
+        let mut seen: Vec<String> = self.senses.iter().map(|s| key(&s.definition)).collect();
+        for s in incoming {
+            if self.senses.len() >= MAX_SENSES {
+                break;
+            }
+            if s.definition.trim().is_empty() {
+                continue;
+            }
+            let k = key(&s.definition);
+            if k.is_empty() || seen.iter().any(|x| x == &k) {
+                continue;
+            }
+            seen.push(k);
+            self.senses.push(s);
+        }
+    }
+
+    /// 把「母语写成的释义」排到前面，**组内保持原有顺序**。
+    ///
+    /// 为什么必须在后端做：`lookup_multi` 是按**源优先级**合并的，而优先级
+    /// 最高的恰是英英源（freedictionaryapi=10，有道=30）。合并后英文释义会
+    /// 排在中文前面，于是：
+    ///   - 默认偏好（`definition_in("")` 取第一条）的学习卡片会开始显示英文；
+    ///   - 详情与结果卡的「释义」区块第一条也会变成英文。
+    /// 对一个中文用户来说这就是「查英文词反而看不懂了」。所以排序单独钉一步。
+    ///
+    /// 「母语」只认汉字 —— 与 [`contains_han`] 同一套判定，UI 语言的多语言化
+    /// 属于配置层的事，先把「中文在前」这个默认行为落成明确规则。
+    pub fn order_senses_local_first(&mut self) {
+        let mut out = Vec::with_capacity(self.senses.len());
+        for s in self.senses.iter() {
+            if contains_han(&s.definition) {
+                out.push(s.clone());
+            }
+        }
+        for s in self.senses.iter() {
+            if !contains_han(&s.definition) {
+                out.push(s.clone());
+            }
+        }
+        self.senses = out;
     }
 
     /// 合并另一个词条的信息进来，用于「多源补全」：
@@ -1157,5 +1236,92 @@ mod tests {
 
         let none = entry_with(&[("n.", "   ")]);
         assert_eq!(none.definition_in("zh"), "");
+    }
+
+    // ================================================================
+    // 多源合并：两种语言的释义都要留下来
+    // ================================================================
+
+    /// 这是「输入英文时没有英文解释」的根因守门测试。
+    ///
+    /// 用户实测反馈的现场：查 apple 时有道先回来给了中文释义，旧的
+    /// `merge_from` 对 senses 是「先到先得」，于是慢一步的英英释义被整段丢掉。
+    /// 用户明确要求「仿照有道词典两者都有」，所以合并后两组必须**同时存在**。
+    #[test]
+    fn merging_two_sources_keeps_both_scripts() {
+        let mut a = entry_with(&[("n.", "苹果")]);
+        let b = entry_with(&[("n.", "A common, round fruit.")]);
+        a.merge_from_source(b);
+
+        assert_eq!(a.senses.len(), 2, "中英两组释义都要留下：{:?}", a.senses);
+        assert_eq!(a.senses[0].definition, "苹果");
+        assert_eq!(a.senses[1].definition, "A common, round fruit.");
+        // 注：两组的**分组展示**在前端做（ui.js 的 splitSensesByScript），
+        // 后端只负责不丢东西 —— 判断逻辑放一处，免得两边改出不一致。
+    }
+
+    /// 同一句释义在不同源里重复出现时只留一条。
+    #[test]
+    fn merging_deduplicates_identical_definitions() {
+        let mut a = entry_with(&[("n.", "苹果")]);
+        let b = entry_with(&[("n.", "苹果"), ("v.", "结果实")]);
+        a.merge_from_source(b);
+        assert_eq!(a.senses.len(), 2, "重复的「苹果」不该出现两次：{:?}", a.senses);
+        // 大小写 / 空白 / 结尾标点不同也视为同一条
+        let mut c = entry_with(&[("n.", "Apple pie")]);
+        let d = entry_with(&[("n.", "  apple pie。  ")]);
+        c.merge_from_source(d);
+        assert_eq!(c.senses.len(), 1);
+    }
+
+    /// 单个源吐出几十条垃圾释义时，合并必须有上限，不能把详情卡撑爆。
+    #[test]
+    fn merging_caps_total_senses() {
+        let mut a = entry_with(&[("n.", "苹果")]);
+        let many: Vec<Sense> = (0..40)
+            .map(|i| Sense {
+                pos: "n.".into(),
+                definition: format!("垃圾释义 {i}"),
+                examples: vec![],
+            })
+            .collect();
+        let b = WordEntry { senses: many, ..WordEntry::new("apple") };
+        a.merge_from_source(b);
+        assert_eq!(a.senses.len(), MAX_SENSES, "义项总量必须封顶");
+        assert_eq!(a.senses[0].definition, "苹果", "原有释义不能被挤掉");
+    }
+
+    /// 合并后母语释义必须在第一条：学习卡片默认取 `senses[0]`，
+    /// 一旦被英英释义占住，背单词的题面就变成了「看英文选中文」的反面。
+    #[test]
+    fn ordering_puts_local_definitions_first() {
+        let mut a = entry_with(&[
+            ("n.", "A common, round fruit."),
+            ("n.", "denoting something beloved"),
+            ("n.", "苹果"),
+        ]);
+        a.order_senses_local_first();
+        assert_eq!(
+            a.senses.iter().map(|s| s.definition.clone()).collect::<Vec<_>>(),
+            vec!["苹果", "A common, round fruit.", "denoting something beloved"],
+            "母语释义要排到最前，其余保持原有相对顺序"
+        );
+        // 没有母语释义时保持原样
+        let mut b = entry_with(&[("n.", "one"), ("n.", "two")]);
+        b.order_senses_local_first();
+        assert_eq!(b.senses[0].definition, "one");
+    }
+
+    /// 其它字段仍然是「先到先得」：主源给过的音标不该被次源覆盖。
+    #[test]
+    fn merging_still_prefers_the_first_source_for_other_fields() {
+        let mut a = entry_with(&[("n.", "苹果")]);
+        a.phonetic.uk = "/ˈæp.əl/".into();
+        let mut b = entry_with(&[("n.", "A fruit.")]);
+        b.phonetic.uk = "/WRONG/".into();
+        a.merge_from_source(b);
+        assert_eq!(a.phonetic.uk, "/ˈæp.əl/");
+        // 来源标记要累加，前端靠它显示「数据来自哪些源」
+        assert!(a.source.contains("+") || a.source.is_empty());
     }
 }
