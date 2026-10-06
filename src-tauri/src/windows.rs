@@ -164,6 +164,16 @@ fn build_invoke_handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync +
         commands::update::cmd_open_update_dir,
         commands::update::cmd_update_prefs,
         commands::update::cmd_set_update_prefs,
+        // 朗读（本地 Piper 神经语音）：状态 / 装引擎 / 装语音包 / 合成
+        commands::tts::cmd_tts_status,
+        commands::tts::cmd_tts_install_engine,
+        commands::tts::cmd_tts_install_voice,
+        commands::tts::cmd_tts_remove_voice,
+        commands::tts::cmd_tts_cancel,
+        commands::tts::cmd_tts_prefs,
+        commands::tts::cmd_set_tts_prefs,
+        commands::tts::cmd_tts_speak,
+        commands::tts::cmd_tts_clear_cache,
         // 窗口
         sidebar_show,
         sidebar_hide,

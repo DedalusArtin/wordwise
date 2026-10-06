@@ -127,6 +127,65 @@ const Speak = (() => {
     return refreshVoices().map(v => ({ name: v.name, lang: v.lang, local: !!v.localService }));
   }
 
+  /* ---------------- 朗读引擎策略 ---------------- */
+
+  /*
+    三条通道并存，按偏好决定用哪条：
+      ① 词典真人音频 URL —— 永远最高优先，有录音就没理由去合成
+      ② 本地神经语音（后端 Piper）—— 离线，音质接近微软 Neural
+      ③ 系统语音（WebView speechSynthesis）—— 兜底，永远可用
+
+    偏好存在 localStorage 而不是每次去问后端：发音是高频操作，而且
+    点击必须**同步**开始处理，不能在 await 里错过用户手势带来的播放许可。
+    设置页加载时会用后端值覆盖它（见 Refresh.pullFromBackend）。
+  */
+  const LS_ENGINE = 'ww.tts.engine';
+  const ENGINES = ['auto', 'local', 'online', 'system'];
+
+  function enginePref() {
+    const v = lsGet(LS_ENGINE);
+    return ENGINES.includes(v) ? v : 'auto';
+  }
+  function setEnginePref(v) {
+    lsSet(LS_ENGINE, ENGINES.includes(v) ? v : 'auto');
+  }
+
+  /** 本地语音当前是否可用（后端有引擎且至少装了一条语音包）。 */
+  let localReady = false;
+  function setLocalReady(v) { localReady = !!v; }
+  function isLocalReady() { return localReady; }
+
+  /**
+   * 用后端本地引擎合成并播放。
+   *
+   * 返回 Promise<boolean>：true = 已经接手播放（或已确定不需要回退），
+   * false = 需要调用方回退到系统语音。**不吞异常**是刻意的 —— 任何一步
+   * 出问题都回退系统语音，绝不让用户点了没声音。
+   */
+  function playLocalTts(text, lang, accent, rate, key) {
+    const API = (window.WordWiseAPI && window.WordWiseAPI.API) || null;
+    if (!API || typeof API.ttsSpeak !== 'function') return Promise.resolve(false);
+    if (!localReady) return Promise.resolve(false);
+
+    return API.ttsSpeak(text, lang, accent)
+      .then((res) => {
+        if (!res || !res.audio) return false;
+        // 合成期间用户可能已经点了别的词 —— 那就别出声了
+        if (currentKey !== key) return true;
+        if (!audioEl) audioEl = new Audio();
+        audioEl.src = res.audio;
+        speaking = true;
+        audioEl.onended = () => { speaking = false; };
+        audioEl.onerror = () => { speaking = false; };
+        const p = audioEl.play();
+        if (p && p.catch) {
+          return p.then(() => true).catch(() => { speaking = false; return false; });
+        }
+        return true;
+      })
+      .catch(() => false);
+  }
+
   /* ---------------- 朗读 ---------------- */
 
   /**
@@ -155,9 +214,19 @@ const Speak = (() => {
 
     if (audioUrl) {
       playUrl(audioUrl, key, { lang, accent, rate });
-    } else {
-      playTts(text, lang, rate, key, { accent, pitch: opts.pitch });
+      return;
     }
+
+    // 词典没给真人音频 → 按偏好选合成通道。
+    // 「系统语音」是显式选择，直接走 WebView；其余（auto / local / online）
+    // 都先试本地引擎，失败再回退系统语音 —— 回退是无声的，用户不需要知道。
+    if (enginePref() === 'system') {
+      playTts(text, lang, rate, key, { accent, pitch: opts.pitch });
+      return;
+    }
+    playLocalTts(text, lang, accent, rate, key).then((handled) => {
+      if (!handled) playTts(text, lang, rate, key, { accent, pitch: opts.pitch });
+    });
   }
 
   /**
@@ -336,6 +405,7 @@ const Speak = (() => {
     speak, speakText, preview, stop, resolve, btnHtml, bindDelegate, bcp47,
     playUrl, playTts, voices, availableLang,
     voicePref, setVoicePref, ratePref, setRatePref, resetPrefs,
+    enginePref, setEnginePref, setLocalReady, isLocalReady, playLocalTts,
   };
 })();
 

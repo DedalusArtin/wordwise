@@ -914,6 +914,9 @@ pub struct AppConfig {
     /// 网络与代理
     #[serde(default)]
     pub network: NetworkConfig,
+    /// 朗读（TTS）引擎与语音包设置
+    #[serde(default)]
+    pub tts: TtsConfig,
     /// 配置结构版本。`None` / 低于 [`CONFIG_VERSION`] 表示是旧配置，
     /// 需要跑一次迁移（见 `dict::builtin::migrate_config`）。
     ///
@@ -1016,6 +1019,46 @@ impl Default for AppConfig {
             // 默认检查更新：单次请求很小，且任何失败都只降级成一行文案
             check_update_on_start: true,
             skip_update_version: String::new(),
+            tts: TtsConfig::default(),
+        }
+    }
+}
+
+/// 朗读（TTS）引擎设置。
+///
+/// 三种发声通道并存，按 [`TtsConfig::engine`] 决定优先级：
+/// - **本地神经语音**（Piper）：离线、音质接近微软 Neural，需先下载引擎与语音包；
+/// - **在线神经语音**（edge-tts）：音质最好，但每次发音都要联网；
+/// - **系统语音**（WebView 内置 `speechSynthesis`）：永远可用的兜底。
+///
+/// 词典自带的真人音频 URL 优先级**始终最高**，不受这里影响 —— 有真人录音
+/// 时没有任何理由去合成。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TtsConfig {
+    /// 引擎策略：`auto` / `local` / `online` / `system`。
+    ///
+    /// `auto` = 本地可用就用本地，否则在线，再否则系统。默认 `auto`，
+    /// 这样用户下载了语音包之后**不需要再去改设置**就自动生效。
+    pub engine: String,
+    /// 本地语音 id（如 `en_US-amy-medium`）。空串表示「按词条语言自动挑」。
+    pub voice_local: String,
+    /// 在线语音短名（如 `en-US-AriaNeural`）。空串表示按语言自动挑。
+    pub voice_online: String,
+    /// 语速倍率，0.5~2.0。
+    pub rate: f32,
+    /// 是否在设置页显示「语音包体积」这类细节（默认显示）。
+    pub verbose: bool,
+}
+
+impl Default for TtsConfig {
+    fn default() -> Self {
+        Self {
+            engine: "auto".to_string(),
+            voice_local: String::new(),
+            voice_online: String::new(),
+            rate: 0.95,
+            verbose: true,
         }
     }
 }

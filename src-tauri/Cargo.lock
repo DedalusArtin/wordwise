@@ -5421,6 +5421,7 @@ name = "wordwise"
 version = "0.41.0"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
  "chrono",
  "dirs 5.0.1",
  "futures-util",

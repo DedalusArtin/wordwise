@@ -807,15 +807,43 @@
           </div>
         </div>
 
-        <!-- 朗读（多语种发音） -->
+        <!-- 朗读（本地神经语音 / 在线 / 系统语音三通道） -->
         <div class="panel">
           <h3 class="panel-title">朗读与发音</h3>
           <p class="muted">
-            朗读使用系统内置语音：<b>离线可用、点下去立即出声</b>，不联网、不弹窗。
-            想要更自然的声音，可在「Windows 设置 → 时间和语言 → 语音」里安装额外的
-            语音包（含 Natural/Online 神经网络音色），装好后这里会自动多出可选音色。
+            词典自带真人录音时<b>永远优先播录音</b>。没有录音时按下面选的引擎合成：
+            <b>本地神经语音</b>离线可用、音质接近微软 Neural，需先下载语音包；
+            <b>系统语音</b>永远可用但音质一般（多为 Windows 自带的旧版音色）。
           </p>
-          <label class="field"><span>音色</span>
+
+          <label class="field"><span>朗读引擎</span>
+            <select id="set-tts-engine">
+              <option value="auto">自动（推荐）· 本地优先，不可用时回退系统语音</option>
+              <option value="local">本地神经语音 · 离线、音质好</option>
+              <option value="online">在线神经语音 · 音质最好，需联网</option>
+              <option value="system">系统语音 · 内置兜底，音质一般</option>
+            </select>
+          </label>
+
+          <!-- 本地语音包管理 -->
+          <div class="tts-box" id="tts-box">
+            <div class="tts-box-head">
+              <b>本地语音包</b>
+              <span class="muted" id="tts-state">正在检查…</span>
+            </div>
+            <div class="tts-engine-row" id="tts-engine-row">
+              <button class="ghost-btn sm" id="btn-tts-install-engine">下载语音引擎</button>
+              <span class="muted" id="tts-engine-hint"></span>
+            </div>
+            <div id="tts-voice-list" class="tts-voice-list"></div>
+            <div class="llm-progress hidden" id="tts-progress">
+              <div class="llm-progress-bar"><div class="llm-progress-fill" id="tts-progress-fill"></div></div>
+              <div class="llm-progress-text" id="tts-progress-text"></div>
+            </div>
+            <p class="muted" id="tts-hint" style="margin-top:8px"></p>
+          </div>
+
+          <label class="field"><span>系统音色</span>
             <select id="set-speak-voice"></select>
           </label>
           <div class="option-row">
@@ -826,6 +854,7 @@
           </div>
           <div class="option-row">
             <button class="ghost-btn sm" id="btn-speak-test">试听</button>
+            <button class="ghost-btn sm" id="btn-tts-clear-cache">清理语音缓存</button>
             <button class="ghost-btn sm" id="btn-speak-reset">恢复默认</button>
           </div>
           <p class="muted" id="set-speak-voices-hint"></p>

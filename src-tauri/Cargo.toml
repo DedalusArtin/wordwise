@@ -63,6 +63,14 @@ zip = { version = "2", default-features = false, features = ["deflate"] }
 # 才能把问题拦在启动安装程序之前。
 sha2 = "0.10"
 
+# 本地语音合成（TTS）的音频回传
+#
+# piper 生成的是 WAV 文件。这里没有把文件路径交给前端用 asset:// 去取，
+# 而是直接 base64 塞进 IPC 返回 —— 因为数据目录在「便携模式」下会紧贴
+# exe，而 asset 协议的 scope 只覆盖 APPDATA，那边取不到。一个单词的 WAV
+# 约 40~90 KB，走 IPC 完全无压力。
+base64 = "0.22"
+
 # 工具库
 anyhow = "1"
 thiserror = "2"

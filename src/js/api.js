@@ -356,6 +356,27 @@ const API = {
   // 更新包下载进度也是后端主动推的事件（与本地模型部署分开，互不覆盖）
   onUpdateProgress: (fn) => listen('update://progress', fn),
 
+  // 朗读（本地 Piper 神经语音）
+  ttsStatus: () => invoke('cmd_tts_status'),
+  ttsInstallEngine: () => invoke('cmd_tts_install_engine'),
+  ttsInstallVoice: (voiceId) => invoke('cmd_tts_install_voice', { voiceId }),
+  ttsRemoveVoice: (voiceId) => invoke('cmd_tts_remove_voice', { voiceId }),
+  ttsCancel: () => invoke('cmd_tts_cancel'),
+  ttsPrefs: () => invoke('cmd_tts_prefs'),
+  setTtsPrefs: (opts) => invoke('cmd_set_tts_prefs', {
+    engine: (opts && opts.engine != null) ? String(opts.engine) : null,
+    voiceLocal: (opts && opts.voiceLocal != null) ? String(opts.voiceLocal) : null,
+    voiceOnline: (opts && opts.voiceOnline != null) ? String(opts.voiceOnline) : null,
+    rate: (opts && typeof opts.rate === 'number') ? opts.rate : null,
+  }),
+  ttsSpeak: (text, lang, accent) => invoke('cmd_tts_speak', {
+    text, lang: lang || null, accent: accent || null,
+  }),
+  ttsClearCache: () => invoke('cmd_tts_clear_cache'),
+  // 语音包下载进度（与更新、本地模型三条流各自独立）
+  onTtsProgress: (fn) => listen('tts://progress', fn),
+  onTtsDone: (fn) => listen('tts://done', fn),
+
   // 窗口
   sidebarShow: () => invoke('sidebar_show'),
   sidebarHide: () => invoke('sidebar_hide'),
@@ -1279,6 +1300,50 @@ const Mock = (() => {
           skip_version: store.config.skip_update_version || '',
           message: '已保存（调试模式）',
         };
+
+      // ---- 朗读（TTS）：调试模式下假装引擎没装，好把「下载引导」这套 UI 走通 ----
+      case 'cmd_tts_status': {
+        const t = store.config.tts || (store.config.tts = { engine: 'auto', voice_local: '', voice_online: '', rate: 0.95 });
+        return {
+          engine_ready: false,
+          engine_bytes: 22477236,
+          engine_size_text: '21 MB',
+          engine_path: '(调试模式)\\tts\\piper\\piper.exe',
+          voices_dir: '(调试模式)\\tts\\voices',
+          models_dir: '(调试模式)',
+          installed: [],
+          voices: [
+            { id: 'en_US-amy-medium', label: 'Amy · 美式女声', lang: 'en', accent: 'us', gender: 'female', quality: 'medium', bytes: 63201294, size_text: '60 MB', preset: true, installed: false },
+            { id: 'en_GB-alba-medium', label: 'Alba · 英式女声', lang: 'en', accent: 'gb', gender: 'female', quality: 'medium', bytes: 63201294, size_text: '60 MB', preset: false, installed: false },
+            { id: 'zh_CN-huayan-medium', label: '华言 · 中文女声', lang: 'zh', accent: '', gender: 'female', quality: 'medium', bytes: 63201294, size_text: '60 MB', preset: false, installed: false },
+            { id: 'zh_CN-huayan-x_low', label: '华言 · 中文女声（小体积 20MB）', lang: 'zh', accent: '', gender: 'female', quality: 'x_low', bytes: 20628813, size_text: '20 MB', preset: false, installed: false },
+          ],
+          config: t,
+        };
+      }
+      case 'cmd_tts_install_engine':
+        return { ok: true, already: false, files: 42, message: '调试模式：不会真的下载引擎' };
+      case 'cmd_tts_install_voice':
+        return { ok: true, id: args.voiceId, message: '调试模式：不会真的下载语音包' };
+      case 'cmd_tts_remove_voice':
+        return { ok: true, message: '已删除（调试模式）' };
+      case 'cmd_tts_cancel':
+        return true;
+      case 'cmd_tts_prefs':
+        return store.config.tts || { engine: 'auto', voice_local: '', voice_online: '', rate: 0.95 };
+      case 'cmd_set_tts_prefs': {
+        const t = store.config.tts || (store.config.tts = { engine: 'auto', voice_local: '', voice_online: '', rate: 0.95 });
+        if (args.engine != null) t.engine = String(args.engine);
+        if (args.voiceLocal != null) t.voice_local = String(args.voiceLocal);
+        if (args.voiceOnline != null) t.voice_online = String(args.voiceOnline);
+        if (typeof args.rate === 'number') t.rate = args.rate;
+        return { ok: true };
+      }
+      case 'cmd_tts_clear_cache':
+        return { ok: true, removed: 0, freed: '0 KB' };
+      case 'cmd_tts_speak':
+        // 调试模式没有引擎 → 明确抛错，让前端走系统语音回退这条路径
+        throw new Error('调试模式没有本地语音引擎');
       default:
         if (cmd.startsWith('sidebar_') || cmd === 'main_show') return true;
         return null;

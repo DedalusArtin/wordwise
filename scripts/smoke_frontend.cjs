@@ -1409,6 +1409,45 @@ const cases = [
     return '';
   }],
 
+  ['朗读：引擎偏好默认 auto、可切换、坏值回落（localStorage 脏数据不能把发音搞哑）', () => {
+    const S = sandbox.Speak;
+    S.setEnginePref('bogus-value');
+    if (S.enginePref() !== 'auto') throw new Error('非法引擎值该回落 auto，而不是原样存下去');
+    S.setEnginePref('local');
+    if (S.enginePref() !== 'local') throw new Error('切换本地引擎没生效');
+    if (S.isLocalReady() !== false) throw new Error('默认不该认为本地语音可用');
+    S.setLocalReady(true);
+    if (S.isLocalReady() !== true) throw new Error('setLocalReady 没生效');
+    S.setEnginePref('auto');
+    return '';
+  }],
+
+  ['朗读：本地引擎不可用 / 后端合成失败时，playLocalTts 都返回 false 触发回退', async () => {
+    const S = sandbox.Speak;
+    // ① 引擎没装 → 连后端都不用问
+    S.setLocalReady(false);
+    const a = await S.playLocalTts('hello', 'en', 'us', 0.95, 'k1');
+    if (a !== false) throw new Error('本地不可用时应返回 false，让调用方走系统语音');
+    // ② 引擎可用但后端报错 → 同样必须回退，绝不能静默失败让按钮变哑巴
+    S.setLocalReady(true);
+    const b = await S.playLocalTts('hello', 'en', 'us', 0.95, 'k2');
+    if (b !== false) throw new Error('后端合成失败时应返回 false');
+    S.setLocalReady(false);
+    return '';
+  }],
+
+  ['朗读设置：引擎没装时语音包按钮禁用并提示先装引擎（否则下完 60MB 仍发不出声）', async () => {
+    await sandbox.Settings.loadTts();
+    const list = elById('tts-voice-list').innerHTML;
+    const state = elById('tts-state').textContent || '';
+    if (!String(list).includes('en_US-amy-medium')) throw new Error('语音清单没渲染出来');
+    if (!String(list).includes('disabled')) throw new Error('引擎未装时下载按钮该禁用');
+    if (!String(state).includes('未安装')) throw new Error('状态文案没说明引擎未安装');
+    const hint = elById('tts-hint').textContent || '';
+    if (!String(hint).includes('先下载语音引擎')) throw new Error('缺少「先装引擎」的引导文案');
+    return '';
+  }],
+
   // ---- AI 讲解：存档 / 并入词库 ----
   ['讲解：渲染「并入词库」与「查看原文」，且后者用 class 绑（原来用 id 点不动）', () => {
     const pane = elById('dc-pane-ai');

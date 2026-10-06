@@ -13,6 +13,7 @@
 //! - `state`    应用共享状态
 //! - `commands` Tauri 命令层
 //! - `seed`     内置示例词库
+//! - `tts`      本地语音合成（Piper 引擎托管 + 语音包按需下载）
 //! - `timeutil` 系统时间工具
 
 pub mod commands;
@@ -29,6 +30,7 @@ pub mod srs;
 pub mod state;
 pub mod timeutil;
 pub mod translate;
+pub mod tts;
 pub mod windows;
 
 /// 库入口：供 main.rs 调用。

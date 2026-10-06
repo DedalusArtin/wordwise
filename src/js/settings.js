@@ -178,6 +178,8 @@ const Settings = (() => {
 
     // 朗读音色/语速（存在 localStorage，不属于后端配置）
     loadSpeak();
+    // 本地语音包与引擎状态（要读后端，异步渲染）
+    loadTts();
   }
 
   function setVal(id, v) {
@@ -758,6 +760,11 @@ const Settings = (() => {
       const label = document.getElementById('set-speak-rate-val');
       if (label) label.textContent = `${r.toFixed(2)}×`;
       S().setRatePref(r);   // 拖动即生效，不用再点保存
+      // 本地引擎的语速在后端配置里，拖动时防抖写一次（每动一下就 IPC 太浪费）
+      clearTimeout(ttsRateTimer);
+      ttsRateTimer = setTimeout(() => {
+        API.setTtsPrefs({ rate: r }).catch(() => { /* 落盘失败不影响本次会话 */ });
+      }, 400);
     });
 
     document.getElementById('btn-speak-test')?.addEventListener('click', () => {
@@ -775,6 +782,184 @@ const Settings = (() => {
       try {
         window.speechSynthesis.onvoiceschanged = () => renderSpeakVoices();
       } catch (e) { /* 忽略 */ }
+    }
+  }
+
+  /* ---- 本地神经语音（Piper）：引擎与语音包 ---- */
+
+  /*
+    两条硬约束决定了这里的交互：
+      1. 语音包不小（20~120 MB），所以下载全程必须有进度，不能只有一个转圈；
+      2. 引擎没装时**必须禁用**语音包的下载按钮 —— 否则用户下完 60 MB 语音包
+         仍然发不出声，还会以为功能坏了。
+  */
+  let ttsProgressUnlisten = null;
+  let ttsRateTimer = null;
+
+  function ttsEl(id) { return document.getElementById(id); }
+
+  function humanSize(n) {
+    const f = Number(n) || 0;
+    if (f >= 1048576) return `${(f / 1048576).toFixed(1)} MB`;
+    return `${Math.round(f / 1024)} KB`;
+  }
+
+  function ttsShowProgress(p) {
+    const wrap = ttsEl('tts-progress');
+    const fill = ttsEl('tts-progress-fill');
+    const text = ttsEl('tts-progress-text');
+    if (!wrap) return;
+    wrap.classList.remove('hidden');
+    if (fill) {
+      // percent < 0 = 总长未知，给个来回动的状态，别停在 0% 让人以为卡死
+      fill.style.width = p.percent >= 0 ? `${Math.min(100, p.percent).toFixed(1)}%` : '35%';
+      fill.classList.toggle('unknown', p.percent < 0);
+    }
+    if (text) {
+      const size = p.total ? `${humanSize(p.got)} / ${humanSize(p.total)}` : humanSize(p.got);
+      text.textContent = [p.message, p.percent >= 0 ? size : '', p.speed].filter(Boolean).join(' · ');
+    }
+  }
+
+  function ttsHideProgress() {
+    ttsEl('tts-progress')?.classList.add('hidden');
+  }
+
+  /** 拉后端状态并渲染语音包清单。 */
+  async function loadTts() {
+    const box = ttsEl('tts-voice-list');
+    if (!box || !API.ttsStatus) return;
+    let st;
+    try {
+      st = await API.ttsStatus();
+    } catch (e) {
+      box.innerHTML = `<p class="muted">读取语音包状态失败：${U().esc(String((e && e.message) || e))}</p>`;
+      return;
+    }
+    if (!st) return;
+
+    const installed = st.installed || [];
+    const engineOk = !!st.engine_ready;
+    // 把「本地能不能用」同步给发音模块：不可用时 speak() 直接走系统语音，
+    // 不必每次点喇叭都去后端撞一次墙再回退。
+    if (window.Speak && window.Speak.setLocalReady) {
+      window.Speak.setLocalReady(engineOk && installed.length > 0);
+    }
+
+    const stateEl = ttsEl('tts-state');
+    if (stateEl) {
+      stateEl.textContent = !engineOk
+        ? '未安装语音引擎'
+        : (installed.length ? `已安装 ${installed.length} 个语音包` : '引擎就绪，尚未安装语音包');
+    }
+
+    const engRow = ttsEl('tts-engine-row');
+    if (engRow) engRow.classList.toggle('hidden', engineOk);
+    const engHint = ttsEl('tts-engine-hint');
+    if (engHint) engHint.textContent = `引擎约 ${st.engine_size_text || ''}，只需下载一次，所有语音包共用`;
+
+    box.innerHTML = (st.voices || []).map((v) => {
+      const act = v.installed
+        ? `<span class="tag ok">已安装</span>`
+          + `<button class="ghost-btn xs" data-tts-remove="${U().esc(v.id)}">删除</button>`
+        : `<button class="ghost-btn xs" data-tts-install="${U().esc(v.id)}"${engineOk ? '' : ' disabled'}>`
+          + `下载 ${U().esc(v.size_text || '')}</button>`;
+      const meta = [
+        U().langLabel(v.lang),
+        v.accent ? String(v.accent).toUpperCase() : '',
+        v.size_text || '',
+        v.preset ? '预置' : '',
+      ].filter(Boolean).join(' · ');
+      return `<div class="tts-voice-row">
+        <div class="tts-voice-main"><b>${U().esc(v.label)}</b><span class="muted">${U().esc(meta)}</span></div>
+        <div class="tts-voice-act">${act}</div>
+      </div>`;
+    }).join('') || '<p class="muted">没有可用的语音清单。</p>';
+
+    const hint = ttsEl('tts-hint');
+    if (hint) {
+      hint.textContent = engineOk
+        ? '语音包按需下载，不随安装包分发；换语言学习时再装对应那条即可。'
+        : '请先下载语音引擎，之后才能安装具体语种的语音包。';
+    }
+
+    const sel = ttsEl('set-tts-engine');
+    if (sel && st.config) {
+      const e = st.config.engine || 'auto';
+      sel.value = e;
+      if (window.Speak && window.Speak.setEnginePref) window.Speak.setEnginePref(e);
+    }
+  }
+
+  function bindTts() {
+    const sel = ttsEl('set-tts-engine');
+    sel?.addEventListener('change', async () => {
+      const e = sel.value || 'auto';
+      // 先落内存偏好：发音是高频操作，不能等 IPC 回来才生效
+      if (window.Speak && window.Speak.setEnginePref) window.Speak.setEnginePref(e);
+      try {
+        await API.setTtsPrefs({ engine: e });
+      } catch (err) { /* 落盘失败也不影响本次会话 */ }
+      U().toast('朗读引擎已切换', 'ok');
+    });
+
+    // 语音包列表是重渲染的，所以用事件委托而不是逐个绑定
+    ttsEl('tts-voice-list')?.addEventListener('click', async (ev) => {
+      const ins = ev.target.closest('[data-tts-install]');
+      const del = ev.target.closest('[data-tts-remove]');
+      if (ins) {
+        const id = ins.getAttribute('data-tts-install');
+        ins.disabled = true;
+        try {
+          const r = await API.ttsInstallVoice(id);
+          U().toast((r && r.message) || '语音包已安装', 'ok');
+        } catch (e) {
+          U().toast('语音包下载失败：' + String((e && e.message) || e), 'err');
+        } finally {
+          loadTts();
+        }
+      } else if (del) {
+        const id = del.getAttribute('data-tts-remove');
+        try {
+          await API.ttsRemoveVoice(id);
+          U().toast('已删除语音包', 'ok');
+        } catch (e) {
+          U().toast('删除失败：' + String((e && e.message) || e), 'err');
+        }
+        loadTts();
+      }
+    });
+
+    ttsEl('btn-tts-install-engine')?.addEventListener('click', async () => {
+      const btn = ttsEl('btn-tts-install-engine');
+      if (btn) btn.disabled = true;
+      try {
+        const r = await API.ttsInstallEngine();
+        U().toast((r && r.message) || '语音引擎已就绪', 'ok');
+      } catch (e) {
+        U().toast('引擎安装失败：' + String((e && e.message) || e), 'err');
+      } finally {
+        if (btn) btn.disabled = false;
+        loadTts();
+      }
+    });
+
+    ttsEl('btn-tts-clear-cache')?.addEventListener('click', async () => {
+      try {
+        const r = await API.ttsClearCache();
+        U().toast(`已清理 ${(r && r.removed) || 0} 个语音缓存（${(r && r.freed) || '0 KB'}）`, 'ok');
+      } catch (e) {
+        U().toast('清理失败', 'err');
+      }
+    });
+
+    // 进度订阅只订一次（面板每次进入都会重新 bind）
+    if (!ttsProgressUnlisten && API.onTtsProgress) {
+      Promise.resolve(API.onTtsProgress((p) => {
+        if (!p) return;
+        ttsShowProgress(p);
+        if (p.stage === 'done' || p.stage === 'failed') setTimeout(ttsHideProgress, 1600);
+      })).then((un) => { ttsProgressUnlisten = un; }).catch(() => { /* 订阅失败不影响手动下载 */ });
     }
   }
 
@@ -818,11 +1003,12 @@ const Settings = (() => {
     });
 
     bindSpeak();
+    bindTts();
   }
 
   return {
     bind, load, save,
-    renderSpeakVoices, loadSpeak,
+    renderSpeakVoices, loadSpeak, loadTts,
     // 预设表与识别函数也导出：冒烟测试要能直接断言「选某家带出什么地址」，
     // 而不是靠解析 DOM 里的 option 文本去猜
     presets: AI_PRESETS,
