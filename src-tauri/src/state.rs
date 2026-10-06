@@ -27,6 +27,12 @@ pub struct Session {
     pub started_at: i64,
     /// 是否仅强化记忆词
     pub leech_only: bool,
+    /// 本轮每个词已被「答错回插」的次数（键按小写归一）。
+    ///
+    /// 为什么要有上限：没有它的话，一个怎么都记不住的词会被无限回插，
+    /// 用户就会卡在同一个词上出不去（死亡循环）。上限见 `commands` 里的
+    /// `MAX_REQUEUE_PER_WORD`。
+    pub requeue_counts: std::collections::HashMap<String, u32>,
     /// 题面释义使用哪种语言：`"zh"` 中文 / `"src"` 原文 / 空 = 不限
     ///
     /// 由前端按**所选词库的语言**下发（背日语教材时就该给中文释义），
@@ -58,6 +64,13 @@ pub struct AppState {
     /// 当前生效的代理解析结果，供界面如实展示
     proxy: RwLock<crate::net::ProxyResolution>,
     pub session: RwLock<Session>,
+    /// **复习会话**：与背诵会话彻底分开的两个槽位（需求 14）。
+    ///
+    /// 之前只有一个槽位，于是「开始今日复习」会把正在进行的背诵整体覆写，
+    /// 反过来也一样：两个入口互相摧毁。更要命的是复习会被补足到
+    /// `batch_size`，而入口按钮显示的是「今天到期 + 错词」的真实数量
+    /// （比如 12），点进去却变成 20 —— 数字对不上。
+    pub review: RwLock<Session>,
     /// 学习数据、模型、备份的落点
     pub data_dir: PathBuf,
     /// 上面这个目录是**怎么选出来的**（设置页要如实说明，
@@ -107,12 +120,21 @@ impl AppState {
         // 启动时如实打一行日志，方便用户/我们判断「到底走没走代理」
         log::info!("WordWise 网络：{}", proxy.describe());
 
+        // 一次性语言修复迁移（需求 16）：纠正历史上被错标语言的内置词库。
+        // 放在这里而不是各命令里，是因为它必须在**任何读写词的命令之前**跑完，
+        // 且桌面端与移动端都走这个构造函数，不会漏掉一端。
+        // 迁移自身会打印修了几行；这里只在失败时提醒一句。
+        if let Err(e) = db.fix_builtin_book_langs(&crate::dict::importer::builtin_book_langs()) {
+            log::warn!("词库语言修复迁移失败（不影响本次运行）：{e}");
+        }
+
         Ok(Arc::new(Self {
             db,
             config: RwLock::new(config),
             http: RwLock::new(http),
             proxy: RwLock::new(proxy),
             session: RwLock::new(Session::default()),
+            review: RwLock::new(Session::default()),
             data_dir,
             data_dir_source,
         }))
@@ -140,6 +162,22 @@ impl AppState {
     /// 取配置快照（克隆一份，避免长时间持锁）。
     pub fn cfg(&self) -> AppConfig {
         self.config.read().clone()
+    }
+
+    /// 按 `kind` 选择会话槽位：缺省 / `"study"` → 背诵槽；`"review"` → 复习槽。
+    ///
+    /// 把「选哪个槽」收敛成一个函数，是因为有 6 个命令都要做这个判断；
+    /// 各写一遍 `if kind == "review"` 迟早有人写漏一处，那一处就会继续
+    /// 串到另一个会话里去。
+    ///
+    /// 无法识别的取值一律当 `"study"`：宁可退回旧行为，也不要因为前端多传了
+    /// 一个没约定的值就让命令失败。
+    pub fn session_slot(&self, kind: Option<&str>) -> &RwLock<Session> {
+        if kind == Some("review") {
+            &self.review
+        } else {
+            &self.session
+        }
     }
 
     /// 更新配置并持久化。

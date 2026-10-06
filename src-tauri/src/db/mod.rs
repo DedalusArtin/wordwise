@@ -509,6 +509,31 @@ impl Db {
         }
     }
 
+    /// 按词形取词条，**不限语言**；多条时取释义最完整的那条。
+    ///
+    /// ★ 为什么需要它：`study_state` 记录的语言可能与词条实际所在的语言不一致。
+    ///   实测用户数据里有一条 `('en','嗚呼')` 的学习状态，而「嗚呼」这个词条
+    ///   只存在于 `jlpt-n1`（`ja`）—— 因为建状态时取的是全局 `target_lang`，
+    ///   而不是词条自己的语言。后果是 `due_states('en')` 数得到它、
+    ///   `get_word('嗚呼','en')` 却永远是 `None`：复习队列被**静默清空**，
+    ///   界面于是出现「按钮写着 1 个、点进去说一个都没有」的自相矛盾。
+    ///   这里兜底一次，宁可把它显示出来，也不无声丢掉用户真学过的词。
+    pub fn get_word_any_lang(&self, word: &str) -> Result<Option<WordEntry>> {
+        let conn = self.conn.lock();
+        let row: Option<String> = conn
+            .query_row(
+                "SELECT entry_json FROM words WHERE lower(word)=lower(?1) \
+                 ORDER BY length(entry_json) DESC LIMIT 1",
+                params![word],
+                |r| r.get(0),
+            )
+            .optional()?;
+        match row {
+            Some(j) => Ok(Some(serde_json::from_str(&j)?)),
+            None => Ok(None),
+        }
+    }
+
     pub fn word_count(&self, lang: &str) -> Result<i64> {
         let conn = self.conn.lock();
         let n: i64 = conn.query_row(
@@ -517,6 +542,64 @@ impl Db {
             |r| r.get(0),
         )?;
         Ok(n)
+    }
+
+    /// 在一批候选词里找出**词库里真实存在**的那些，带出词性与主释义（需求 5）。
+    ///
+    /// 返回 `(词, 词性, 主释义)`，其中词性/主释义取自 `entry_json` 的**第一个
+    /// 义项** —— 详情卡展示同族词时只需要「词性 + 一句话意思」，把整条词条
+    /// 都解析出来既慢又没必要（一个词可能带十几条义项）。
+    ///
+    /// 匹配用 `lower(word)`：词库里的键保留用户/词表原始大小写，而候选一律
+    /// 生成小写，不做大小写归一的话 `Happy` 这种带大写的记录永远匹配不上。
+    /// SQLite 的 `lower()` 只处理 ASCII —— 对本函数足够，候选本来就只由
+    /// 纯拉丁字母生成。
+    pub fn existing_word_briefs(
+        &self,
+        words: &[String],
+        lang: &str,
+    ) -> Result<Vec<(String, String, String)>> {
+        if words.is_empty() {
+            return Ok(Vec::new());
+        }
+        let placeholders = std::iter::repeat("?")
+            .take(words.len())
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql = format!(
+            "SELECT word, \
+                    COALESCE(json_extract(entry_json, '$.senses[0].pos'), ''), \
+                    COALESCE(json_extract(entry_json, '$.senses[0].definition'), '') \
+             FROM words WHERE lang=? AND lower(word) IN ({})",
+            placeholders
+        );
+        // 第一段参数是 lang，其余是候选词
+        let mut args: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(words.len() + 1);
+        args.push(&lang);
+        for w in words {
+            args.push(w);
+        }
+
+        let conn = self.conn.lock();
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(args), |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+            ))
+        })?;
+        let mut out = Vec::new();
+        for r in rows {
+            let (w, pos, def) = r?;
+            // 同一个词可能以不同大小写存了多行，只留第一条，避免界面上
+            // 出现两个一模一样的 happiness
+            if out.iter().any(|(x, _, _): &(String, String, String)| x.eq_ignore_ascii_case(&w)) {
+                continue;
+            }
+            out.push((w, pos, def));
+        }
+        Ok(out)
     }
 
     // ---------- AI 讲解存档 ----------
@@ -1059,6 +1142,31 @@ impl Db {
         )?;
         let wrong = total - correct;
         Ok((total, correct, wrong))
+    }
+
+    /// 今天**去重后**复习过的词数（同一个词今天答 5 次只算 1 个）。
+    ///
+    /// 学习目标按「背完多少个**词**」算，而不是「答了多少**题**」，
+    /// 所以这里必须 `DISTINCT word`，不能复用 [`Db::today_counts`] 的 `COUNT(*)`。
+    /// `lang` 为 `None` 时跨语言统计（用于「全部词库」的目标）。
+    pub fn today_reviewed_words(&self, lang: Option<&str>, now: i64) -> Result<i64> {
+        let (start, _) = crate::timeutil::day_bounds(now);
+        let conn = self.conn.lock();
+        let n: i64 = match lang {
+            Some(l) => conn.query_row(
+                "SELECT COUNT(DISTINCT word) FROM review_log
+                 WHERE reviewed_at>=?1 AND reviewed_at<?2 AND lang=?3",
+                params![start, start + 86400, l],
+                |r| r.get(0),
+            )?,
+            None => conn.query_row(
+                "SELECT COUNT(DISTINCT word) FROM review_log
+                 WHERE reviewed_at>=?1 AND reviewed_at<?2",
+                params![start, start + 86400],
+                |r| r.get(0),
+            )?,
+        };
+        Ok(n)
     }
 
     /// 最近 N 天的每日复习量。
@@ -1815,6 +1923,199 @@ impl Db {
         )?;
         Ok(())
     }
+
+    // ============================================================
+    //  一次性语言修复迁移（需求 16：考研核心词汇被存成日语）
+    // ============================================================
+
+    /// 把内置词库（及其词条）的语言纠正回目录里的**权威值**。
+    ///
+    /// 为什么必须三张表一起修：`cmd_words_in_book` / `unscheduled_words_in_book`
+    /// 都是按**词库自身的语言**去 `wordbook_words JOIN words` 里捞词。
+    /// 只把 `wordbooks.lang` 从 `ja` 改成 `en`，JOIN 条件就再也对不上，
+    /// 结果「标签修对了，词却一条都显示不出来」—— 比修之前更糟。
+    ///
+    /// 参数 `authoritative` 是「词库 id → 权威语言」清单，必须**与内置目录同源**
+    /// （调用方直接传 [`crate::dict::importer::builtin_book_langs`]）；这里刻意
+    /// 不自己维护一张语言表 —— `kaoyan-core` 被标成 `ja` 正是「两处各抄一份、
+    /// 时间一长就漂移」的后果。
+    ///
+    /// 只处理「内置词库 id」：用户自建词库、手动导入的词一律不动。
+    ///
+    /// 幂等：第二次执行时 `wordbooks.lang` 已相等、`wordbook_words` 里已无
+    /// 需要改语言的批次，因此不会改动任何行，返回 `(0, 0, 0)`。
+    ///
+    /// 返回 `(修好的词库数, 改语言的归属行数, 迁移的词条数)`。
+    pub fn fix_builtin_book_langs(
+        &self,
+        authoritative: &[(String, String)],
+    ) -> Result<(usize, usize, usize)> {
+        let mut conn = self.conn.lock();
+        let tx = conn.transaction()?;
+
+        // 权威语言为 `ja` 的词库所拥有的词 —— 这些词**不能被英语库「借走」**。
+        // 例如 `April` 可能是考研词表里的英语词，也可能是 JLPT 词表里的
+        // 片假名外来语；把它的 `ja` 行搬去 `en`，日语词库就会凭空少词。
+        // 所以按 book_id 归属（与当前 lang 无关）预先收集这张保护名单。
+        let ja_books: Vec<String> = authoritative
+            .iter()
+            .filter(|(_, l)| l == "ja")
+            .map(|(i, _)| i.clone())
+            .collect();
+        let mut ja_words: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for jb in &ja_books {
+            let mut stmt =
+                tx.prepare("SELECT DISTINCT word FROM wordbook_words WHERE book_id=?1")?;
+            let rows = stmt.query_map([jb.as_str()], |r| r.get::<_, String>(0))?;
+            for r in rows {
+                ja_words.insert(r?);
+            }
+        }
+
+        let mut books_fixed = 0usize;
+        let mut rows_fixed = 0usize;
+        let mut words_moved = 0usize;
+
+        for (id, want) in authoritative {
+            // 未安装的内置库在 wordbooks 里没有行，跳过（不是「错标」，是没装）。
+            let cur: Option<String> = tx
+                .query_row("SELECT lang FROM wordbooks WHERE id=?1", [id], |r| r.get(0))
+                .optional()?;
+            let Some(cur) = cur else { continue };
+            if cur != *want {
+                tx.execute(
+                    "UPDATE wordbooks SET lang=?2 WHERE id=?1",
+                    rusqlite::params![id, want],
+                )?;
+                books_fixed += 1;
+            }
+
+            // 该库下所有「与权威值不一致」的语言批次（通常只有一个）。
+            let old_langs: Vec<String> = {
+                let mut stmt = tx.prepare(
+                    "SELECT DISTINCT lang FROM wordbook_words WHERE book_id=?1 AND lang<>?2",
+                )?;
+                let rows =
+                    stmt.query_map(rusqlite::params![id, want], |r| r.get::<_, String>(0))?;
+                let mut v = Vec::new();
+                for r in rows {
+                    v.push(r?);
+                }
+                v
+            };
+
+            for ol in old_langs {
+                // ---- 1) words / study_state：只修「来源可判定」的行 ----
+                words_moved += migrate_words_lang(&tx, id, &ol, want, &ja_words)?;
+
+                // ---- 2) wordbook_words：整批改到权威语言 ----
+                // 用 INSERT OR IGNORE + DELETE 而不是 UPDATE：`lang` 是主键
+                // `(book_id, word, lang)` 的一部分，直接 UPDATE 一旦遇到
+                // 「同一个词在目标语言下已有一行」就会撞主键、整批回滚。
+                let inserted = tx.execute(
+                    r#"INSERT OR IGNORE INTO wordbook_words(book_id,word,lang,ord)
+                       SELECT book_id, word, ?3, ord FROM wordbook_words
+                       WHERE book_id=?1 AND lang=?2"#,
+                    rusqlite::params![id, ol, want],
+                )?;
+                tx.execute(
+                    "DELETE FROM wordbook_words WHERE book_id=?1 AND lang=?2",
+                    rusqlite::params![id, ol],
+                )?;
+                rows_fixed += inserted;
+            }
+        }
+
+        tx.commit()?;
+
+        if books_fixed > 0 || rows_fixed > 0 || words_moved > 0 {
+            eprintln!(
+                "[wordwise] 词库语言修复：纠正 {books_fixed} 个词库、{rows_fixed} 条归属、{words_moved} 个词条"
+            );
+        }
+        Ok((books_fixed, rows_fixed, words_moved))
+    }
+}
+
+/// 把 `book_id` 下、当前语言为 `ol` 的词条迁到权威语言 `want`。
+///
+/// 只迁「来源可判定」的词 —— 必须同时满足：
+///   a. 它挂在当前（语言已被纠正的）内置词库下；
+///   b. 权威语言下**还没有**同名行（否则可能撞主键 / 造出重复词条）；
+///   c. 它不属于任何 `ja` 权威词库（见 [`Db::fix_builtin_book_langs`] 的说明）。
+///
+/// `study_state` 一并迁移，否则「词还在、学习进度却归零」—— 用户会以为
+/// 自己的复习记录丢了。迁移后只在目标行确实存在时才删旧行，绝不出现
+/// 「新旧都没了」把进度清空的情况。
+fn migrate_words_lang(
+    conn: &rusqlite::Connection,
+    book_id: &str,
+    ol: &str,
+    want: &str,
+    ja_words: &std::collections::HashSet<String>,
+) -> Result<usize> {
+    // 候选：旧语言下的词，且挂在本词库下，且目标语言下没有同名行。
+    let candidates: Vec<(String, String, i64)> = {
+        let mut stmt = conn.prepare(
+            r#"SELECT w.word, w.entry_json, w.added_at
+               FROM words w
+               WHERE w.lang = ?1
+                 AND w.word IN (SELECT word FROM wordbook_words WHERE book_id = ?2 AND lang = ?1)
+                 AND NOT EXISTS (SELECT 1 FROM words w2 WHERE w2.word = w.word AND w2.lang = ?3)"#,
+        )?;
+        let rows = stmt.query_map(rusqlite::params![ol, book_id, want], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, i64>(2)?,
+            ))
+        })?;
+        let mut v = Vec::new();
+        for r in rows {
+            v.push(r?);
+        }
+        v
+    };
+
+    let mut moved = 0usize;
+    for (word, entry_json, added_at) in candidates {
+        // 规则 c：这个词属于日语词库 → 它的 ja 行是有正当归属的，别动。
+        if ja_words.contains(&word) {
+            continue;
+        }
+        conn.execute(
+            "INSERT OR IGNORE INTO words(word,lang,entry_json,added_at) VALUES(?1,?2,?3,?4)",
+            rusqlite::params![word, want, entry_json, added_at],
+        )?;
+        conn.execute(
+            r#"INSERT OR IGNORE INTO study_state
+                 (word,lang,ease_factor,interval_days,repetitions,due_at,last_review_at,
+                  correct_count,wrong_count,is_leech,mastery,is_mastered)
+               SELECT word,?2,ease_factor,interval_days,repetitions,due_at,last_review_at,
+                      correct_count,wrong_count,is_leech,mastery,is_mastered
+               FROM study_state WHERE word=?1 AND lang=?3"#,
+            rusqlite::params![word, want, ol],
+        )?;
+        conn.execute(
+            "DELETE FROM words WHERE word=?1 AND lang=?2",
+            rusqlite::params![word, ol],
+        )?;
+        // 旧学习状态：仅当目标行确实存在时才删（否则宁可留一条孤立行，
+        // 也不能把用户唯一的进度记录删掉）。
+        let has_target: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM study_state WHERE word=?1 AND lang=?2",
+            rusqlite::params![word, want],
+            |r| r.get(0),
+        )?;
+        if has_target > 0 {
+            conn.execute(
+                "DELETE FROM study_state WHERE word=?1 AND lang=?2",
+                rusqlite::params![word, ol],
+            )?;
+        }
+        moved += 1;
+    }
+    Ok(moved)
 }
 
 /// rusqlite row → StudyState
@@ -2002,9 +2303,71 @@ mod tests {
         assert!(got.iter().any(|r| r.word == "apple"));
     }
 
-    /* ---- 翻译历史与收藏（需求 5） ---- */
+    /* ---- 同族派生词（需求 5） ---- */
 
-    /// 重复翻译同一句只保留一行。
+    /// 只返回词库里**真实存在**的候选，并带出词性与主释义。
+    #[test]
+    fn existing_word_briefs_only_returns_real_rows() {
+        let db = tmp_db("deriv");
+        db.bulk_upsert_words(
+            &[
+                entry("en", "happy", "adj.", "快乐的"),
+                entry("en", "happiness", "n.", "幸福；快乐"),
+                entry("en", "happier", "adj.", "更快乐的"),
+            ],
+            1,
+        )
+        .unwrap();
+
+        let cands = crate::morph::derivative_candidates("happy");
+        let got = db.existing_word_briefs(&cands, "en").unwrap();
+        let words: Vec<&str> = got.iter().map(|(w, _, _)| w.as_str()).collect();
+        assert!(words.contains(&"happiness"), "候选里有 happiness 却没查出来");
+        assert!(words.contains(&"happier"));
+        // 关键约束：词库里不存在的候选（happily/happiest…）一条都不能返回 ——
+        // 返回了就变成「点了查不到」的假按钮。
+        for (w, _, _) in &got {
+            assert!(
+                ["happy", "happiness", "happier"].contains(&w.as_str()),
+                "返回了词库里不存在的词：{}",
+                w
+            );
+        }
+        // 词性与主释义要取自第一个义项
+        let h = got.iter().find(|(w, _, _)| w == "happiness").unwrap();
+        assert_eq!(h.1, "n.");
+        assert_eq!(h.2, "幸福；快乐");
+    }
+
+    /// 大小写不敏感：候选一律小写，词库里可能存的是 `Happy`。
+    #[test]
+    fn existing_word_briefs_is_case_insensitive() {
+        let db = tmp_db("deriv-case");
+        db.bulk_upsert_words(&[entry("en", "Happiness", "n.", "幸福")], 1)
+            .unwrap();
+        let got = db
+            .existing_word_briefs(&["happiness".to_string()], "en")
+            .unwrap();
+        assert_eq!(got.len(), 1);
+        // 返回**存储时的原始拼写**，不能把用户词库里的写法改成小写
+        assert_eq!(got[0].0, "Happiness");
+    }
+
+    /// 语言必须隔离：英语的 happiness 不该在查日语词时冒出来。
+    #[test]
+    fn existing_word_briefs_respects_lang() {
+        let db = tmp_db("deriv-lang");
+        db.bulk_upsert_words(&[entry("en", "happiness", "n.", "幸福")], 1)
+            .unwrap();
+        let got = db
+            .existing_word_briefs(&["happiness".to_string()], "ja")
+            .unwrap();
+        assert!(got.is_empty(), "跨语言串了：{}", got.len());
+        // 空候选列表不该拼出非法 SQL（IN ()）
+        assert!(db.existing_word_briefs(&[], "en").unwrap().is_empty());
+    }
+
+    /* ---- 翻译历史与收藏（需求 5） ---- */    /// 重复翻译同一句只保留一行。
     ///
     /// 这条守的是「翻译页实时翻译会把历史冲爆」：边打字边翻，
     /// 每次都是新记录的话，历史列表几秒钟就被同一句话的不同前缀淹没了。
@@ -2327,5 +2690,182 @@ mod tests {
         db.save_explain(&explain_row("apple", "zh", "a"), 1).unwrap();
         assert_eq!(db.delete_explain("apple", "en", "zh").unwrap(), 1);
         assert_eq!(db.delete_explain("apple", "en", "zh").unwrap(), 0);
+    }
+
+    /* ---------------- 需求 15：学习目标 ---------------- */
+
+    /// 今日完成量必须**按词去重**：同一个词今天答 5 次只算 1 个。
+    #[test]
+    fn today_reviewed_words_counts_distinct_words() {
+        let db = tmp_db("today-distinct");
+        let now = 1_700_000_000;
+        for _ in 0..5 {
+            db.log_review("apple", "en", "good", "en_to_zh", now, 0)
+                .unwrap();
+        }
+        db.log_review("banana", "en", "wrong", "en_to_zh", now, 0)
+            .unwrap();
+        // 别的语言不该混进 en 的统计
+        db.log_review("りんご", "ja", "good", "en_to_zh", now, 0).unwrap();
+
+        assert_eq!(db.today_reviewed_words(Some("en"), now).unwrap(), 2);
+        assert_eq!(db.today_reviewed_words(Some("ja"), now).unwrap(), 1);
+        // 未指定语言时跨语言
+        assert_eq!(db.today_reviewed_words(None, now).unwrap(), 3);
+        // 明天不再算今天的
+        assert_eq!(db.today_reviewed_words(Some("en"), now + 86400).unwrap(), 0);
+    }
+
+    /// 「答对一次后该词的 `due_at` 被排到未来」—— 即多背的词确实进了复习轮。
+    ///
+    /// 直接走 `cmd_submit_answer` 内部实际调用的那条链路：
+    /// `srs::schedule(Good)` → `db.upsert_state` → `db.get_state`。
+    #[test]
+    fn correct_answer_schedules_due_in_future() {
+        let db = tmp_db("due-future");
+        let now = 1_700_000_000;
+        let mut st = StudyState::new("apple", "en", now);
+        assert_eq!(st.due_at, now, "新词初始是「现在就到期」");
+
+        let cfg = crate::models::SrsConfig::default();
+        crate::srs::schedule(&mut st, crate::srs::Grade::Good, &cfg, now);
+        db.upsert_state(&st).unwrap();
+
+        let got = db.get_state("apple", "en").unwrap().unwrap();
+        assert!(
+            got.due_at > now,
+            "答对后必须排到未来（进了复习轮），实际 due_at={}",
+            got.due_at
+        );
+    }
+
+    /* ---------------- 需求 16：词库语言修复迁移 ---------------- */
+
+    /// 构造「考研核心词汇被错标成 ja」的实机状态 → 跑迁移 → 三张表语言一致，
+    /// 且**再跑一次不产生任何变更**（幂等）。
+    #[test]
+    fn builtin_book_lang_migration_is_idempotent() {
+        let db = tmp_db("book-lang-fix");
+
+        let book = Wordbook {
+            id: "kaoyan-core".into(),
+            name: "考研核心词汇".into(),
+            category: "kaoyan".into(),
+            level: 2,
+            parent_id: "exam-en".into(),
+            lang: "ja".into(),
+            word_count: 2,
+            builtin: false,
+            installed: true,
+            ..Default::default()
+        };
+        db.upsert_wordbook(&book).unwrap();
+        db.bulk_upsert_words(
+            &[
+                entry("ja", "abandon", "v.", "放弃；抛弃"),
+                entry("ja", "revolt", "n.", "起义；反抗"),
+            ],
+            1,
+        )
+        .unwrap();
+        db.add_words_to_book(
+            "kaoyan-core",
+            &["abandon".to_string(), "revolt".to_string()],
+            "ja",
+        )
+        .unwrap();
+        // 顺手造一条 ja 学习进度：迁移后不能凭空消失
+        let st = StudyState {
+            word: "abandon".into(),
+            lang: "ja".into(),
+            ..StudyState::new("abandon", "ja", 1)
+        };
+        db.upsert_state(&st).unwrap();
+
+        // 迁移前就是坏的
+        assert_eq!(db.get_wordbook("kaoyan-core").unwrap().unwrap().lang, "ja");
+
+        // 权威语言表来自内置目录（同源），不在这里另抄一份
+        let authoritative = crate::dict::importer::builtin_book_langs();
+        let (books, rows, moved) = db.fix_builtin_book_langs(&authoritative).unwrap();
+        assert_eq!(books, 1, "应纠正 1 个词库");
+        assert_eq!(rows, 2, "两条归属都应改到 en");
+        assert_eq!(moved, 2, "两个词条都应迁移到 en");
+
+        assert_eq!(db.get_wordbook("kaoyan-core").unwrap().unwrap().lang, "en");
+        // ★ 三张表语言一致后词库内容仍然可见 —— 这正是「只改 wordbooks.lang」
+        //   修不好的地方（JOIN 会全部落空）。
+        assert_eq!(db.words_in_book("kaoyan-core", "en", 10, 0).unwrap().len(), 2);
+        assert!(db.words_in_book("kaoyan-core", "ja", 10, 0).unwrap().is_empty());
+        // 学习进度被一起搬过去，不会让用户「进度归零」
+        assert!(db.get_state("abandon", "en").unwrap().is_some());
+        assert!(db.get_state("abandon", "ja").unwrap().is_none());
+
+        // 幂等：第二次不应再改动任何行
+        let (b2, r2, m2) = db.fix_builtin_book_langs(&authoritative).unwrap();
+        assert_eq!((b2, r2, m2), (0, 0, 0), "第二次运行不应产生任何变更");
+    }
+
+    /// 用户自建词库与手动导入的词不能被迁移碰到。
+    #[test]
+    fn language_migration_leaves_user_books_alone() {
+        let db = tmp_db("book-lang-user");
+        let user = Wordbook {
+            id: "user-123".into(),
+            name: "我的生词本".into(),
+            lang: "ja".into(),
+            builtin: false,
+            installed: true,
+            ..Default::default()
+        };
+        db.upsert_wordbook(&user).unwrap();
+        db.bulk_upsert_words(&[entry("ja", "自定义词", "n.", "释义")], 1)
+            .unwrap();
+        db.add_words_to_book("user-123", &["自定义词".to_string()], "ja")
+            .unwrap();
+
+        let authoritative = crate::dict::importer::builtin_book_langs();
+        let (b, r, m) = db.fix_builtin_book_langs(&authoritative).unwrap();
+        assert_eq!((b, r, m), (0, 0, 0));
+        assert_eq!(db.get_wordbook("user-123").unwrap().unwrap().lang, "ja");
+        assert_eq!(db.words_in_book("user-123", "ja", 10, 0).unwrap().len(), 1);
+    }
+
+    /// ★ 回归：学习状态的语言与**词条所在的语言**不一致时，跨语言兜底必须能取到词条。
+    ///
+    /// 现场是用户真实数据：`study_state` 里有一条 `('en','嗚呼')`，而「嗚呼」的
+    /// 词条只存在于 `ja`（它属于 JLPT N1 词库）。建状态时取的是全局
+    /// `target_lang` 而不是词条自己的语言，于是：
+    ///   `due_states('en')` 数得到它 —— 概览显示「待复习 1」；
+    ///   `get_word('嗚呼','en')` 永远返回 None —— 复习队列被**静默清空**；
+    /// 界面就出现了「按钮写着 1 个、点进去说一个都没有」。
+    /// `get_word_any_lang` 正是这一环的兜底。
+    #[test]
+    fn get_word_any_lang_falls_back_across_languages() {
+        let db = tmp_db("xlang-fallback");
+        db.bulk_upsert_words(&[entry("ja", "嗚呼", "int.", "ああ")], 1)
+            .unwrap();
+
+        // 目标语言下确实没有 —— 这正是当初队列变空的原因
+        assert!(
+            db.get_word("嗚呼", "en").unwrap().is_none(),
+            "en 下本就不该有这个词条"
+        );
+
+        // 跨语言兜底必须把它捞回来，且保留它真实的语言
+        let got = db
+            .get_word_any_lang("嗚呼")
+            .unwrap()
+            .expect("跨语言兜底应当取到词条");
+        assert_eq!(got.word, "嗚呼");
+        assert_eq!(got.lang, "ja");
+
+        // 大小写不敏感：学习状态里存的大小写未必与词库一致
+        db.bulk_upsert_words(&[entry("en", "Consider", "v.", "考虑")], 1)
+            .unwrap();
+        assert!(db.get_word_any_lang("consider").unwrap().is_some());
+
+        // 真查不到时仍是 None —— 兜底不等于凭空造词条
+        assert!(db.get_word_any_lang("这个词根本不存在").unwrap().is_none());
     }
 }

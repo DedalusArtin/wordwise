@@ -41,14 +41,11 @@ pub fn cmd_search_engines() -> Vec<EngineOption> {
 }
 
 /// 把配置里的字符串解析成引擎枚举。
+///
+/// 实现在 [`SearchEngine::parse`]，这里只保留一层薄包装：AI 讲解的联网补充
+/// 也要用同一套解析规则，两处各写一份 `match` 迟早会漂移。
 fn parse_engine(s: &str) -> SearchEngine {
-    match s.to_ascii_lowercase().as_str() {
-        "baidu" => SearchEngine::Baidu,
-        "so360" | "360" | "so" => SearchEngine::So360,
-        "bingintl" | "bing_intl" | "bing-intl" => SearchEngine::BingIntl,
-        "duckduckgo" | "ddg" => SearchEngine::DuckDuckGo,
-        _ => SearchEngine::Bing,
-    }
+    SearchEngine::parse(s)
 }
 
 /// 在线网络搜索（需求 6）。默认并发必应+百度，合并结果。
@@ -293,6 +290,8 @@ pub fn cmd_start_book_session(
         s.started_at = now;
         s.leech_only = false;
         s.def_lang = def_lang;
+        // 新一轮不沿用上一轮的「答错回插」预算
+        s.requeue_counts.clear();
     }
 
     Ok(crate::commands::SessionInfo {
@@ -419,10 +418,12 @@ pub fn cmd_build_advanced_card(
     state: State<'_, Arc<AppState>>,
     mode: QuizMode,
     lang: Option<String>,
+    // 会话类型：缺省 / `"study"` → 背诵槽；`"review"` → 复习槽（需求 14）。
+    kind: Option<String>,
 ) -> Result<Option<QuizCard>, String> {
     let lang = lang.unwrap_or_else(|| state.cfg().target_lang);
     let (entry, index, total, correct, wrong, is_leech, def_lang) = {
-        let s = state.session.read();
+        let s = state.session_slot(kind.as_deref()).read();
         if !s.is_active() {
             return Ok(None);
         }
@@ -481,11 +482,48 @@ pub fn cmd_reload_network(
 ///
 /// 探测清单以**默认配置（直连）**下必须可用的端点为主；需要代理的端点
 /// 单独标注，避免用户误以为「必须开代理才能用」。
+///
+/// 三个可选入参用于**按界面上尚未保存的待测配置**临时探测一次：
+/// `enable_proxy` / `proxy` / `use_system_proxy`。**一个都不传时回退到当前
+/// 已生效的配置**，所以旧的「不传参」调用行为完全不变（Tauri 对 `Option`
+/// 参数在缺省时给 `None`）。
+///
+/// 之所以需要它们：本命令原先读的是 `state.http()`，也就是**上一次保存后**
+/// 才生效的客户端。用户改完代理输入框、还没点保存就来点「诊断网络」，
+/// 看到的自然是旧结论——于是误以为「诊断证明我配的代理没用」，其实参数
+/// 根本没提交。
 #[tauri::command]
-pub async fn cmd_network_report(state: State<'_, Arc<AppState>>) -> Result<NetReport, String> {
-    let cfg = state.cfg();
-    let client = state.http();
-    let info = state.proxy_info();
+pub async fn cmd_network_report(
+    state: State<'_, Arc<AppState>>,
+    enable_proxy: Option<bool>,
+    proxy: Option<String>,
+    use_system_proxy: Option<bool>,
+) -> Result<NetReport, String> {
+    let mut cfg = state.cfg();
+
+    // 只有调用方确实传了「待测配置」才临时重建客户端；否则沿用当前生效的那个。
+    let pending = enable_proxy.is_some() || proxy.is_some() || use_system_proxy.is_some();
+    let (client, info) = if pending {
+        if let Some(b) = enable_proxy {
+            cfg.network.enable_proxy = b;
+        }
+        if let Some(p) = proxy {
+            // 与设置页保存时的处理保持一致：去掉首尾空白，避免把「 127.0.0.1:7890 」
+            // 当成一个非法地址而误报「代理地址无效」。
+            cfg.network.proxy = p.trim().to_string();
+        }
+        if let Some(b) = use_system_proxy {
+            cfg.network.use_system_proxy = b;
+        }
+        let (c, r) = crate::net::build_client_with(&cfg.network).map_err(err)?;
+        (c, r)
+    } else {
+        (state.http(), state.proxy_info())
+    };
+
+    // 远端探测的超时与真实请求对齐：真实客户端的超时就是配置里的 timeout_secs。
+    // 用一个更短的超时去探测，只会在代理握手慢时假报失败（见 net.rs 的说明）。
+    let remote_timeout = cfg.network.timeout_secs.clamp(5, 600);
 
     // 探测项：(名称, 地址, 是否为「本地地址」)
     //
@@ -545,13 +583,14 @@ pub async fn cmd_network_report(state: State<'_, Arc<AppState>>) -> Result<NetRe
 
     for (name, url, is_local) in targets {
         let started = std::time::Instant::now();
-        let probe_client = if is_local {
-            // 本机地址用独立的直连客户端，避免被代理配置误伤
-            crate::net::client_direct(6)
+        // 本机地址用独立的直连客户端，避免被代理配置误伤；
+        // 远端则用**本次实际生效**的客户端（可能来自待测配置），超时也用它自己的。
+        let (probe_client, probe_timeout) = if is_local {
+            (crate::net::client_direct(6), 6u64)
         } else {
-            client.clone()
+            (client.clone(), remote_timeout)
         };
-        let ok = crate::net::probe(&probe_client, &url).await;
+        let ok = crate::net::probe_with_timeout(&probe_client, &url, probe_timeout).await;
         let elapsed_ms = started.elapsed().as_millis() as i64;
         items.push(NetProbeItem {
             name: name.into(),
@@ -560,15 +599,34 @@ pub async fn cmd_network_report(state: State<'_, Arc<AppState>>) -> Result<NetRe
             elapsed_ms,
             detail: if ok {
                 format!("正常（{} ms）", elapsed_ms)
+            } else if is_local {
+                // 本机探测永远直连，失败基本只有一个原因，直接说出来更有用
+                format!("本机直连不可达：本地服务可能未启动（{} ms）", elapsed_ms)
             } else {
-                "不可达：超时或被拒绝".to_string()
+                // ★ 把「本次探测实际走的是哪条路径」写进每一项：用户才能自己
+                //   对照下面的 no_proxy 判断「是不是我的绕过列表把这个域名
+                //   放行成直连了」。
+                format!(
+                    "不可达：超时或被拒绝（{} ms；本次探测走{}）",
+                    elapsed_ms,
+                    info.path.label()
+                )
             },
         });
     }
 
     let using_proxy = !info.is_direct();
+    // 结论里把「实际走的路径」和「生效的 no_proxy 排除表」一并给出：
+    // 如果某个目标域名出现在排除表里，它就**不经过代理**——用户一眼就能看出
+    // 问题出在自己的绕过配置上，而不是笼统的一句「网络错误」。
+    let proxy = format!(
+        "{}；{}",
+        info.describe(),
+        crate::net::describe_probe_path(&cfg.network, &info)
+    );
+
     Ok(NetReport {
-        proxy: info.describe(),
+        proxy,
         proxy_url: info.url.clone(),
         using_proxy,
         proxy_origin: info.origin.clone(),

@@ -97,6 +97,13 @@ const Study = (() => {
   const state = {
     mode: 'en_to_zh',
     running: false,
+    /* 本轮属于哪个会话槽位（需求 14：背诵与复习不共用容器）。
+       'study'  = 背诵（新词 / 指定词库 / 常错词攻坚）
+       'review' = 今日复习（只出今天到期的词，数量绝不补足）
+       ★ 这个字段必须跟着**每一次**后端调用走：漏传一处的后果是
+         「题从复习槽出、答案记进背诵槽」—— 计数与判分静默错位，
+         界面看起来一切正常，极难发现。 */
+    kind: 'study',
     card: null,          // 当前题目
     startTs: 0,          // 本题开始时间
     answered: false,
@@ -131,6 +138,11 @@ const Study = (() => {
     recent: null,              // 懒加载：第一次切到「最近背过」才去查库
     recentLoading: false,
     _recs: [],                 // 当前列表渲染出来的记录（点「详情」时按下标回查）
+
+    /* ---- 学习目标（需求 15） ---- */
+    goal: null,                // 后端 StudyGoal 视图；null = 还没拉到
+    goalLoaded: false,         // 是否已成功拉过一次（失败时不显示空壳）
+    goalCelebrated: '',        // 已经弹过祝贺卡的那个「日期|目标数」，用于去重
   };
 
   /* ---------------- 语言自适应 ---------------- */
@@ -253,14 +265,64 @@ const Study = (() => {
         const bl = state.bookLangById[bookId] || null;
         info = await API.startBookSession(bookId, backendMode, size, bl, state.defLang);
       } else {
-        info = await API.startSession(backendMode, size, leechOnly, null, state.defLang);
+        // kind='study'：写背诵槽位，绝不碰复习槽位
+        info = await API.startSession(backendMode, size, leechOnly, null, state.defLang, 'study');
       }
     } catch (e) {
       U().toast(e.message, 'err');
       return;
     }
 
+    beginRun(info, 'study');
+  }
+
+  /**
+   * 开始一轮**今日复习**（需求 14）。
+   *
+   * 与 [`start`] 的三点不同，每一点都是用户明确提过的：
+   *   1. 队列**只由今天到期的词构成，绝不补足**到「每轮题量」——
+   *      入口按钮写「12 个」，点进去就一定是 12 个。补成 20 会让按钮上的
+   *      数字变成谎话，这比少背几个词严重得多。
+   *   2. 写**独立槽位**（kind='review'），不会把正在进行的背诵会话清掉。
+   *   3. 一个到期词都没有时 `total === 0`：这是正常状态，不是错误 ——
+   *      提示一句「今天没有到期的词」就返回，绝不进答题界面。
+   */
+  async function startToday() {
+    await ensureConfig();
+    let info;
+    try {
+      info = await API.startReviewSession(
+        toBackend(state.mode), null, state.bookLang || null, state.defLang);
+    } catch (e) {
+      U().toast(e.message, 'err');
+      return;
+    }
+    if (!info || !info.total) {
+      // ★ 两种「0」必须分开说，否则会和按钮上的数字当众打架：
+      //   ① 概览上也写着 0 —— 真的没有到期词，这是正常状态，给一句轻松的提示；
+      //   ② 概览上写着 N>0、队列却是空的 —— 说明这些词的词条在当前语言下取不到
+      //      （历史数据里确实存在「学习状态记在 A、词条只存在于 B」的记录）。
+      //      此时还说「没有到期的词」就是假话 —— 用户截图里正是
+      //      「开始今日复习（1 词）」与「今天没有到期的词了」同屏出现。
+      const dueEl = document.getElementById('s-due');
+      const shown = parseInt((dueEl && dueEl.textContent) || '0', 10) || 0;
+      U().toast(
+        shown > 0
+          ? `有 ${shown} 个词到期，但它们的词条不在当前词库里，已跳过`
+          : '今天没有到期的词了，可以背点新词或去错词本转转',
+        shown > 0 ? 'err' : 'ok');
+      // 顺手把概览刷一遍：用户看到的所有数字都来自同一次统计
+      if (window.Pages && window.Pages.refreshStudy) window.Pages.refreshStudy();
+      return;
+    }
+    beginRun(info, 'review');
+  }
+
+  /** 进入答题界面。`kind` 决定后续所有后端调用落在哪个会话槽位。 */
+  function beginRun(info, kind) {
+    if (!info) return;
     clearAdvance();
+    state.kind = kind === 'review' ? 'review' : 'study';
     state.running = true;
     state.learnedCount = 0;
     // 新的一轮 = 新的过程记录。上一轮的词不该再出现在「上一个」里。
@@ -270,23 +332,30 @@ const Study = (() => {
     state.streak = 0;
     state.bestStreak = 0;
     state.grind = {};
+    // 进入答题界面后就不再显示祝贺卡：它属于「概览」这个场景
+    hideGoalDone();
     updateStreakUI();
-    document.getElementById('study-idle').classList.add('hidden');
-    document.getElementById('study-run').classList.remove('hidden');
+    document.getElementById('study-idle')?.classList.add('hidden');
+    document.getElementById('study-run')?.classList.remove('hidden');
     updateCounters(info.correct, info.wrong);
     updateProgress(0, info.total);
     renderFoot();
-    await nextQuestion();
+    return nextQuestion();
   }
 
   async function end() {
-    try { await API.endSession(); } catch (e) { /* 忽略 */ }
+    try {
+      // 只结束**当前这一轮**的槽位：结束复习不该把背诵会话一起清掉（需求 14）
+      await API.endSession(state.kind);
+    } catch (e) { /* 忽略 */ }
     clearAdvance();
     state.running = false;
     state.card = null;
-    document.getElementById('study-idle').classList.remove('hidden');
-    document.getElementById('study-run').classList.add('hidden');
+    document.getElementById('study-idle')?.classList.remove('hidden');
+    document.getElementById('study-run')?.classList.add('hidden');
+    // 结束之后目标进度可能刚好达标 → 刷新概览 + 刷新目标，再判断要不要弹祝贺卡
     if (window.Pages && window.Pages.refreshStudy) window.Pages.refreshStudy();
+    loadGoal().then(() => maybeCelebrate());
   }
 
   /* ---------------- 出题 ---------------- */
@@ -307,11 +376,11 @@ const Study = (() => {
       // 进阶模式用专用命令，保证例句/拼写字段齐全
       const m = meta();
       if (m.typing || m.example) {
-        card = await API.buildAdvancedCard(toBackend(state.mode));
+        card = await API.buildAdvancedCard(toBackend(state.mode), null, state.kind);
         // 后端无会话时退回普通接口
-        if (!card) card = await API.currentQuestion();
+        if (!card) card = await API.currentQuestion(null, state.kind);
       } else {
-        card = await API.currentQuestion();
+        card = await API.currentQuestion(null, state.kind);
       }
     } catch (e) {
       U().toast(e.message, 'err');
@@ -319,7 +388,7 @@ const Study = (() => {
     }
 
     if (!card) {
-      U().toast('本轮已完成，休息一下吧', 'ok');
+      U().toast(state.kind === 'review' ? '今日复习完成，休息一下吧' : '本轮已完成，休息一下吧', 'ok');
       return end();
     }
 
@@ -373,11 +442,12 @@ const Study = (() => {
     phonEl.innerHTML = '';
     if (state.mode === 'listen_spell') {
       // 听音拼写：音标就是答案，绝对不能显示，只给一个播放按钮
-      phonEl.innerHTML = '<button class="speak-btn big" id="q-play" title="播放发音（空格键）">&#128266; 播放</button>';
+      phonEl.innerHTML = `<button class="speak-btn big" id="q-play" title="播放发音（空格键）">`
+        + `${U().icon('sound')} 播放</button>`;
     } else if (state.mode === 'en_to_zh' && study.show_phonetic !== false) {
       // 统一走 phoneticHtml：英/美分标、斜杠规则、IPA 字体只有一份实现
       phonEl.innerHTML = U().phoneticHtml(card.entry, { speak: true })
-        || '<button class="speak-btn" id="q-play" title="播放发音">&#128266; 播放</button>';
+        || `<button class="speak-btn" id="q-play" title="播放发音">${U().icon('sound')} 播放</button>`;
     }
 
     document.getElementById('qc-leech').classList.toggle('hidden', !card.is_leech);
@@ -442,7 +512,15 @@ const Study = (() => {
 
     const input = document.getElementById('spell-input');
     input?.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter') { e.preventDefault(); submitSpelling(); }
+      if (e.key !== 'Enter') return;
+      // ★ 已作答后**不能**再 preventDefault：这时回车属于「进入下一题」，
+      //   必须让它继续冒泡到 document 上的快捷键处理里。
+      //   原来的代码无条件 `e.preventDefault(); submitSpelling();`，
+      //   submitSpelling 因为 `state.answered` 直接 return —— 于是回车
+      //   被彻底吃掉，用户按半天没反应（需求 13 的拼写模式那一半）。
+      if (state.answered) return;
+      e.preventDefault();
+      submitSpelling();
     });
     document.getElementById('spell-submit')?.addEventListener('click', submitSpelling);
     document.getElementById('spell-hintbtn')?.addEventListener('click', showMoreHint);
@@ -578,39 +656,61 @@ const Study = (() => {
       setTimeout(() => { try { speakCurrent(); } catch (e) {} }, 420);
     }
 
-    let res = null;
-    try {
-      res = await API.submitAnswer(card.entry.word, grade, elapsed);
-    } catch (e) {
-      U().toast('保存学习记录失败：' + e.message, 'err');
-    }
+    /* ★ 关键顺序：**先把「可以推进了」这件事挂出去，再等后端**。
+     *
+     * 原来的写法是 `await API.submitAnswer(...)` 之后才 `state.advanceNow = ...`，
+     * 于是整个 IPC 往返期间（本地 SQLite 也要几十到几百毫秒，冷启动更久）
+     * 界面上明明已经判完分、选项也灰了，用户按回车却什么都没发生 ——
+     * 这正是「背词的时候出现错误按回车不能到下一个词」的主因之一。
+     *
+     * 现在提交变成**在飞**（pending），回车可以在它返回之前就推进；
+     * runAdvance 会 await 这个 pending 拿计数，所以「本轮完成」那条
+     * 统计文案依然准确。答错那条 1.5 秒的定时器也不再是阻塞：它只是
+     * 「用户没按回车时替用户按一下」。
+     */
+    const pending = API.submitAnswer(card.entry.word, grade, elapsed, null, state.kind)
+      .catch((e) => {
+        U().toast('保存学习记录失败：' + e.message, 'err');
+        return null;
+      });
 
-    if (res) {
-      updateCounters(res.correct_count, res.wrong_count);
-      if (res.total) updateProgress(res.correct_count + res.wrong_count, res.total);
-
-      const cfg = state.config;
-      const autoPopup = !cfg || !cfg.study || cfg.study.auto_popup_on_wrong !== false;
-      if (!correct && autoPopup) {
-        setTimeout(() => {
-          Detail.open(res.entry || card.entry, { reason: '答错了，看一下完整词条' });
-        }, 620);
-      }
-    }
-
-    // 自动进入下一题，但允许用户抢在定时器前面自己按回车推进。
-    //
-    // 原先这里是一个「设了就不管」的 setTimeout：答完想立刻看下一题只能干等
-    // 0.9 秒（答错 1.5 秒）。一轮几十个词，这段等待累积起来就是节奏的断点。
-    // 现在推进动作抽成 runAdvance 并挂到 state.advanceNow，定时器只负责
-    // 「到点了替用户按一下」。两者互斥，谁先跑到谁清掉对方。
     clearAdvance();
     const advance = () => {
       clearAdvance();
-      return runAdvance(res);
+      return runAdvance(pending, card);
     };
     state.advanceNow = advance;
     state.advanceTimer = setTimeout(advance, correct ? 900 : 1500);
+
+    // ---- 后端返回后的收尾（计数、自动弹详情卡）----
+    const res = await pending;
+    if (!res) return;
+
+    updateCounters(res.correct_count, res.wrong_count);
+    if (res.total) updateProgress(res.correct_count + res.wrong_count, res.total);
+
+    // 答错回插是本轮**真实发生**的（后端 requeue_wrong 把词排到队列后面），
+    // 所以「过几题还会再考你一次」这句提示现在不是空话 —— 但只在
+    // `res.requeued === true` 时才显示；没回插（比如同一词的回插预算用完了）
+    // 就如实说「已记录」，不糊弄用户。
+    if (!correct) {
+      const tip = document.getElementById('fb-requeue');
+      const plain = document.getElementById('fb-note');
+      if (res.requeued) {
+        tip?.classList.remove('hidden');
+        plain?.classList.add('hidden');
+      }
+    }
+
+    const cfg = state.config;
+    const autoPopup = !cfg || !cfg.study || cfg.study.auto_popup_on_wrong !== false;
+    // 已经推进到下一题了就不再补弹详情卡 —— 那会把用户已经看到的题面盖掉
+    if (!correct && autoPopup && state.running && state.advanceNow === advance) {
+      setTimeout(() => {
+        if (state.advanceNow !== advance) return;   // 期间按过回车 → 别弹了
+        Detail.open(res.entry || card.entry, { reason: '答错了，看一下完整词条' });
+      }, 620);
+    }
   }
 
   /** 清掉「自动进入下一题」的定时器与手动入口。 */
@@ -622,14 +722,25 @@ const Study = (() => {
     state.advanceNow = null;
   }
 
-  /** 进入下一题（或收尾本轮）。由定时器或用户按回车触发，谁先谁生效。 */
-  async function runAdvance(res) {
+  /**
+   * 进入下一题（或收尾本轮）。由定时器或用户按回车触发，谁先谁生效。
+   *
+   * @param {Promise|null} pendingRes 在飞的 `submitAnswer` 结果（可能还没回来）
+   */
+  async function runAdvance(pendingRes, card) {
+    const res = pendingRes ? await pendingRes : null;
+    // 用户抢在提交返回前按了回车 → 顺手把详情卡收掉，别盖着下一题
+    Detail.close();
+
     const info = await safeSessionInfo();
     if (!info) {
       const cc = res ? res.correct_count : 0;
       const wc = res ? res.wrong_count : 0;
-      const total = res ? res.total : 0;
-      U().toast(`本轮完成！共 ${total} 题，答对 ${cc} 题，答错 ${wc} 题`, 'ok');
+      const total = res ? res.total : (card ? state.history.length : 0);
+      U().toast(
+        `本轮完成！共 ${total} 题，答对 ${cc} 题，答错 ${wc} 题` +
+        (state.bestStreak >= 3 ? ` · 最高连对 ${state.bestStreak}` : ''),
+        'ok');
       if (total) updateProgress(total, total);
       return end();
     }
@@ -641,8 +752,8 @@ const Study = (() => {
     try {
       const m = meta();
       const card = (m.typing || m.example)
-        ? (await API.buildAdvancedCard(toBackend(state.mode)))
-        : (await API.currentQuestion(state.lang));
+        ? (await API.buildAdvancedCard(toBackend(state.mode), null, state.kind))
+        : (await API.currentQuestion(null, state.kind));
       if (!card) return null;
       return {
         index: card.index || 0,
@@ -656,14 +767,23 @@ const Study = (() => {
     }
   }
 
+  /**
+   * 读当前题的发音。
+   *
+   * `anchor` 是「当前语音」提示条要贴着的元素：把题面那行（音标行 / 题面行）
+   * 传进去，用户点完喇叭立刻能在旁边看到这句是本地 AI 语音还是系统语音读的。
+   */
   function speakCurrent() {
     const card = state.card;
     if (!card) return;
     try {
       if (window.Speak) {
+        const anchor = document.getElementById('q-phonetic')
+          || document.getElementById('q-prompt');
         window.Speak.speak(card.entry.word, {
           audio: card.entry.phonetic && card.entry.phonetic.audio,
           lang: card.entry.lang || 'en',
+          anchor,
         });
       }
     } catch (e) { /* 忽略 */ }
@@ -684,19 +804,28 @@ const Study = (() => {
     el.dataset.entryWord = entry.word || '';
     el.dataset.speakLang = entry.lang || 'en';
     el.dataset.speakAudio = (entry.phonetic && entry.phonetic.audio) || card.audio || '';
-    const sayBtn = `<button class="speak-btn" title="朗读" data-speak-accent="us">&#128266;</button>`;
+    // 图标一律走统一的内联 SVG（emoji 的字形宽度跟平台字体走，一排按钮会参差）
+    const sayBtn = `<button class="speak-btn" title="朗读" data-speak-accent="us">${U().icon('sound')}</button>`;
 
     if (correct) {
       const pace = grade === 'hard' ? '答对了，但有点犹豫，已按「较难」安排下次复习。' : '答对了！';
-      el.innerHTML = `<span class="fb-icon">&#10004;</span>
+      el.innerHTML = `<span class="fb-icon">${U().icon('check')}</span>
         <div>${pace}
         <div style="margin-top:4px;font-size:12.5px;opacity:.85">
           <b>${U().esc(entry.word)}</b>${sayBtn} —— ${U().esc(def)}
         </div></div>`;
     } else {
-      el.innerHTML = `<span class="fb-icon">&#10008;</span>
+      /* ★ 答错的提示必须**诚实**。
+         原来的文案是「该词已加入强化记忆，稍后会再考你一次」，但当时的实现
+         是 `s.index += 1` 无条件推进 —— 本轮根本不会再遇到它，这句是空话。
+         现在后端 `requeue_wrong` 会真的把词回插到本轮队列的后面，所以这句话
+         只在 `res.requeued === true` 时才显示（见 finishAnswer）。
+         还没拿到后端结果之前，先如实说「已记录」。 */
+      el.innerHTML = `<span class="fb-icon">${U().icon('cross')}</span>
         <div><b>${U().esc(entry.word)}</b>${sayBtn} —— ${U().esc(def)}
-        <div style="margin-top:4px;font-size:12.5px;opacity:.85">该词已加入强化记忆，稍后会再考你一次。</div></div>`;
+        <div class="fb-requeue hidden" id="fb-requeue">该词已排到本轮后面，过几题还会再考你一次；
+          答对后才会按遗忘曲线排下次复习。</div>
+        <div class="fb-note" id="fb-note">已记录本次错误。</div></div>`;
     }
     el.classList.remove('hidden');
   }
@@ -773,8 +902,298 @@ const Study = (() => {
       el.value = state.bookId || '';
       el.onchange = () => setBook(el.value);
     });
+    // 目标范围下拉：**包含父级词库**（「考研核心词汇」这种父级也要能选，
+    // 因为目标就是「背完这本书」）。所以这里用的是完整 books，不是 leafs。
+    const goalSel = document.getElementById('goal-book');
+    if (goalSel) {
+      goalSel.innerHTML = '<option value="">全部词库</option>' + books.map(b =>
+        `<option value="${U().esc(b.id)}">${U().esc(b.name)}（${b.word_count || 0} · ${U().esc(langInfo(b.lang).name)}）</option>`
+      ).join('');
+      goalSel.value = state.bookId || '';
+    }
     // 下拉建好后，按当前选择刷新一次界面语言
     setBook(state.bookId || '');
+  }
+
+  /* ============================================================
+     学习目标（需求 15）
+
+     「多少天背完这本书」和「每天背多少个」本质是同一件事的两种说法：
+     把剩余词量摊到剩余时间上。所以前端不做任何计算 —— 全部交给后端
+     `compute_study_goal` 算好（今日目标 / 已完成 / 还差 / 预计完成日 /
+     复习压力 / 是否达标），前端只负责画。
+
+     ★ 为什么坚持「前端不算」：这组数字会同时出现在三处（概览卡、
+       主按钮文案、祝贺卡）。三处各算一遍，迟早出现「按钮说还差 3 个、
+       点进去却已经完成」这种自相矛盾，而用户对数字的信任是一次性的。
+     ============================================================ */
+
+  /** 拉取目标视图并重绘。失败时只清空面板，不弹错（目标不是核心功能）。 */
+  async function loadGoal() {
+    try {
+      state.goal = await API.studyGoal(state.bookId || null, state.bookLang || null);
+      state.goalLoaded = true;
+    } catch (e) {
+      state.goal = null;
+    }
+    renderGoal();
+    return state.goal;
+  }
+
+  /** 目标面板的全部渲染。 */
+  function renderGoal() {
+    const g = state.goal;
+    const modeEl = document.getElementById('goal-mode');
+    const inputs = document.getElementById('goal-inputs');
+    const box = document.getElementById('goal-progress');
+    if (!modeEl || !box) return;
+
+    const mode = (g && g.mode) || 'off';
+
+    // 1) 模式按钮
+    modeEl.querySelectorAll('.seg-btn').forEach(b => {
+      b.classList.toggle('active', b.dataset.goal === mode);
+    });
+    // 2) 输入项：按模式二选一显示（同时显示会让人以为两个都生效）
+    if (inputs) {
+      inputs.classList.toggle('hide-days', mode !== 'days');
+      inputs.classList.toggle('hide-perday', mode !== 'per_day');
+    }
+    const daysEl = document.getElementById('goal-days');
+    if (daysEl && g && g.days) daysEl.value = String(g.days);
+    const perEl = document.getElementById('goal-perday');
+    if (perEl && g && g.per_day) perEl.value = String(g.per_day);
+    const bookEl = document.getElementById('goal-book');
+    if (bookEl && g) bookEl.value = g.book_id || '';
+
+    // 3) 「多背一点」：不设目标时没有「今天的目标」可加，按钮置灰
+    const extraBtn = document.getElementById('goal-extra');
+    if (extraBtn) {
+      extraBtn.disabled = mode === 'off';
+      extraBtn.title = mode === 'off'
+        ? '先设一个学习目标，「多背一点」才有意义'
+        : extraBtn.title;
+    }
+
+    // 4) 进度区
+    if (!g || mode === 'off') {
+      box.innerHTML = '<div class="gp-empty">还没有设定目标。'
+        + '选「按天数背完」或「按每日词量」，系统会算出每天该背多少，'
+        + '并同步安排之前学过的词的复习。</div>';
+      return;
+    }
+    if (g.total_words === 0) {
+      box.innerHTML = '<div class="gp-empty">这本书里还没有单词，先在「词库」页导入或下载一本。</div>';
+      return;
+    }
+
+    const pct = g.total_words ? Math.min(100, Math.round((g.learned / g.total_words) * 100)) : 0;
+    const donePct = g.today_target ? Math.min(100, Math.round((g.today_done / g.today_target) * 100)) : 0;
+    const ok = g.today_remaining === 0;
+
+    const facts = [
+      { k: '目标范围', v: g.book_name || '全部词库' },
+      { k: '今日目标', v: `${g.today_target} 词` },
+      { k: '今日已完成', v: `${g.today_done} 词`, cls: ok ? 'ok' : '' },
+      { k: '还差', v: g.today_remaining ? `${g.today_remaining} 词` : '已达标', cls: ok ? 'ok' : 'warn' },
+      { k: '今天到期', v: `${g.due_today} 词` },
+      { k: '未来 7 天复习', v: `${g.review_load_7d} 词` },
+    ];
+    if (g.eta_date) facts.push({ k: '预计完成', v: g.eta_date });
+    if (g.days_left) facts.push({ k: '剩余天数', v: `${g.days_left} 天` });
+
+    // 复习压力提示：多背的词全部会进入后续复习轮，这件事必须写在明处
+    let note = '';
+    if (g.pressure === 'high') {
+      note = `<div class="gp-note">复习压力偏高：今天的目标明显超出你近期的复习能力。`
+        + `多背的词会全部进入后续复习轮，明天后天一起压过来 —— 宁可匀速，也别一次冲太猛。</div>`;
+    } else if (!g.on_track && g.today_remaining > 0) {
+      // ★ 措辞必须与后端的口径一致：eta_date 现在按**目标速率**外推
+      //   （不是按今天的瞬时节奏）。沿用「按现在的节奏」会和「30 天目标」
+      //   又一次当众打架 —— 今天只背了几个词就报出「2028 年」的正是这句。
+      note = `<div class="gp-note">今天还差 ${g.today_remaining} 词达标。`
+        + `按当前目标的进度，预计 ${g.eta_date || '—'} 能背完这本书。</div>`;
+    } else if (ok) {
+      note = `<div class="gp-note calm">今天的目标已经完成 🎉 `
+        + `已完成 ${g.today_done} 词，今天到期 ${g.due_today} 词也已排进轮次。</div>`;
+    }
+
+    box.innerHTML = `
+      <div class="gp-row">
+        <div class="gp-bar"><div class="gp-fill${g.pressure === 'high' ? ' warn' : ''}" style="width:${pct}%"></div></div>
+        <span class="gp-num">全书进度 ${g.learned} / ${g.total_words}（${pct}%）</span>
+      </div>
+      <div class="gp-row" style="margin-top:8px">
+        <div class="gp-bar"><div class="gp-fill${ok ? '' : ' warn'}" style="width:${donePct}%"></div></div>
+        <span class="gp-num">今日 ${g.today_done} / ${g.today_target}</span>
+      </div>
+      <div class="gp-facts">
+        ${facts.map(f => `<div class="gp-fact"><div class="k">${U().esc(f.k)}</div>
+          <div class="v ${f.cls || ''}">${U().esc(String(f.v))}</div></div>`).join('')}
+      </div>
+      ${note}`;
+  }
+
+  /** 目标面板的事件绑定（模式切换 / 保存 / 多背一点 / 范围切换）。 */
+  function bindGoal() {
+    document.getElementById('goal-mode')?.addEventListener('click', async (e) => {
+      const b = e.target.closest('.seg-btn');
+      if (!b || !b.dataset.goal) return;
+      try {
+        // 切模式即落盘：这个面板只有三个开关，多一步「保存」纯属折磨。
+        // 天数 / 词量沿用后端现值（不传就是不改），只有本次真的要用的那个
+        // 值才显式传 —— 避免把另一个模式的值一并覆盖掉。
+        const days = parseInt(document.getElementById('goal-days')?.value, 10);
+        const per = parseInt(document.getElementById('goal-perday')?.value, 10);
+        state.goal = await API.setStudyGoal({
+          mode: b.dataset.goal,
+          days: Number.isFinite(days) ? days : null,
+          perDay: Number.isFinite(per) ? per : null,
+          bookId: state.bookId || null,
+        });
+        state.goalLoaded = true;
+        renderGoal();
+        U().toast(b.dataset.goal === 'off' ? '已关闭学习目标' : '学习目标已更新', 'ok');
+      } catch (err) {
+        U().toast(err.message, 'err');
+      }
+    });
+
+    document.getElementById('goal-save')?.addEventListener('click', async () => {
+      const mode = (state.goal && state.goal.mode) || 'off';
+      if (mode === 'off') {
+        U().toast('先在上面选一种目标模式', 'err');
+        return;
+      }
+      const days = parseInt(document.getElementById('goal-days')?.value, 10);
+      const per = parseInt(document.getElementById('goal-perday')?.value, 10);
+      if (mode === 'days' && !(days >= 1)) { U().toast('目标天数要大于 0', 'err'); return; }
+      if (mode === 'per_day' && !(per >= 1)) { U().toast('每日词量要大于 0', 'err'); return; }
+      try {
+        state.goal = await API.setStudyGoal({
+          mode,
+          days: Number.isFinite(days) ? days : null,
+          perDay: Number.isFinite(per) ? per : null,
+          bookId: state.bookId || null,
+        });
+        renderGoal();
+        U().toast('学习目标已保存', 'ok');
+      } catch (err) {
+        U().toast(err.message, 'err');
+      }
+    });
+
+    document.getElementById('goal-book')?.addEventListener('change', async (e) => {
+      const id = e.target.value || '';
+      // 目标范围与背诵词库是同一件事的两个入口，保持一致
+      setBook(id);
+      await loadGoal();
+    });
+
+    document.getElementById('goal-extra')?.addEventListener('click', () => askExtra(10));
+
+    /* ---- 祝贺卡 ---- */
+    document.getElementById('goal-done-close')?.addEventListener('click', hideGoalDone);
+    document.getElementById('goal-done-stop')?.addEventListener('click', () => {
+      hideGoalDone();
+      U().toast('今天就到这里，明天见', 'ok');
+    });
+    document.getElementById('goal-done-more')?.addEventListener('click', () => {
+      const el = document.getElementById('goal-extra-count');
+      const n = parseInt(el && el.value, 10) || 10;
+      hideGoalDone();
+      askExtra(n);
+    });
+    // 点遮罩空白处关闭
+    document.getElementById('goal-done-overlay')?.addEventListener('click', (e) => {
+      if (e.target.id === 'goal-done-overlay') hideGoalDone();
+    });
+  }
+
+  /**
+   * 「多背一点」。
+   *
+   * ★ 加量**必须**如实告知代价：这些词不是背完就算了，它们会全部进入
+   *   后续复习轮（后端 `cmd_submit_answer` → `srs::schedule` 一视同仁地
+   *   排下次复习）。后端算出的 `pressure` 就是这件事的量化结果，
+   *   这里只负责把它讲成人话，不替用户做决定。
+   */
+  async function askExtra(n) {
+    try {
+      const before = state.goal;
+      const g = await API.extraStudy(n, state.bookId || null, state.bookLang || null);
+      state.goal = g;
+      renderGoal();
+      const high = (g && g.pressure) === 'high';
+      const msg = `今天的目标已加到 ${g ? g.today_target : '?'} 词`
+        + (high ? '。⚠ 复习压力已经偏高：加背的词会全部进入复习轮，明后天会一起压过来。' : '。');
+      U().toast(msg, high ? 'err' : 'ok');
+      if (!before || before.today_target === (g && g.today_target)) {
+        // 后端没认这笔加量（例如目标已关闭）时给一句解释，别让按钮像是坏的
+        if (!g || g.mode === 'off') U().toast('当前没有启用学习目标，加量不会生效', 'err');
+      }
+      // 加量之后立刻开背 —— 用户点这个按钮的意图就是「现在就多背点」
+      start({ size: n });
+    } catch (e) {
+      U().toast(e.message, 'err');
+    }
+  }
+
+  /** 今天达标了就弹一次祝贺卡（同一天、同一目标数只弹一次）。 */
+  function maybeCelebrate() {
+    const g = state.goal;
+    if (!g || g.mode === 'off' || !g.today_target) return;
+    if (g.today_remaining > 0) return;
+    const stamp = `${g.eta_date || ''}|${g.today_target}|${g.today_done >= g.today_target ? 'done' : ''}`;
+    if (state.goalCelebrated === stamp) return;
+    state.goalCelebrated = stamp;
+    showGoalDone(g);
+  }
+
+  function showGoalDone(g) {
+    const ov = document.getElementById('goal-done-overlay');
+    if (!ov) return;
+    const stats = document.getElementById('goal-done-stats');
+    if (stats) {
+      stats.innerHTML = [
+        { k: '今日完成', v: `${g.today_done} 词` },
+        { k: '今日目标', v: `${g.today_target} 词` },
+        { k: '今天到期', v: `${g.due_today} 词` },
+        { k: '全书进度', v: `${g.learned} / ${g.total_words}` },
+      ].map(x => `<div><div class="k">${U().esc(x.k)}</div>
+        <div class="v">${U().esc(x.v)}</div></div>`).join('');
+    }
+    // 加量区：默认 10 个，并把「代价」直接写在这里
+    const extra = document.getElementById('goal-done-extra');
+    if (extra) {
+      const high = g.pressure === 'high';
+      extra.innerHTML = `
+        <div class="gp-note${high ? '' : ' calm'}">
+          ${high
+            ? '当前复习压力已经偏高。再加量的话，这些词会全部进入复习轮，明天的复习量会明显变大。'
+            : '多背的词会全部进入复习轮，按遗忘曲线安排后续复习 —— 这是好事，但明天的复习量会相应增加。'}
+        </div>
+        <div class="extra-row">
+          <span class="muted">再多背</span>
+          <input type="number" id="goal-extra-count" min="1" max="500" step="1" value="10" />
+          <span class="muted">个词</span>
+        </div>`;
+    }
+    const title = document.getElementById('goal-done-title');
+    if (title) {
+      title.textContent = g.finished ? '这本书背完了！' : '今天的目标完成啦';
+    }
+    const text = document.getElementById('goal-done-text');
+    if (text) {
+      text.textContent = g.finished
+        ? `「${g.book_name || '全部词库'}」里的单词已经全部学过一轮，接下来靠复习轮把它们记牢。`
+        : '今日任务已达标。要不要趁手感还在多背一点？';
+    }
+    ov.classList.remove('hidden');
+  }
+
+  function hideGoalDone() {
+    document.getElementById('goal-done-overlay')?.classList.add('hidden');
   }
 
   /* ============================================================
@@ -838,14 +1257,14 @@ const Study = (() => {
     const word = e.word || '';
     const audio = (e.phonetic && e.phonetic.audio) || '';
     // 跨会话的学习记录没有「这轮对错」这一笔，标记位留空
-    const mark = rec.correct === true ? '<span class="lw-mark ok">&#10004;</span>'
-      : rec.correct === false ? '<span class="lw-mark bad">&#10008;</span>' : '';
+    const mark = rec.correct === true ? `<span class="lw-mark ok">${U().icon('check')}</span>`
+      : rec.correct === false ? `<span class="lw-mark bad">${U().icon('cross')}</span>` : '';
     return `<div class="lw-row" data-idx="${idx}">
       <button class="speak-btn" title="朗读 ${U().esc(word)}"
         data-speak-word="${U().esc(word)}"
         data-speak-audio="${U().esc(audio)}"
         data-speak-lang="${U().esc(e.lang || 'en')}"
-        data-speak-accent="us">&#128266;</button>
+        data-speak-accent="us">${U().icon('sound')}</button>
       <div class="lw-main" data-act="detail" data-idx="${idx}">
         <div class="lw-word-line">
           <b>${U().esc(word)}</b>
@@ -1037,10 +1456,30 @@ const Study = (() => {
 
     document.getElementById('study-def-lang')?.addEventListener('change', (e) => setDefLang(e.target.value));
 
+    // 选项个数（需求 14：不再固定 4 个）。改动即落盘，不必点保存 ——
+    // 这个值只影响下一题，用户改完马上就能在下一题上验证。
+    document.getElementById('opt-option-count')?.addEventListener('change', async (e) => {
+      const n = Math.min(8, Math.max(2, parseInt(e.target.value, 10) || 4));
+      e.target.value = String(n);
+      try {
+        const cfg = state.config || (window.App && window.App.config);
+        if (cfg && cfg.study) {
+          cfg.study.option_count = n;
+          state.config = cfg;
+          await API.setStudyOptions(cfg.study);
+          U().toast(`每题的选项个数已设为 ${n}`, 'ok');
+        }
+      } catch (err) {
+        U().toast(err.message, 'err');
+      }
+    });
+
     bindFoot();
     bindKeys();
+    bindGoal();
     applyLangUI(defaultLang());
     loadBookOptions();
+    loadGoal();
   }
 
   /** 绑定底部「上一个单词 / 已背单词」这一块。 */
@@ -1098,6 +1537,10 @@ const Study = (() => {
     bind, start, end, setMode, setBook, startWithBook, loadBookOptions,
     applyLangUI, setDefLang, langInfo, modePromptLabel, modeButtonText,
     renderPrev, renderLearned, renderFoot, loadRecent, defLine,
+    // 今日复习（需求 14）：独立入口 + 独立会话槽位
+    startToday, beginRun,
+    // 学习目标（需求 15）
+    loadGoal, renderGoal, askExtra, maybeCelebrate, showGoalDone, hideGoalDone,
     // 攻坚队列与推进定时器都是**有状态**的，光看代码看不出是否自洽，
     // 必须能直接驱动才能验（冒烟测试靠这两个入口）。
     grindNote, clearAdvance, updateStreakUI,

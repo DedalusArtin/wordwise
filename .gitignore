@@ -47,6 +47,13 @@ Thumbs.db
 /.logs/
 installer/build_iss.bat
 /tmp/
+
+# 一次性诊断脚本与产物备份（.diag/）
+#
+# 里面放的是「为了查清某个 bug 而临时写的探针」：像素级量圆角、从 ico 里拆档、
+# 只读地分析用户自己的词库、以及重绘图标前的原图备份（icons-backup/）。
+# 它们不是项目的一部分，也不该影响 clone 体积。
+/.diag/
 *.7z
 
 # 随包分发的 llama.cpp 引擎（vendor\llama，约 118 MB）。

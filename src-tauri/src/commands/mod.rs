@@ -163,6 +163,68 @@ pub struct ExplainResult {
     /// 兜底翻译失败时的提示（此时 `text == original`，前端应如实告知）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
+    /// 本次讲解补充用到的**联网参考资料**（需求 5）。
+    ///
+    /// 本地词库查不到的例句 / 派生变形由模型补全，而这段补全的依据就是这里。
+    /// 前端独立渲染成「来源」清单（点击在应用内打开），用户能自己核对
+    /// 模型有没有编 —— 这比在正文里写「仅供参考」有用得多。
+    ///
+    /// 空列表序列化时会被跳过，前端拿到 `undefined` 即视为「本次没联网」。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub web_refs: Vec<crate::search::websearch::WebResult>,
+}
+
+/// 判断这次讲解要不要联网补充资料（需求 5）。
+///
+/// 触发条件是「本地资料明显不够用」，而不是无条件联网，理由有两条：
+///   1. 一次搜索是 0.5~2 秒的额外等待，而词库里的常用词条本来就很完整，
+///      为了补一条用不上的资料让所有查词都变慢，不划算；
+///   2. 联网检索有失败率（断网、被墙、引擎改版），能不发就不发。
+///
+/// 三种「不够用」：一条释义都没有（查不到）；有释义但**所有**义项都没有
+/// 例句（最常见的「查不到例句」）；既没有变形也没有相关词（派生与词汇
+/// 网络是需求 4/5 要补的重点）。
+pub fn explain_needs_web(entry: &WordEntry) -> bool {
+    if entry.senses.is_empty() {
+        return true;
+    }
+    if entry.senses.iter().all(|s| s.examples.is_empty()) {
+        return true;
+    }
+    entry.inflections.is_empty() && entry.related.is_empty()
+}
+
+/// 是否允许为讲解发起联网检索。
+///
+/// 拆成独立函数是为了让「用户关掉了在线搜索」这条边界**可被单测钉住**：
+/// 它是用户可感知的隐私/流量承诺，不能因为将来某次重构被顺手绕过。
+pub fn explain_web_allowed(cfg: &AppConfig, word: &str) -> bool {
+    cfg.web_search_enabled && !word.trim().is_empty()
+}
+
+/// 抓取讲解用的联网资料。**尽力而为**：任何失败都返回空列表，
+/// 绝不因为联网问题让用户看不到讲解。
+async fn fetch_explain_refs(
+    state: &AppState,
+    cfg: &AppConfig,
+    word: &str,
+) -> Vec<crate::search::websearch::WebResult> {
+    use crate::search::websearch::{self, SearchEngine};
+
+    if !explain_web_allowed(cfg, word) {
+        return Vec::new();
+    }
+    let word = word.trim();
+
+    // 查询词带上「例句 / 用法」是一箭双雕：既让引擎优先给出词典类页面
+    // （必应会挑出剑桥/牛津的结果），也顺手把「这个词怎么用」一起搜了。
+    let query = format!("{} 释义 例句 用法", word);
+    let engine = SearchEngine::parse(&cfg.search_engine);
+
+    match websearch::web_search(&state.http(), &query, engine, 5).await {
+        Ok(hits) => hits,
+        Err(_) => Vec::new(),
+    }
 }
 
 /// 解析本次要用的讲解语言：配置为空时退回中文。
@@ -243,7 +305,21 @@ pub async fn cmd_ai_explain(
         .flatten()
         .unwrap_or_else(|| WordEntry::new(&word));
 
-    let user_prompt = match &question {
+    // 需求 5：本地查不到例句 / 派生变形时，先联网抓一份**真实**资料，
+    // 作为模型补充内容的唯一依据（见 EXPLAIN_WEB_REF_CONSTRAINT）。
+    //
+    // 追问不重复抓：主讲解那次已经抓过，而追问的上下文就是主讲解本身。
+    let is_follow_up = question
+        .as_deref()
+        .map(|q| !q.trim().is_empty())
+        .unwrap_or(false);
+    let web_refs = if is_follow_up || !explain_needs_web(&entry) {
+        Vec::new()
+    } else {
+        fetch_explain_refs(&state, &cfg, &word).await
+    };
+
+    let mut user_prompt = match &question {
         Some(q) if !q.trim().is_empty() => {
             format!(
                 "单词：{}\n用户的追问：{}\n\n请针对该问题作答，若需要可结合该词的其他用法补充说明。",
@@ -252,9 +328,23 @@ pub async fn cmd_ai_explain(
         }
         _ => llm::explain_prompt(&entry, ""),
     };
+    if !web_refs.is_empty() {
+        let pairs: Vec<(String, String)> = web_refs
+            .iter()
+            .map(|r| (r.title.clone(), r.snippet.clone()))
+            .collect();
+        user_prompt = llm::with_web_refs(&user_prompt, &pairs);
+    }
 
-    // 提示词层：把语言要求注入 system（用户可编辑的人设不做改动，只追加）
-    let system = llm::with_lang_constraint(&cfg.llm.system_prompt, &explain_lang);
+    // 提示词层：把语言要求注入 system（用户可编辑的人设不做改动，只追加）。
+    //
+    // 注入顺序有讲究：**语言约束必须留在最后** —— 它自称「最高优先级、
+    // 覆盖上面所有冲突的要求」，只有真的排在末尾才成立。资料约束插在它之前。
+    let mut system = cfg.llm.system_prompt.clone();
+    if !web_refs.is_empty() {
+        system = llm::with_web_ref_constraint(&system, &explain_lang);
+    }
+    let system = llm::with_lang_constraint(&system, &explain_lang);
 
     let app2 = app.clone();
     let word2 = word.clone();
@@ -283,6 +373,7 @@ pub async fn cmd_ai_explain(
         lang: explain_lang,
         translated,
         note,
+        web_refs,
     };
 
     // 顺手存档（用户需求 C：讲解也算存储，能在词库里搜到）。
@@ -356,6 +447,9 @@ pub async fn cmd_ai_explain_sync(
         lang: explain_lang,
         translated,
         note,
+        // 批量导出**刻意不联网**：一次导出可能几十上百个词，等于拿搜索引擎
+        // 当 API 刷，既慢又容易被限流。交互式讲解（cmd_ai_explain）才补资料。
+        web_refs: Vec::new(),
     })
 }
 
@@ -429,6 +523,64 @@ pub async fn cmd_ai_generate_entry(
 // ============================================================
 // 三、查词与搜索（需求 2、6）
 // ============================================================
+
+/// 一个同族派生词（需求 5）。
+#[derive(Debug, Clone, Serialize)]
+pub struct Derivative {
+    pub word: String,
+    /// 词性，如 `n.`
+    pub pos: String,
+    /// 主要释义（一句话）
+    pub definition: String,
+}
+
+/// 同族派生词：由词形规则生成候选，再**去本地词库确认**哪些真的存在。
+///
+/// 需求 5 的「相关词太少，缺少 happiness 等派生变形」就是靠它补的。
+///
+/// 为什么不用 AI / 不联网：这里的诉求是「把词库里已有的同族词捞出来」。
+/// 用户词库里本来就同时收录了 happy 和 happiness，只是查 happy 时没人提到
+/// happiness。走本地确认还有三个好处：瞬间返回、离线可用、**绝不编造** ——
+/// 凭规则写出 happiness 很容易，但用户点下去发现查不到，比不显示更糟。
+///
+/// 上限 8 条：同族词是**补充信息**，塞满一屏就把释义挤没了。
+#[tauri::command]
+pub fn cmd_word_family(
+    state: State<'_, Arc<AppState>>,
+    word: String,
+    lang: Option<String>,
+) -> Result<Vec<Derivative>, String> {
+    const MAX_FAMILY: usize = 8;
+
+    let lang = lang
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| state.cfg().target_lang.clone());
+
+    let cands = crate::morph::derivative_candidates(&word);
+    if cands.is_empty() {
+        return Ok(Vec::new());
+    }
+    let briefs = state.db.existing_word_briefs(&cands, &lang).map_err(err)?;
+
+    // SQL 的 `IN` 不保证返回顺序，这里按**候选生成顺序**重排 —— 它是按
+    // 「派生可能性」排的（先后缀、再变形还原），打乱后 happier 跑到
+    // happiness 前面会显得毫无道理。
+    let mut out: Vec<Derivative> = Vec::new();
+    for c in &cands {
+        if out.len() >= MAX_FAMILY {
+            break;
+        }
+        if let Some((w, pos, def)) = briefs.iter().find(|(w, _, _)| w.eq_ignore_ascii_case(c)) {
+            out.push(Derivative {
+                word: w.clone(),
+                pos: pos.clone(),
+                definition: def.clone(),
+            });
+        }
+    }
+    Ok(out)
+}
 
 /// 查词：本地词库 → 缓存 → 多源联网 → 大模型兜底。
 #[tauri::command]
@@ -759,6 +911,20 @@ pub fn cmd_open_url(app: tauri::AppHandle, url: String) -> Result<(), String> {
     open_in_browser(&app, u).map_err(err)
 }
 
+/// 在应用内打开网页（需求 11：在线搜索不再跳到系统浏览器）。
+///
+/// 与 `cmd_open_url` 的分工：`cmd_open_url` 一律弹系统浏览器（「权威词典」
+/// 那排链接仍走它，行为不变）；本命令**桌面端**开应用内浏览窗口，**移动端**
+/// 没有多窗口语义，回退到系统浏览器。白名单校验与 `cmd_open_url` 完全一致。
+#[tauri::command]
+pub fn cmd_open_in_app(app: tauri::AppHandle, url: String) -> Result<(), String> {
+    let u = url.trim();
+    if !(u.starts_with("http://") || u.starts_with("https://")) {
+        return Err("只允许打开 http(s) 链接".into());
+    }
+    crate::webview::open_in_app(&app, u)
+}
+
 /// 跨平台打开浏览器。
 ///
 /// 走 tauri-plugin-opener，而不是自己 spawn 外部程序：
@@ -767,7 +933,10 @@ pub fn cmd_open_url(app: tauri::AppHandle, url: String) -> Result<(), String> {
 ///    按 `cfg(all(unix, not(macos)))` 分派会落到 `xdg-open` 上，
 ///    在那里 spawn 一个不存在的程序 —— 表现是点了链接毫无反应。
 ///    插件在移动端走 Intent，这才是正确路径。
-fn open_in_browser(app: &tauri::AppHandle, url: &str) -> anyhow::Result<()> {
+///
+/// 可见性为 `pub(crate)`：桌面端的 `cmd_open_url` 与移动端的
+/// `webview::open_in_app` 都要用它，逻辑本身未变。
+pub(crate) fn open_in_browser(app: &tauri::AppHandle, url: &str) -> anyhow::Result<()> {
     use tauri_plugin_opener::OpenerExt;
     app.opener().open_url(url, None::<&str>)?;
     Ok(())
@@ -941,6 +1110,8 @@ pub fn cmd_start_session(
     leech_only: Option<bool>,
     lang: Option<String>,
     def_lang: Option<String>,
+    // 会话类型：缺省 / `"study"` → 背诵槽；`"review"` → 复习槽（需求 14）。
+    kind: Option<String>,
 ) -> Result<SessionInfo, String> {
     let cfg = state.cfg();
     let lang = lang.unwrap_or(cfg.target_lang.clone());
@@ -1007,9 +1178,10 @@ pub fn cmd_start_session(
 
     let total = picked.len();
 
-    // 写入会话
+    // 写入会话（按 kind 选槽位：背诵与复习互不覆盖）
     {
-        let mut s = state.session.write();
+        let slot = state.session_slot(kind.as_deref());
+        let mut s = slot.write();
         s.queue = picked;
         s.index = 0;
         s.mode = Some(mode);
@@ -1018,6 +1190,8 @@ pub fn cmd_start_session(
         s.started_at = now;
         s.leech_only = leech_only;
         s.def_lang = def_lang;
+        // 新一轮不允许沿用上一轮的「答错回插」预算
+        s.requeue_counts.clear();
     }
 
     Ok(SessionInfo {
@@ -1027,6 +1201,129 @@ pub fn cmd_start_session(
         correct: 0,
         wrong: 0,
         leech_only,
+    })
+}
+
+/// 开始一轮**今日复习**（需求 14）。
+///
+/// 与 [`cmd_start_session`] 的区别（也是这轮需求的核心）：
+/// - 队列**只由「今天到期（含逾期）」的词构成**，不掺新词、不补足到 `batch_size`。
+///   入口按钮写的是「今天要复习 12 个」，点进去就必须是 12 个 —— 补足到 20
+///   会让用户觉得数字是假的。
+/// - 写入**独立的复习槽位** `state.review`，不会把正在进行的背诵会话清掉。
+/// - `size` 只作为**截断上限**（`None` = 全部到期词），绝不用于补足。
+/// - 一个到期的词都没有时返回 `total: 0`（前端据此提示「今天没有要复习的词」），
+///   而不是报错 —— 「今天没到期」是正常状态。
+#[tauri::command]
+pub fn cmd_start_review_session(
+    state: State<'_, Arc<AppState>>,
+    // 复习不单独选模式，但**必须让调用方传**：原来是从背诵槽里读
+    // `state.session.mode`，于是「界面选了拼写、复习却出看英选中」——
+    // 题面与用户手上的模式对不上，答完还会按错的模式判分。
+    mode: Option<QuizMode>,
+    size: Option<usize>,
+    lang: Option<String>,
+    def_lang: Option<String>,
+) -> Result<SessionInfo, String> {
+    start_review_session_inner(&state, mode, size, lang, def_lang)
+}
+
+/// 只由「今天到期（含逾期）」构成的复习队列。
+///
+/// ★ **绝不补足**：到期的有几个就是几个。`size` 只是截断上限（`None` = 全部），
+/// 与 [`cmd_start_session`] 会用新词/弱词补到 `batch_size` 的行为形成对比 ——
+/// 复习入口上的数字必须和实际题目数一致。
+fn build_review_queue(
+    state: &AppState,
+    lang: &str,
+    size: Option<usize>,
+) -> Result<Vec<WordEntry>, String> {
+    // `None` 取一个「实际上等于无限」的上限（本地词库不可能有上万条今天到期）。
+    const REVIEW_UNLIMITED: i64 = 10_000;
+    let limit = size
+        .map(|s| s as i64)
+        .unwrap_or(REVIEW_UNLIMITED)
+        .clamp(1, REVIEW_UNLIMITED);
+
+    // 与 `cmd_due_words` 同一排序口径：逾期越久越靠前 → 其次按到期时间 → 最后强化词优先。
+    // （`db.due_states` 内部只保证「强化词优先 + 到期时间」，这里补上「逾期天数」这一维，
+    //   否则「逾期 5 天」会排在「今天到期」后面。）
+    let now = timeutil::now_ts();
+    let today_start = timeutil::today_start();
+    let due = state.db.due_states(lang, now, limit).map_err(err)?;
+
+    let mut ordered: Vec<(&StudyState, i64)> = due
+        .iter()
+        .map(|s| {
+            // due_at 早于今天零点才算逾期，按整天算，避免「昨晚 23:59 到期」被算成逾期 1 天。
+            let overdue_days = if s.due_at < today_start {
+                timeutil::days_between(s.due_at, now).max(1)
+            } else {
+                0
+            };
+            (s, overdue_days)
+        })
+        .collect();
+    ordered.sort_by(|a, b| {
+        b.1.cmp(&a.1)
+            .then(a.0.due_at.cmp(&b.0.due_at))
+            .then(b.0.is_leech.cmp(&a.0.is_leech))
+    });
+
+    let mut picked: Vec<WordEntry> = Vec::new();
+    let mut seen = std::collections::BTreeSet::new();
+    for (st, _) in ordered {
+        if seen.insert(st.word.clone()) {
+            if let Some(e) = load_entry(state, &st.word, lang)? {
+                picked.push(e);
+            }
+        }
+    }
+    Ok(picked)
+}
+
+/// 复习会话的内部实现（不依赖 Tauri 状态，便于单测）。
+fn start_review_session_inner(
+    state: &AppState,
+    mode: Option<QuizMode>,
+    size: Option<usize>,
+    lang: Option<String>,
+    def_lang: Option<String>,
+) -> Result<SessionInfo, String> {
+    let cfg = state.cfg();
+    let lang = lang.unwrap_or(cfg.target_lang.clone());
+    let now = timeutil::now_ts();
+    let def_lang = def_lang.unwrap_or_default();
+
+    let picked = build_review_queue(state, &lang, size)?;
+    let total = picked.len();
+
+    // 复习沿用调用方传进来的模式；没传才退回背诵槽当前的模式。
+    // （回退只在「程序化发起复习、没带模式」时发生，正常 UI 一定会传。）
+    let mode = mode.unwrap_or_else(|| state.session.read().mode.unwrap_or_default());
+
+    // 写入**独立的复习槽位**：正在进行的背诵会话不受影响（需求 14）。
+    {
+        let mut s = state.review.write();
+        s.queue = picked;
+        s.index = 0;
+        s.mode = Some(mode);
+        s.correct = 0;
+        s.wrong = 0;
+        s.started_at = now;
+        s.leech_only = false;
+        s.def_lang = def_lang;
+        s.requeue_counts.clear();
+    }
+
+    // ★ total 可以为 0：不报错，交给前端提示「今天没有要复习的词」。
+    Ok(SessionInfo {
+        mode,
+        total,
+        index: 0,
+        correct: 0,
+        wrong: 0,
+        leech_only: false,
     })
 }
 
@@ -1046,8 +1343,16 @@ fn load_entry(
     if let Ok(Some(e)) = state.db.get_cached(word, lang, 30 * 24 * 3600, now) {
         return Ok(Some(e));
     }
-    // 兜底：返回只有词的占位条目，前端会异步联网补全
-    state.db.get_word(word, lang).map_err(err)
+    // 兜底 1：返回只有词的占位条目，前端会异步联网补全
+    if let Some(e) = state.db.get_word(word, lang).map_err(err)? {
+        return Ok(Some(e));
+    }
+    // 兜底 2：★ **跨语言**兜底。
+    //   调用方（`build_review_queue` / `cmd_start_session`）是拿 `study_state.lang`
+    //   来取词条的，而这两者的语言未必一致（历史数据里确实存在：状态记在 en、
+    //   词条只在 ja）。少了这一步，队列会「数得到但取不出」，最终静默变成空
+    //   队列 —— 界面表现为按钮上的数字和自己的提示语互相打脸。
+    state.db.get_word_any_lang(word).map_err(err)
 }
 
 /// 取当前题目（含干扰项）。
@@ -1055,10 +1360,12 @@ fn load_entry(
 pub fn cmd_current_question(
     state: State<'_, Arc<AppState>>,
     lang: Option<String>,
+    // 会话类型：缺省 / `"study"` → 背诵槽；`"review"` → 复习槽（需求 14）。
+    kind: Option<String>,
 ) -> Result<Option<QuizCard>, String> {
     let lang = lang.unwrap_or_else(|| state.cfg().target_lang);
     let (entry, mode, index, is_leech, total, correct, wrong, def_lang) = {
-        let s = state.session.read();
+        let s = state.session_slot(kind.as_deref()).read();
         if !s.is_active() {
             return Ok(None);
         }
@@ -1103,6 +1410,39 @@ pub fn cmd_current_question(
         &def_lang,
     )?;
     Ok(Some(card))
+}
+
+/// 把配置里的选择题选项个数收敛到合法范围 `2..=8`。
+///
+/// 抽成函数是为了「配置可以直接手改 / 被旧版本写坏」这层防护只有一个入口，
+/// 也方便单测覆盖边界（0、1、9、255…）。
+fn normalize_option_count(raw: u32) -> usize {
+    raw.clamp(2, 8) as usize
+}
+
+/// 打乱一个切片（Fisher–Yates）。
+///
+/// 后端也要打乱一次，不能只靠前端：某些模式（如拼写）前端并不走 `options`
+/// 渲染，若后端顺序固定，选项的排列就会长期一致，看起来像「答案总在第二项」。
+/// 两处都打乱是**刻意**的，不是冗余。
+///
+/// 不引入 `rand` 依赖：用当前时间做种子跑 xorshift 即可，足够随机且不增加
+/// 编译负担。
+fn shuffle_in_place<T>(items: &mut [T]) {
+    let n = items.len();
+    if n <= 1 {
+        return;
+    }
+    let mut seed = (timeutil::now_ts() as u64)
+        .wrapping_mul(6364136223846793005)
+        .wrapping_add((std::process::id() as u64) ^ 0x9E37_79B9_7F4A_7C15);
+    for i in (1..n).rev() {
+        seed ^= seed >> 12;
+        seed ^= seed << 25;
+        seed ^= seed >> 27;
+        let j = (seed.wrapping_mul(0x2545_F491_4F6C_DD1D) % (i as u64 + 1)) as usize;
+        items.swap(i, j);
+    }
 }
 
 /// 构造一道题：按模式决定题面与答案，并生成干扰项。
@@ -1171,22 +1511,35 @@ fn build_card(
         }
     };
 
-    // 干扰项：从同语言词库随机取，保证不与正确答案重复
+    // 干扰项数量由 `option_count` 决定（含正确答案，clamp 到 2~8，需求 14）。
+    // 干扰项取自**目标语言**的词库；不足时如实少给，绝不用同一个词重复填充 ——
+    // 那会让用户在「同一个答案出现两次」的题上直接懵掉。
+    // 最终不足 1 个干扰项时 `options` 为空，前端会走「只显示答案」的兜底路径。
+    let want_options = normalize_option_count(state.cfg().study.option_count);
+    let distractors_needed = want_options - 1;
     let mut options: Vec<String> = Vec::new();
-    let pool = state.db.random_words(lang, 30).map_err(err)?;
+    // 多取一些候选：池子里可能有空释义、与答案同义、以及正确答案自身。
+    let pool_size = ((distractors_needed as i64) * 8).max(30);
+    let pool = state.db.random_words(lang, pool_size).map_err(err)?;
     for p in pool {
-        if options.len() >= 3 {
+        if options.len() >= distractors_needed {
             break;
+        }
+        // ★ 正确答案的词自己必须在池子里被排除：否则可能出现两个一模一样的选项。
+        if p.word.eq_ignore_ascii_case(&entry.word) {
+            continue;
         }
         let cand = match mode {
             QuizMode::EnToZh | QuizMode::ExToZh => p.definition_in(def_lang),
             _ => p.word.clone(),
         };
+        // 空释义、与正确答案同文、以及彼此重复的干扰项都跳过（去重）。
         if cand.trim().is_empty() || cand == answer || options.contains(&cand) {
             continue;
         }
         options.push(cand);
     }
+    shuffle_in_place(&mut options);
 
     // 例句相关字段
     let (ex_raw, ex_trans) = entry.first_example().unwrap_or_default();
@@ -1295,6 +1648,48 @@ struct CardProgress {
     wrong: i32,
 }
 
+/// 答错的词回插到「当前位置 + 这么多题之后」（需求 14）。
+///
+/// 为什么是 3：紧挨着（gap=1）等于立刻重复，用户会以为程序卡了；隔得太远
+/// （>`3`）这一轮往往已经结束，等于没回插。中间隔两题是体感上刚好的间隔。
+const REQUEUE_GAP: usize = 3;
+
+/// 同一个词每轮最多回插几次。
+///
+/// 上限 2 而不是无限：一个怎么都记不住的词如果一直回插，用户就会卡在它上面
+/// 出不去（死亡循环）。回插两次仍然错，就交给下一轮 / 错词本去处理。
+const MAX_REQUEUE_PER_WORD: u32 = 2;
+
+/// 答错的词「本轮再轮到」：把它重新插回 `index + REQUEUE_GAP`。
+///
+/// 返回本轮是否真的回插了（没到上限、且当前题确实是这个词时才算）。
+/// 抽成纯函数是为了能直接单测位置、上限与 `total` 增长，不必搭 Tauri 状态。
+fn requeue_wrong(s: &mut crate::state::Session, word: &str) -> bool {
+    let key = word.to_lowercase();
+    let used = s.requeue_counts.get(&key).copied().unwrap_or(0);
+    if used >= MAX_REQUEUE_PER_WORD {
+        return false;
+    }
+    // 只有「当前题就是这个词」时才回插，避免把别的词错插进来
+    // （前端理论上可能显式传 word，与队列当前题不一致时要小心）。
+    let is_current = s
+        .queue
+        .get(s.index)
+        .map(|e| e.word.eq_ignore_ascii_case(word))
+        .unwrap_or(false);
+    if !is_current {
+        return false;
+    }
+    let Some(cur) = s.queue.get(s.index).cloned() else {
+        return false;
+    };
+    // 剩余不足 gap 个就追加到队尾。
+    let pos = (s.index + REQUEUE_GAP).min(s.queue.len());
+    s.queue.insert(pos, cur);
+    s.requeue_counts.insert(key, used + 1);
+    true
+}
+
 /// 提交答案 —— 驱动 SRS 调度（需求 4）。
 #[tauri::command]
 pub fn cmd_submit_answer(
@@ -1303,16 +1698,20 @@ pub fn cmd_submit_answer(
     grade: Grade,
     elapsed_ms: Option<i64>,
     lang: Option<String>,
+    // 会话类型：缺省 / `"study"` → 背诵槽；`"review"` → 复习槽（需求 14）。
+    kind: Option<String>,
 ) -> Result<AnswerResult, String> {
     let cfg = state.cfg();
     let lang = lang.unwrap_or(cfg.target_lang.clone());
     let now = timeutil::now_ts();
+    // 复习与背诵各自维护一个会话，互不干扰（需求 14）。
+    let slot = state.session_slot(kind.as_deref());
 
     // 确定被作答的词：显式传入优先，否则用会话当前题
     let word = match word {
         Some(w) if !w.trim().is_empty() => w,
         _ => {
-            let s = state.session.read();
+            let s = slot.read();
             match s.current() {
                 Some(e) => e.word.clone(),
                 None => return Err("当前没有进行中的题目".into()),
@@ -1320,7 +1719,7 @@ pub fn cmd_submit_answer(
         }
     };
 
-    let mode = state.session.read().mode.unwrap_or_default();
+    let mode = slot.read().mode.unwrap_or_default();
     let mode_str = match mode {
         QuizMode::EnToZh => "en_to_zh",
         QuizMode::ZhToEn => "zh_to_en",
@@ -1352,16 +1751,25 @@ pub fn cmd_submit_answer(
         )
         .map_err(err)?;
 
-    // 更新会话计数并推进
-    let (finished, total, correct, wrong) = {
-        let mut s = state.session.write();
+    // 更新会话计数并推进。
+    //
+    // ★ 答错的词本轮还要再轮到（需求 14）：把它重新插回 `index + gap`，
+    //   而不是只把 `due_at` 提前 —— 后者在本轮根本不会再出现，前端那句
+    //   「稍后会再考你一次」就成了误导。回插后 `total` 跟着增长，
+    //   `index` 仍然「答一题进一格」（不回退进度条）。
+    let (finished, total, correct, wrong, requeued) = {
+        let mut s = slot.write();
         if grade.is_correct() {
             s.correct += 1;
         } else {
             s.wrong += 1;
         }
+
+        // 答错的词本轮还要再轮到（需求 14）：见 `requeue_wrong` 的说明。
+        let requeued = !grade.is_correct() && requeue_wrong(&mut s, &word);
+
         s.index += 1;
-        (s.index >= s.queue.len(), s.total(), s.correct, s.wrong)
+        (s.index >= s.queue.len(), s.total(), s.correct, s.wrong, requeued)
     };
 
     // 取完整词条，用于答错时弹详情卡（需求 5）
@@ -1383,6 +1791,8 @@ pub fn cmd_submit_answer(
         wrong_count: wrong,
         // 记忆强度，前端画进度环
         retention: retention_now,
+        // 本轮是否真的把该词回插了（前端据此显示「稍后会再考你一次」的准确文案）
+        requeued,
     })
 }
 
@@ -1397,8 +1807,12 @@ fn grade_str(g: Grade) -> &'static str {
 
 /// 跳过当前题。
 #[tauri::command]
-pub fn cmd_skip(state: State<'_, Arc<AppState>>) -> Result<SessionInfo, String> {
-    let mut s = state.session.write();
+pub fn cmd_skip(
+    state: State<'_, Arc<AppState>>,
+    // 会话类型：缺省 / `"study"` → 背诵槽；`"review"` → 复习槽（需求 14）。
+    kind: Option<String>,
+) -> Result<SessionInfo, String> {
+    let mut s = state.session_slot(kind.as_deref()).write();
     s.index += 1;
     Ok(SessionInfo {
         mode: s.mode.unwrap_or_default(),
@@ -1412,18 +1826,25 @@ pub fn cmd_skip(state: State<'_, Arc<AppState>>) -> Result<SessionInfo, String> 
 
 /// 结束当前会话。
 #[tauri::command]
-pub fn cmd_end_session(state: State<'_, Arc<AppState>>) -> Result<SessionInfo, String> {
-    let s = state.session.read();
-    let info = SessionInfo {
-        mode: s.mode.unwrap_or_default(),
-        total: s.total(),
-        index: s.index,
-        correct: s.correct,
-        wrong: s.wrong,
-        leech_only: s.leech_only,
+pub fn cmd_end_session(
+    state: State<'_, Arc<AppState>>,
+    // 会话类型：缺省 / `"study"` → 背诵槽；`"review"` → 复习槽（需求 14）。
+    kind: Option<String>,
+) -> Result<SessionInfo, String> {
+    let slot = state.session_slot(kind.as_deref());
+    let info = {
+        let s = slot.read();
+        SessionInfo {
+            mode: s.mode.unwrap_or_default(),
+            total: s.total(),
+            index: s.index,
+            correct: s.correct,
+            wrong: s.wrong,
+            leech_only: s.leech_only,
+        }
     };
-    drop(s);
-    *state.session.write() = Default::default();
+    // 只清空被指定的槽位：结束复习不该把背诵会话一起清掉。
+    *slot.write() = Default::default();
     Ok(info)
 }
 
@@ -1449,6 +1870,8 @@ pub struct AnswerResult {
     pub correct_count: i32,
     pub wrong_count: i32,
     pub retention: f64,
+    /// 本轮是否真的把答错的词回插（需求 14）；新增字段，老前端忽略即可。
+    pub requeued: bool,
 }
 
 /// 查询某个词的学习状态与记忆强度。
@@ -1537,6 +1960,386 @@ pub fn cmd_review_plan(
     let now = timeutil::now_ts();
     let states = state.db.all_states(&lang).map_err(err)?;
     Ok(build_plan(&states, days.unwrap_or(14).clamp(1, 90), now))
+}
+
+// ============================================================
+// 六之二、学习目标（需求 15：设目标 + 完成后庆祝 + 加量提示）
+// ============================================================
+
+/// 目标模式是否合法。
+fn valid_goal_mode(m: &str) -> bool {
+    matches!(m, "off" | "days" | "per_day")
+}
+
+/// "YYYY-MM-DD" 两个日期相差几天（`today` 晚于 `date` 时为正）。解析失败按 0。
+fn days_since(date: &str, today: &str) -> i64 {
+    let p = |s: &str| chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d").ok();
+    match (p(date), p(today)) {
+        (Some(a), Some(b)) => (b - a).num_days(),
+        _ => 0,
+    }
+}
+
+/// 计划里**每天要吃掉多少新词**（不含当天到期的复习量）。
+///
+/// ★ 为什么把它单独抽出来：`eta_date` 的分母必须是这个数，而不是 `today_done`。
+///   用「今天已背了多少」当分母，第一天只背了几个词就会外推出几百天 ——
+///   实测用户库：剩余 5056 词、当天只背了 7 个，算出 5056/7 ≈ 723 天，
+///   界面于是写「预计完成 2028-09-29」，而用户设的目标明明白白是「30 天背完」。
+///   两个数字当众打架，和「按钮写着 1 个词、点进去说一个都没有」是同一类病。
+///
+///   今天背多背少只说明「今天达没达标」，不足以推翻整个计划；拿单日样本去做
+///   除法，开背第一天必然给出一个荒唐的年份。计划的速率才是稳定的基准。
+fn planned_new_per_day(mode: &str, remaining: u32, days_left: u32, per_day: u32) -> u32 {
+    match mode {
+        "days" => {
+            let dl = days_left.max(1) as f64;
+            ((remaining as f64) / dl).ceil() as u32
+        }
+        "per_day" => per_day,
+        _ => 0,
+    }
+}
+
+/// 按给定速率背完 `remaining` 个词还需要的天数（纯函数，便于单测）。
+fn eta_days_needed(remaining: u32, rate: u32) -> i64 {
+    if remaining == 0 || rate == 0 {
+        return 0;
+    }
+    ((remaining as f64) / (rate as f64)).ceil() as i64
+}
+
+/// 今天应完成多少（纯函数，公式见注释）。
+///
+/// - `days`：`ceil(remaining / max(1, days_left)) + due_today`
+/// - `per_day`：`per_day + due_today`
+/// - `off`：`0`
+/// - `finished`（没有新词了）：只保留 `due_today`，忽略加量。
+/// - 未完成时叠加当天的临时加量 `extra`。
+fn today_target_for(
+    mode: &str,
+    remaining: u32,
+    days_left: u32,
+    per_day: u32,
+    due_today: u32,
+    finished: bool,
+    extra: u32,
+) -> u32 {
+    if finished {
+        return due_today;
+    }
+    // 与 `eta_date` 共用同一个速率函数：今日目标与预计完成日必须同源，
+    // 否则两边口径一分叉，界面又会出现「目标是 30 天、完成日却是两年后」。
+    let base = match mode {
+        // days_left==0（已到/已超期）时用 max(1) 兜底，避免除零。
+        "days" | "per_day" => {
+            planned_new_per_day(mode, remaining, days_left, per_day).saturating_add(due_today)
+        }
+        _ => 0,
+    };
+    base.saturating_add(extra)
+}
+
+/// 是否该提示「轮次复习压力会升高」。
+///
+/// 两条任一命中即 high：
+///   ① 今天目标量 > 日均预期词量（`goal_per_day`，默认 30）的 **3 倍**；
+///   ② 今天到期量 > 未来 7 天**日均**复习量的 **3 倍**。
+/// 取 3 倍而不是 1.5 倍：1.5 倍在正常波动下几乎天天触发，提示会变成噪音；
+/// 3 倍才是「这一天会明显难受」的量级。
+fn pressure_is_high(
+    today_target: u32,
+    per_day_basis: u32,
+    due_today: u32,
+    review_load_7d: u32,
+) -> bool {
+    let daily_basis = per_day_basis.max(1) as f64;
+    let avg_due = review_load_7d as f64 / 7.0;
+    (today_target as f64) > daily_basis * 3.0 || (avg_due >= 1.0 && (due_today as f64) > 3.0 * avg_due)
+}
+
+/// 计算学习目标视图（`cmd_study_goal` / `cmd_set_study_goal` / `cmd_extra_study` 共用）。
+///
+/// `today_target` 的公式（用户原话「根据我们的公式计算同步复习之前的单词」）：
+/// - `days`    ：`ceil(remaining / max(1, days_left)) + due_today`
+///   —— 每天要背的新词，**加上**当天到期的复习量。背新词必然带来同步复习，
+///      用户要的就是这本总账；只报新词数会让目标显得轻松、实际做不完。
+/// - `per_day` ：`per_day + due_today`
+/// - `off`     ：`0`
+/// - 已全部学完（`finished`）时只保留 `due_today`（没有新词可背了）。
+/// - 下限 0；未完成时再叠加「多背一点」的临时加量（仅当天有效）。
+fn compute_study_goal(
+    state: &AppState,
+    book_id: Option<String>,
+    lang: Option<String>,
+) -> Result<StudyGoal, String> {
+    let cfg = state.cfg();
+    let study = cfg.study.clone();
+    let now = timeutil::now_ts();
+    let today = srs::day_key(now);
+    let today_date = chrono::NaiveDate::parse_from_str(&today, "%Y-%m-%d").ok();
+
+    // 目标词库：参数优先，其次配置里的 `goal_book_id`；空串 = 全部词库。
+    let book_id = match book_id {
+        Some(b) if !b.trim().is_empty() => b.trim().to_string(),
+        _ => study.goal_book_id.trim().to_string(),
+    };
+
+    // 有效语言：优先按**词库自身**的语言（与 `cmd_words_in_book` 口径一致），
+    // 否则用传入语言 / 当前学习语言。
+    let (eff_lang, book_name) = if book_id.is_empty() {
+        (
+            lang.unwrap_or_else(|| cfg.target_lang.clone()),
+            "全部词库".to_string(),
+        )
+    } else {
+        let wb = state.db.get_wordbook(&book_id).map_err(err)?;
+        let l = wb
+            .as_ref()
+            .map(|b| b.lang.clone())
+            .filter(|l| !l.is_empty())
+            .unwrap_or_else(|| lang.unwrap_or_else(|| cfg.target_lang.clone()));
+        let n = wb.map(|b| b.name).unwrap_or_else(|| book_id.clone());
+        (l, n)
+    };
+
+    let (total, learned) = if book_id.is_empty() {
+        (
+            state.db.word_count(&eff_lang).map_err(err)?.max(0) as u32,
+            state.db.learned_count(&eff_lang).map_err(err)?.max(0) as u32,
+        )
+    } else {
+        let (t, l, _) = state
+            .db
+            .book_progress(&book_id, &eff_lang, now)
+            .map_err(err)?;
+        (t.max(0) as u32, l.max(0) as u32)
+    };
+    let remaining = total.saturating_sub(learned);
+    // total==0 的「空词库」不算「已完成」，否则会误报庆祝。
+    let finished = total > 0 && remaining == 0;
+
+    let due_today = state
+        .db
+        .due_states(&eff_lang, now, 10_000)
+        .map_err(err)?
+        .len() as u32;
+    // 按**词**去重：同一个词今天答 5 次只算 1 个（用户说的是「背完多少个词」）。
+    let today_done = state
+        .db
+        .today_reviewed_words(Some(&eff_lang), now)
+        .map_err(err)?
+        .max(0) as u32;
+
+    // 未来 7 天预计复习总量（含今天的逾期）。
+    let review_load_7d = {
+        let states = state.db.all_states(&eff_lang).map_err(err)?;
+        let plan = build_plan(&states, 7, now);
+        let mut sum: i64 = plan.iter().map(|d| d.count).sum();
+        if let Some(d0) = plan.first() {
+            sum += d0.overdue;
+        }
+        sum.max(0) as u32
+    };
+
+    // 距目标完成日还剩几天（`days` 模式才有意义）。
+    let days_left = if study.goal_mode == "days" {
+        let elapsed = if study.goal_started_at.is_empty() {
+            0
+        } else {
+            days_since(&study.goal_started_at, &today).max(0)
+        };
+        (study.goal_days as i64 - elapsed).max(0) as u32
+    } else {
+        0
+    };
+
+    // 今天「多背一点」的临时加量（只有日期对上才算数，跨天自动失效）。
+    let extra = if study.goal_extra_date == today {
+        study.goal_extra_today
+    } else {
+        0
+    };
+
+    let today_target = today_target_for(
+        &study.goal_mode,
+        remaining,
+        days_left,
+        study.goal_per_day,
+        due_today,
+        finished,
+        extra,
+    );
+
+    let today_remaining = today_target.saturating_sub(today_done);
+
+    let pressure = if pressure_is_high(today_target, study.goal_per_day, due_today, review_load_7d)
+    {
+        "high"
+    } else {
+        "normal"
+    }
+    .to_string();
+
+    // 预计完成日：按**计划的速率**外推，不是按今天的瞬时节奏。
+    //
+    // ★ 改这里的原因（用户实测反馈：设了「30 天背完」，界面却写「2028 年」）：
+    //   旧公式是 `remaining / today_done` —— 拿「今天已背了几个」当整本书的速率。
+    //   今天才背 7 个就外推出 723 天，而单日样本的噪声极大（刚打开软件、只背了
+    //   两三分钟都会触发），第一天必然得出荒唐的年份。
+    //   今天背多背少只影响「今天达没达标」，不该把完成日拖到两年后。
+    //
+    //   没有目标（`off`）时**不编造**：既然没说要多久背完，就不存在「预计完成日」
+    //   这个基准，返回空串让前端整条不显示（与调试模式假数据同一口径）。
+    let eta_date = if remaining == 0 {
+        today.clone()
+    } else {
+        let rate = planned_new_per_day(
+            &study.goal_mode,
+            remaining,
+            days_left,
+            study.goal_per_day,
+        );
+        match today_date {
+            Some(d) if rate > 0 => (d + chrono::Duration::days(eta_days_needed(remaining, rate)))
+                .format("%Y-%m-%d")
+                .to_string(),
+            _ => String::new(),
+        }
+    };
+
+    let on_track = study.goal_mode == "off" || finished || today_done >= today_target;
+
+    Ok(StudyGoal {
+        mode: study.goal_mode.clone(),
+        // per_day 模式下 days 报 0，days 模式下 per_day 报 0 —— 前端据此渲染。
+        days: if study.goal_mode == "days" { study.goal_days } else { 0 },
+        per_day: if study.goal_mode == "per_day" { study.goal_per_day } else { 0 },
+        book_id: book_id.clone(),
+        book_name,
+        total_words: total,
+        learned,
+        remaining,
+        today_target,
+        today_done,
+        today_remaining,
+        eta_date,
+        days_left,
+        due_today,
+        review_load_7d,
+        pressure,
+        on_track,
+        finished,
+    })
+}
+
+/// 读取当前学习目标（前端据此渲染进度环与庆祝弹窗）。
+#[tauri::command]
+pub fn cmd_study_goal(
+    state: State<'_, Arc<AppState>>,
+    book_id: Option<String>,
+    lang: Option<String>,
+) -> Result<StudyGoal, String> {
+    compute_study_goal(&state, book_id, lang)
+}
+
+/// 设置学习目标（保存后立刻回传最新 goal，前端一次往返就够）。
+#[tauri::command]
+pub fn cmd_set_study_goal(
+    state: State<'_, Arc<AppState>>,
+    mode: String,
+    days: Option<u32>,
+    per_day: Option<u32>,
+    book_id: Option<String>,
+) -> Result<StudyGoal, String> {
+    let mode = mode.trim().to_string();
+    if !valid_goal_mode(&mode) {
+        return Err(format!("目标模式「{mode}」不认识，只能是 off / days / per_day"));
+    }
+    // 无论当前模式用不用得到，显式传入的值都要校验，避免脏数据被静默保存。
+    if let Some(d) = days {
+        if !(1..=3650).contains(&d) {
+            return Err("目标天数必须在 1~3650 天之间".to_string());
+        }
+    }
+    if let Some(p) = per_day {
+        if !(1..=1000).contains(&p) {
+            return Err("每天词量必须在 1~1000 之间".to_string());
+        }
+    }
+    // 当前模式必需的值缺省时，用配置里的现值兜底并同样校验。
+    if mode == "days" {
+        let d = days.unwrap_or_else(|| state.cfg().study.goal_days);
+        if !(1..=3650).contains(&d) {
+            return Err("目标天数必须在 1~3650 天之间".to_string());
+        }
+    }
+    if mode == "per_day" {
+        let p = per_day.unwrap_or_else(|| state.cfg().study.goal_per_day);
+        if !(1..=1000).contains(&p) {
+            return Err("每天词量必须在 1~1000 之间".to_string());
+        }
+    }
+
+    let today = srs::day_key(timeutil::now_ts());
+    state
+        .update_config(|c| {
+            let was_off = c.study.goal_mode == "off";
+            c.study.goal_mode = mode.clone();
+            if let Some(d) = days {
+                c.study.goal_days = d;
+            }
+            if let Some(p) = per_day {
+                c.study.goal_per_day = p;
+            }
+            if let Some(b) = book_id.clone() {
+                c.study.goal_book_id = b;
+            }
+            // 只在**首次**从 off 切到非 off 时写下开始日期：
+            // 之后每次改模式都重置的话，「已经过去几天」会被清零，
+            // 目标永远从今天重新开始，用户永远完不成。
+            if was_off && mode != "off" {
+                c.study.goal_started_at = today.clone();
+            }
+            // 关掉目标时把当天的临时加量一并清掉。
+            if mode == "off" {
+                c.study.goal_extra_today = 0;
+                c.study.goal_extra_date = String::new();
+            }
+        })
+        .map_err(err)?;
+
+    compute_study_goal(&state, None, None)
+}
+
+/// 「多背一点」：临时把今天的目标抬高 `extra` 个词（仅当天有效）。
+///
+/// 被多背的词**必须进入复习轮**：这一点由 `cmd_submit_answer` → `srs::schedule`
+/// 保证（答完就会写入未来的 `due_at`），返回的 `pressure` 供前端提示
+/// 「加量会抬高轮次复习压力」。
+#[tauri::command]
+pub fn cmd_extra_study(
+    state: State<'_, Arc<AppState>>,
+    extra: u32,
+    book_id: Option<String>,
+    lang: Option<String>,
+) -> Result<StudyGoal, String> {
+    if !(1..=500).contains(&extra) {
+        return Err("加量必须是 1~500 之间的数字".to_string());
+    }
+    let today = srs::day_key(timeutil::now_ts());
+    state
+        .update_config(|c| {
+            // 同一天多次点「多背一点」应累加；跨天则从这笔重新开始。
+            if c.study.goal_extra_date == today {
+                c.study.goal_extra_today = c.study.goal_extra_today.saturating_add(extra);
+            } else {
+                c.study.goal_extra_today = extra;
+                c.study.goal_extra_date = today.clone();
+            }
+        })
+        .map_err(err)?;
+    compute_study_goal(&state, book_id, lang)
 }
 
 /// 错词本（需求 5）。
@@ -1763,4 +2566,336 @@ pub fn cmd_seed_demo(state: State<'_, Arc<AppState>>, lang: Option<String>) -> R
         }
     }
     Ok(n)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state::Session;
+
+    /// 建一个独立的临时 AppState（连内存/临时目录，不碰用户数据）。
+    fn state(tag: &str) -> Arc<AppState> {
+        let p = std::env::temp_dir().join(format!("wordwise-cmd-{}-{}", tag, std::process::id()));
+        let _ = std::fs::remove_dir_all(&p);
+        AppState::new(p).expect("建测试状态")
+    }
+
+    fn session_of(words: &[&str]) -> Session {
+        Session {
+            queue: words.iter().map(|w| WordEntry::new(*w)).collect(),
+            ..Default::default()
+        }
+    }
+
+    /* ---------------- 需求 5：AI 联网补充的触发条件 ---------------- */
+
+    fn entry_with(senses: usize, examples: usize, inflections: usize, related: usize) -> WordEntry {
+        let mut e = WordEntry::new("happy");
+        for i in 0..senses {
+            let mut s = Sense {
+                pos: "adj.".into(),
+                definition: format!("释义{}", i),
+                ..Default::default()
+            };
+            for j in 0..examples {
+                s.examples.push(Example {
+                    text: format!("ex{}", j),
+                    translation: String::new(),
+                });
+            }
+            e.senses.push(s);
+        }
+        for i in 0..inflections {
+            e.inflections.push(Inflection {
+                label: "比较级".into(),
+                form: format!("form{}", i),
+            });
+        }
+        for i in 0..related {
+            e.related.push(format!("rel{}", i));
+        }
+        e
+    }
+
+    #[test]
+    fn web_refs_only_when_local_data_thin() {
+        // 一条释义都没有（本地查不到）→ 联网
+        assert!(explain_needs_web(&entry_with(0, 0, 0, 0)));
+        // 有释义但整条词条一个例句都没有 → 联网（这是最常见的「查不到例句」）
+        assert!(explain_needs_web(&entry_with(2, 0, 3, 3)));
+        // 有释义有例句，但既无变形也无相关词 → 联网补「派生与词汇网络」
+        assert!(explain_needs_web(&entry_with(2, 1, 0, 0)));
+    }
+
+    #[test]
+    fn web_refs_skipped_when_local_data_rich() {
+        // 释义 + 例句 + 变形俱全：本地数据够用，不该为它多等一次搜索
+        assert!(!explain_needs_web(&entry_with(2, 1, 3, 0)));
+        // 只有相关词、没有变形，也算够用（相关词已能撑起词汇网络那一段）
+        assert!(!explain_needs_web(&entry_with(2, 2, 0, 5)));
+    }
+
+    #[test]
+    fn web_refs_disabled_by_config() {
+        // 关掉「在线搜索」的用户不该在讲解时偷偷联网 —— 这条约束是
+        // 用户可感知的隐私/流量边界，必须在取资料前就短路。
+        let st = state("web-refs-off");
+        let mut cfg = st.cfg();
+        cfg.web_search_enabled = true;
+        assert!(explain_web_allowed(&cfg, "happy"));
+        // 空词条名没法搜，同样不发请求
+        assert!(!explain_web_allowed(&cfg, "   "));
+
+        cfg.web_search_enabled = false;
+        assert!(!explain_web_allowed(&cfg, "happy"));
+    }
+
+    /* ---------------- 需求 15：today_target 公式 ---------------- */
+
+    #[test]
+    fn today_target_days_mode() {
+        // ceil(100/10)=10 加今日复习 5 = 15
+        assert_eq!(today_target_for("days", 100, 10, 30, 5, false, 0), 15);
+        // days_left=0（已到/已超期）边界：剩余的全部算今天，兜底除零
+        assert_eq!(today_target_for("days", 100, 0, 30, 5, false, 0), 105);
+        // remaining=0 但非 finished（空词库）→ 0 + due
+        assert_eq!(today_target_for("days", 0, 10, 30, 5, false, 0), 5);
+        // finished（有词且全学完）→ 只保留 due，忽略加量
+        assert_eq!(today_target_for("days", 0, 10, 30, 5, true, 7), 5);
+        // 未完成时叠加「多背一点」的临时加量
+        assert_eq!(today_target_for("days", 100, 10, 30, 5, false, 7), 22);
+    }
+
+    #[test]
+    fn today_target_per_day_and_off() {
+        assert_eq!(today_target_for("per_day", 500, 0, 20, 3, false, 0), 23);
+        assert_eq!(today_target_for("per_day", 0, 0, 20, 3, true, 9), 3);
+        assert_eq!(today_target_for("off", 500, 10, 20, 3, false, 0), 0);
+        // off + 加量：仍然按加量给出目标（用户就是想多背）
+        assert_eq!(today_target_for("off", 500, 10, 20, 3, false, 4), 4);
+        // 下限 0
+        assert_eq!(today_target_for("off", 0, 0, 0, 0, false, 0), 0);
+    }
+
+    /* ---------------- 预计完成日（eta）：分母必须是计划速率 ---------------- */
+
+    #[test]
+    fn planned_rate_is_the_eta_basis_not_todays_sample() {
+        // 用户的真实场景：整本书剩 5056 词、目标「30 天背完」。
+        // 计划速率 = ceil(5056/30) = 169 词/天。
+        assert_eq!(planned_new_per_day("days", 5056, 30, 30), 169);
+        // 按计划速率外推：ceil(5056/169) = 30 天 —— 与「30 天目标」自洽。
+        assert_eq!(eta_days_needed(5056, 169), 30);
+
+        // ★ 反面用例（本 bug 的原型）：旧公式用「今天已背了多少」当分母，
+        //   今天只背 7 个就外推出 723 天 → 界面显示「2028 年」。
+        //   现在无论 today_done 是几，都不参与 eta 的计算。
+        assert_eq!(eta_days_needed(5056, 7), 723); // 这个数本身没错，错在拿它当 eta
+        assert!(eta_days_needed(5056, 169) <= 30); // 正确口径下不会超出目标天数
+
+        // per_day 模式：速率就是用户设的每日量
+        assert_eq!(planned_new_per_day("per_day", 5056, 0, 30), 30);
+        assert_eq!(eta_days_needed(5056, 30), 169);
+    }
+
+    #[test]
+    fn eta_never_invents_a_date_without_a_goal() {
+        // off 模式没有「多久背完」这个基准 → 速率 0 → 不编造完成日
+        assert_eq!(planned_new_per_day("off", 5056, 30, 30), 0);
+        assert_eq!(eta_days_needed(5056, 0), 0);
+        // 速率为 0 时，无论剩多少都不该产出日期
+        assert_eq!(eta_days_needed(1, 0), 0);
+        // 已经背完 → 0 天（今天就算完成）
+        assert_eq!(eta_days_needed(0, 169), 0);
+        // days_left=0（已到/已超期）：速率兜底为 remaining，1 天背完
+        assert_eq!(planned_new_per_day("days", 100, 0, 30), 100);
+        assert_eq!(eta_days_needed(100, 100), 1);
+    }
+
+    #[test]
+    fn today_target_and_eta_share_one_rate_function() {
+        // 同一组入参下，今日目标里的「新词摊派」必须等于 planned_new_per_day，
+        // 否则今日目标说 169、完成日却按别的速率算，两边又会打架。
+        let planned = planned_new_per_day("days", 100, 10, 30);
+        assert_eq!(planned, 10);
+        assert_eq!(today_target_for("days", 100, 10, 30, 5, false, 0), planned + 5);
+        assert_eq!(today_target_for("per_day", 500, 0, 20, 3, false, 0), 23);
+    }
+
+    /* ---------------- 需求 15：pressure 阈值 ---------------- */
+
+    #[test]
+    fn pressure_threshold_judgement() {
+        // 31 远低于 30*3 → normal
+        assert!(!pressure_is_high(31, 30, 0, 0));
+        // 恰好等于 3 倍不算超，越过才算
+        assert!(!pressure_is_high(90, 30, 0, 0), "等于 3 倍不应判 high");
+        assert!(pressure_is_high(91, 30, 0, 0));
+        // 1.5 倍绝不触发（否则提示会变成噪音）
+        assert!(!pressure_is_high(45, 30, 0, 0));
+        // 复习端：7 天日均 10，今天到期 31 > 30 → high；30 不触发
+        assert!(pressure_is_high(0, 30, 31, 70));
+        assert!(!pressure_is_high(0, 30, 30, 70));
+        // 没有历史复习量（日均 < 1）时不因今天到期而误报
+        assert!(!pressure_is_high(0, 30, 5, 0));
+    }
+
+    /* ---------------- 需求 14：选项个数 clamp ---------------- */
+
+    #[test]
+    fn option_count_clamped_to_2_8() {
+        assert_eq!(normalize_option_count(0), 2);
+        assert_eq!(normalize_option_count(1), 2);
+        assert_eq!(normalize_option_count(2), 2);
+        assert_eq!(normalize_option_count(4), 4);
+        assert_eq!(normalize_option_count(8), 8);
+        assert_eq!(normalize_option_count(9), 8);
+        assert_eq!(normalize_option_count(1000), 8);
+    }
+
+    /* ---------------- 需求 14：错题回插 ---------------- */
+
+    #[test]
+    fn wrong_requeue_inserts_at_gap_and_grows_total() {
+        let mut s = session_of(&["a", "b", "c", "d", "e"]);
+        s.index = 1; // 当前是 b
+        let total_before = s.total();
+        assert!(requeue_wrong(&mut s, "b"));
+        assert_eq!(s.total(), total_before + 1, "total 必须跟着增长");
+        assert_eq!(s.index, 1, "回插本身不推进 index（推进由调用方 +1）");
+        assert_eq!(s.queue[1].word, "b", "当前题位置不变");
+        assert_eq!(s.queue[1 + REQUEUE_GAP].word, "b", "回插到 index+gap");
+        // 键按小写归一
+        assert_eq!(s.requeue_counts.get("b"), Some(&1));
+    }
+
+    #[test]
+    fn wrong_requeue_appends_to_tail_when_near_end() {
+        let mut s = session_of(&["a", "b"]);
+        s.index = 1;
+        assert!(requeue_wrong(&mut s, "b"));
+        assert_eq!(s.queue.len(), 3);
+        assert_eq!(s.queue[2].word, "b", "剩余不足 gap 个时追加到队尾");
+    }
+
+    #[test]
+    fn wrong_requeue_capped_at_two_per_word() {
+        let mut s = session_of(&["a", "b", "c", "d", "e"]);
+        s.index = 1; // b
+        assert!(requeue_wrong(&mut s, "b"));
+        // 第二次：当前题挪到刚才插入的位置
+        s.index = 4;
+        assert!(requeue_wrong(&mut s, "b"));
+        assert_eq!(s.requeue_counts.get("b"), Some(&2));
+        // 第三次：到达上限，不再回插
+        s.index = s.queue.iter().position(|e| e.word == "b").unwrap();
+        let len = s.queue.len();
+        assert!(!requeue_wrong(&mut s, "b"), "每个词每轮最多回插 2 次");
+        assert_eq!(s.queue.len(), len);
+    }
+
+    #[test]
+    fn wrong_requeue_ignores_non_current_word() {
+        let mut s = session_of(&["a", "b", "c"]);
+        s.index = 0; // 当前是 a
+        assert!(!requeue_wrong(&mut s, "zzz"));
+        assert!(!requeue_wrong(&mut s, "c"));
+        assert_eq!(s.total(), 3);
+        assert!(s.requeue_counts.is_empty());
+    }
+
+    /* ---------------- 需求 14：会话槽位分离 ---------------- */
+
+    #[test]
+    fn review_session_does_not_clobber_study_session() {
+        let st = state("slots");
+        // 造一个进行中的背诵会话
+        {
+            let mut s = st.session_slot(None).write();
+            s.queue = vec![WordEntry::new("study1")];
+            s.index = 0;
+            s.def_lang = "zh".into();
+        }
+        // 开复习（空库 → total 0，但不报错）
+        let info = start_review_session_inner(&st, None, None, Some("en".into()), None).unwrap();
+        assert_eq!(info.total, 0, "今天没有要复习的词时返回 total=0，而不是报错");
+        // 背诵槽原封不动
+        let s = st.session_slot(None).read();
+        assert_eq!(s.queue.len(), 1);
+        assert_eq!(s.current().unwrap().word, "study1");
+        // 复习是另一个槽位
+        assert!(st.session_slot(Some("review")).read().queue.is_empty());
+    }
+
+    #[test]
+    fn unknown_kind_falls_back_to_study_slot() {
+        let st = state("kind-fallback");
+        assert!(std::ptr::eq(
+            st.session_slot(Some("nonsense")),
+            st.session_slot(Some("study")),
+        ));
+        assert!(!std::ptr::eq(
+            st.session_slot(Some("review")),
+            st.session_slot(None),
+        ));
+    }
+
+    /* ---------------- 需求 14：复习队列不补足 ---------------- */
+
+    #[test]
+    fn review_queue_is_not_padded_to_batch_size() {
+        let st = state("review-nofill");
+        st.update_config(|c| c.study.batch_size = 20).unwrap();
+        let now = timeutil::now_ts();
+        let entries = vec![
+            WordEntry::new("aa"),
+            WordEntry::new("bb"),
+            WordEntry::new("cc"),
+        ];
+        st.db.bulk_upsert_words(&entries, now).unwrap();
+        // 只有两个词到期
+        st.db.upsert_state(&StudyState::new("aa", "en", now)).unwrap();
+        st.db.upsert_state(&StudyState::new("bb", "en", now)).unwrap();
+
+        let q = build_review_queue(&st, "en", None).unwrap();
+        assert_eq!(q.len(), 2, "到期的有几个就是几个，绝不补足到 batch_size");
+        // size 只用于截断上限
+        assert_eq!(build_review_queue(&st, "en", Some(1)).unwrap().len(), 1);
+        // 没有到期词 → 空队列（不报错）
+        assert!(build_review_queue(&st, "ja", None).unwrap().is_empty());
+    }
+
+    /// 复习会话必须**采用调用方传来的模式**，不能悄悄沿用背诵槽的模式。
+    ///
+    /// 这条是回归测试：原来的实现从 `state.session.mode` 读模式，
+    /// 于是「界面切到拼写、复习却出看英选中」，题面与用户手上的模式对不上，
+    /// 答完还会按错的模式判分 —— 现象是「我明明在拼写，它却让我选释义」。
+    #[test]
+    fn review_session_honours_caller_mode() {
+        let st = state("review-mode");
+        let now = timeutil::now_ts();
+        st.db
+            .bulk_upsert_words(&[WordEntry::new("aa")], now)
+            .unwrap();
+        st.db.upsert_state(&StudyState::new("aa", "en", now)).unwrap();
+
+        // 背诵槽里放一个别的模式，用来证明复习**没有**读它
+        st.session_slot(None).write().mode = Some(QuizMode::Spelling);
+
+        let info = start_review_session_inner(
+            &st,
+            Some(QuizMode::ZhToEn),
+            None,
+            Some("en".into()),
+            Some("zh".into()),
+        )
+        .unwrap();
+        assert_eq!(info.total, 1, "一个到期词就出一题");
+        assert_eq!(info.mode, QuizMode::ZhToEn, "复习用的是调用方传的模式");
+        let s = st.session_slot(Some("review")).read();
+        assert_eq!(s.mode, Some(QuizMode::ZhToEn));
+        assert_eq!(s.def_lang, "zh", "释义语言也要写进复习槽");
+        // 背诵槽的模式一个字没动
+        assert_eq!(st.session_slot(None).read().mode, Some(QuizMode::Spelling));
+    }
 }

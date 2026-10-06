@@ -3,6 +3,59 @@
    词条渲染、提示、标签页、Markdown 轻解析等
    ============================================================ */
 
+/* ---------------- 内联 SVG 图标（全站唯一来源） ----------------
+
+   ★ 为什么界面图标一律用内联 SVG 而不是 emoji / 实体字符：
+     emoji 的字形宽度由**字体**决定，而字体由**平台**决定。同一个 🔊
+     在 Windows（Segoe UI Emoji）与 Android（Noto Color Emoji）上
+     advance width 不同；同一个 &#9881;（⚙）在有的机器上被渲染成彩色
+     emoji、有的机器上是纯文本符号。一列图标混着这两种行为，在 Windows
+     上就是「底部图标对不齐」。
+     内联 SVG 的尺寸与基线完全由 CSS 决定（见 app.css 的 `svg.ico`），
+     与平台字体无关：写一次，到处一致。
+
+   用法：`icon('sound')` 返回 `<svg class="ico" …>…</svg>`。
+   颜色靠 `currentColor` 继承，所以悬停 / 选中态的换色自动跟随，
+   不需要为每种状态各画一套。
+
+   加图标只需在这里补一条 —— 别在别处再内联一份 SVG，
+   否则「同一个图标两个尺寸」的问题会立刻回来。 */
+const ICON_PATHS = {
+  /* 发音 / 朗读 */
+  sound: '<path d="M4.2 9.6h3L11.6 6v12l-4.4-3.6h-3Z"/><path d="M15.3 9.4a4 4 0 0 1 0 5.2"/><path d="M17.9 6.9a7.6 7.6 0 0 1 0 10.2"/>',
+  /* 主题：浅色（太阳）/ 深色（月亮）/ 跟随系统 */
+  sun: '<circle cx="12" cy="12" r="4.2"/><path d="M12 2.8v2.4M12 18.8v2.4M2.8 12h2.4M18.8 12h2.4M5.4 5.4l1.7 1.7M16.9 16.9l1.7 1.7M5.4 18.6l1.7-1.7M16.9 7.1l1.7-1.7"/>',
+  moon: '<path d="M20.4 14.6A8.6 8.6 0 0 1 9.4 3.6a8.6 8.6 0 1 0 11 11Z"/>',
+  system: '<rect x="3" y="4.6" width="18" height="12.4" rx="1.8"/><path d="M8.4 20.4h7.2"/><path d="M12 17v3.4"/>',
+  /* 空状态 */
+  book: '<path d="M12 6.7C10.4 5.3 8.1 4.7 4.4 4.7v12.5c3.7 0 6 .6 7.6 2 1.6-1.4 3.9-2 7.6-2V4.7c-3.7 0-6 .6-7.6 2Z"/><path d="M12 6.7v12.5"/>',
+  search: '<circle cx="10.8" cy="10.8" r="6.3"/><path d="M15.5 15.5 20.5 20.5"/>',
+  /* 通用符号 */
+  check: '<path d="M5 12.8 9.6 17.4 19 8"/>',
+  cross: '<path d="M6.4 6.4l11.2 11.2M17.6 6.4 6.4 17.6"/>',
+  warn: '<path d="M12 4.4 3.3 19.6h17.4L12 4.4Z"/><path d="M12 9.9v4.4"/><path d="M12 17.2h.01"/>',
+  back: '<path d="M19 12H5"/><path d="M11 6 5 12l6 6"/>',
+  chevron: '<path d="M9.4 5.6 15.8 12l-6.4 6.4"/>',
+  swap: '<path d="M4.6 8.4h13.2"/><path d="M14.6 5.2l3.2 3.2-3.2 3.2"/><path d="M19.4 15.6H6.2"/><path d="M9.4 12.4 6.2 15.6l3.2 3.2"/>',
+  minus: '<path d="M5.4 12h13.2"/>',
+  fit: '<path d="M4.6 9V4.8h4.2"/><path d="M19.4 15v4.2h-4.2"/><path d="M19.4 9V4.8h-4.2"/><path d="M4.6 15v4.2h4.2"/>',
+  plus: '<path d="M12 5.4v13.2"/><path d="M5.4 12h13.2"/>',
+};
+
+/**
+ * 生成一个内联 SVG 图标。
+ *
+ * @param {string} name  ICON_PATHS 里的键
+ * @param {string} [cls] 追加的 class（如 'fill' 走实心填充）
+ * @returns {string} SVG 标记；名字不认识时返回空串（**不抛异常**：
+ *   图标缺失不该让整个词条渲染挂掉）
+ */
+function icon(name, cls) {
+  const d = ICON_PATHS[name];
+  if (!d) return '';
+  return `<svg class="ico${cls ? ' ' + cls : ''}" viewBox="0 0 24 24" aria-hidden="true" focusable="false">${d}</svg>`;
+}
+
 /**
  * 发音按钮 HTML。
  *
@@ -345,10 +398,9 @@ function renderPairs(pairs, opts = {}) {
     parts.push('<div class="pair-card">');
     parts.push('<div class="pair-card-head">');
     parts.push(`<span class="pair-word clickable" data-word="${esc(p.word)}">${esc(p.word)}</span>`);
-    // 词头旁直接给一个 🔊：查到一个生词，第一件想做的事就是听它怎么读。
-    // 发音按钮不需要额外绑事件 —— 结果区整块挂了委托（U().speakBind(box)），
-    // 按钮自带 data-speak-* 就能取到词。
-    parts.push(speakBtn(p.entry, 'us', '发音'));
+    // ★ 词头旁**不再**放小喇叭：紧跟着的 renderEntry 音标行里已经有
+    //   「英 / 美」两个发音按钮，这里再来一个是重复入口，视觉上也抢焦点
+    //   （用户原话：「删除文字旁的小喇叭图标，因为下方已有英美发音」）。
     parts.push(`<span class="tag blue">${esc(langLabel(p.lang))}</span>`);
     parts.push(p.via === 'translation'
       ? '<span class="tag ok">主译</span>'
@@ -664,17 +716,28 @@ function switchDetailTab(name) {
  * 用途：全局快捷键（document 级的 keydown）必须先问一句这个，否则
  * 用户在搜索框里输入时按键会被快捷键吞掉——表现为「输入框打不了字、
  * 退格也没用」。这是之前背诵页 A~H / 1~8 快捷键把搜索框吃掉的原因。
+ *
+ * ★ 已禁用 / 只读的输入框**不算**打字目标。
+ *   这一条是「答题后按回车进不了下一题」的根因之一：拼写模式答完会把
+ *   `#spell-input` 置为 `disabled`，但焦点还在它身上；禁用控件根本收不到
+ *   按键，「正在输入」这个判断于是永远为真 —— 回车被无条件吞掉。
+ *   判定标准应该是「这个控件还能不能接收文字」，而不是「它是不是 INPUT」。
  */
 function isTypingTarget(t) {
   if (!t || t.nodeType !== 1) return false;
   const tag = (t.tagName || '').toUpperCase();
-  if (tag === 'TEXTAREA' || tag === 'SELECT') return true;
+  if (tag === 'TEXTAREA' || tag === 'SELECT') return !t.disabled;
   if (tag === 'INPUT') {
+    // 禁用 / 只读的输入框不参与文本输入，键盘应当交还给全局快捷键
+    if (t.disabled || t.readOnly) return false;
     const type = (t.getAttribute('type') || 'text').toLowerCase();
     // 按钮类 input 不参与文本输入
     return !['button', 'submit', 'reset', 'checkbox', 'radio', 'file', 'image', 'range', 'color'].includes(type);
   }
-  return !!(t.isContentEditable || t.getAttribute('contenteditable') === 'true');
+  if (t.isContentEditable || t.getAttribute('contenteditable') === 'true') {
+    return t.getAttribute('contenteditable') !== 'false' && !t.hasAttribute('data-noneditable');
+  }
+  return false;
 }
 
 /** 防抖。 */
@@ -810,26 +873,148 @@ function renderPlainText(s) {
     .join('');
 }
 
+/* ---------------- 「当前语音」提示条 ----------------
+
+   需求原文：「朗读时在界面旁显示当前用的是哪种语音（如 AI 或本地语音）」。
+
+   做成**一个**全局浮层 + 动态定位，不是为了省代码，而是因为发音按钮散布在
+   十几个容器里（题面、音标行、反馈条、上一个词、已背列表、详情卡、查词结果、
+   侧边栏、翻译页…）。给每处都插一个提示元素意味着每处都要维护显隐状态，
+   必然出现「某处忘了隐藏，提示条一直挂着」。
+   一处浮层则天然只有一份状态：谁触发朗读就贴到谁旁边，朗读结束/被抢占即消失。
+
+   `position: fixed` 是为了不受任何容器的 `overflow: hidden` 裁剪 ——
+   可滚动的结果面板里，absolute 定位的提示条会被裁掉一半。 */
+let voiceTipTimer = null;
+
+/** 把提示条摆到锚点元素的旁边（优先右下，贴边时自动翻转，永不越界）。 */
+function positionVoiceTip(el, anchor) {
+  const gap = 6;
+  const r = (anchor && anchor.getBoundingClientRect) ? anchor.getBoundingClientRect() : null;
+  // 拿不到锚点（程序化朗读）→ 退到右下角，至少不挡住内容
+  if (!r || (!r.width && !r.height)) {
+    el.style.left = 'auto';
+    el.style.top = 'auto';
+    el.style.right = '16px';
+    el.style.bottom = '16px';
+    return;
+  }
+  el.style.right = 'auto';
+  el.style.bottom = 'auto';
+  // 宽度要等浏览器量过一次才知道，所以先按当前尺寸算，再夹到视口内
+  const w = el.offsetWidth || 160;
+  const h = el.offsetHeight || 26;
+  let left = r.right + gap;
+  let top = r.top + (r.height - h) / 2;
+  if (left + w > window.innerWidth - 8) left = r.left - w - gap;   // 贴右边 → 翻到左侧
+  if (left < 8) left = Math.max(8, Math.min(r.left, window.innerWidth - w - 8));
+  top = Math.max(8, Math.min(top, window.innerHeight - h - 8));
+  el.style.left = `${Math.round(left)}px`;
+  el.style.top = `${Math.round(top)}px`;
+}
+
+/**
+ * 显示「当前语音」。由 `Speak.notifyVoice` 在每次真正发声时调用。
+ * @param {{engine:string, voice:string}} info
+ * @param {string} label 已拼好的整句（未用，保留给调试）
+ * @param {Element} [anchor]
+ */
+function voiceTip(info, label, anchor) {
+  const el = document.getElementById('voice-tip');
+  if (!el || !info) return;
+  // 分成两段渲染：**类型词**单独一个文本节点，才能被 i18n 词典命中
+  // （「本地 AI 语音 · amy」这种拼接串是翻译不了的）。
+  const kind = (window.Speak && window.Speak.voiceKindLabel)
+    ? window.Speak.voiceKindLabel(info.engine) : '';
+  const name = String(info.voice || '').trim();
+  el.innerHTML = `<span class="vt-ico">${icon('sound')}</span>`
+    + `<span class="vt-text">${esc(kind)}${name ? `<i>${esc(name)}</i>` : ''}</span>`;
+  el.classList.remove('hidden');
+  el.setAttribute('data-engine', String(info.engine || ''));
+  positionVoiceTip(el, anchor);
+  clearTimeout(voiceTipTimer);
+  // 自动淡出：提示条是「状态说明」不是「通知」，不该要求用户手动关。
+  // 真人录音/合成语音的时长通常在这个量级，宁可早消失也不要赖着不走。
+  voiceTipTimer = setTimeout(voiceTipHide, 3000);
+}
+
+/** 收起提示条。 */
+function voiceTipHide() {
+  clearTimeout(voiceTipTimer);
+  document.getElementById('voice-tip')?.classList.add('hidden');
+}
+
+/* ---------------- 可点词的统一入口 ---------------- */
+
+/** 全站「点一下就查这个词」的元素选择器。加新形态时改这一处。 */
+const WORD_CHIP_SEL =
+  '.rel-chip[data-word], .infl-form.clickable[data-word], .pair-word.clickable[data-word]';
+
+/**
+ * 给一个容器的「可点词」（相关词 / 变形 / 对应词词头）接上统一入口。
+ *
+ * ★ 这里替代的是**原来那个全局捕获兜底**（`document.addEventListener('click',
+ *   …, true)` 里做 `stopPropagation()`）。那个写法有两个致命后果：
+ *
+ *   1. **它排在捕获阶段**，而捕获是从 window 往下走 —— 它先于任何容器的
+ *      冒泡委托执行。一 `stopPropagation()`，侧边栏（`#sb-body`）与详情卡
+ *      （`#dc-pane-rel` / `#dc-pane-infl`）里那些**已经写好**的委托就永远
+ *      收不到事件，全成了死代码。
+ *   2. 它还硬编码只调 `Lookup.query()` —— 于是侧边栏里点相关词，结果被画进
+ *      **主窗口**的 `#lk-result`（侧边栏窗口里那块是隐藏的），用户看到的就是
+ *      「点了没反应」。
+ *
+ * 现在的分工：
+ *   - 每个渲染可点词的容器自己调一次本函数，指定「查到之后画到哪里」；
+ *   - 事件走**冒泡**，内层容器先处理并打标记（`e.__wwChip`），外层与全局兜底
+ *     看到标记就跳过 —— 同一层里不会重复触发，也不需要 `stopPropagation`
+ *     （那会把同一元素上的发音委托等无关监听一起掐掉）。
+ *   - 全局只留一个**兜底**：万一将来新加了一处渲染忘了绑定，点击仍然有效，
+ *     只是会画到主查词页 —— 比「点了没反应」好得多。
+ *
+ * @param {string|HTMLElement} root    容器
+ * @param {Function} [onPick]          (word, chipEl) => void，缺省走主查词页
+ */
+function bindWordChips(root, onPick) {
+  const el = typeof root === 'string' ? document.getElementById(root) : root;
+  if (!el || el.__wwChipsBound) return;
+  el.__wwChipsBound = true;
+  el.addEventListener('click', (e) => {
+    if (e.__wwChip) return;                       // 更内层的容器已处理
+    const t = e.target;
+    if (!t || typeof t.closest !== 'function') return;
+    const chip = t.closest(WORD_CHIP_SEL);
+    if (!chip || !el.contains(chip)) return;
+    const w = chip.dataset.word;
+    if (!w) return;
+    e.__wwChip = true;
+    const go = onPick || ((word) => (window.Lookup && window.Lookup.query
+      ? window.Lookup.query(word) : undefined));
+    go(w, chip);
+  });
+}
+
 window.WW = window.WW || {};
 Object.assign(window.WW, {
   esc, toast, loadingHtml, renderEntry, collectExamples, sourceLabel, langLabel,
   splitRelated, phoneticHtml, renderPairs, senseGroup, splitSensesByScript, hasHan,
   renderMarkdown, renderPlainText, fmtDay, timeAgo, masteryClass, renderBarChart, switchDetailTab, debounce,
-  attachListSearch, speakBtn, isTypingTarget,
+  attachListSearch, speakBtn, isTypingTarget, icon, ICON_PATHS, bindWordChips, WORD_CHIP_SEL,
+  voiceTip, voiceTipHide,
   speak: (word, opts) => (window.Speak ? window.Speak.speak(word, opts) : null),
   speakBind: (root) => { if (window.Speak) window.Speak.bindDelegate(root); },
 });
 
-/* 全局兜底：任何 .rel-chip / .infl-form.clickable 点击都能查词，
-   即使某条渲染路径忘了单独绑定事件。
-   使用捕获阶段 + 已处理标记，避免与局部绑定重复触发。 */
+/* 全局兜底（冒泡阶段，不做 stopPropagation）：
+   万一某条渲染路径忘了调 bindWordChips，点击仍然查得动。
+   已处理过的事件带 e.__wwChip 标记，不会重复触发。 */
 document.addEventListener('click', (e) => {
-  const chip = e.target.closest('.rel-chip[data-word], .infl-form.clickable[data-word]');
-  if (!chip || chip.dataset.wqHandled === '1') return;
-  chip.dataset.wqHandled = '1';
-  setTimeout(() => { delete chip.dataset.wqHandled; }, 0);
+  if (e.__wwChip) return;
+  const t = e.target;
+  if (!t || typeof t.closest !== 'function') return;
+  const chip = t.closest(WORD_CHIP_SEL);
+  if (!chip) return;
+  e.__wwChip = true;
   const w = chip.dataset.word;
-  if (!w) return;
-  e.stopPropagation();
-  if (window.Lookup && window.Lookup.query) window.Lookup.query(w);
-}, true);
+  if (w && window.Lookup && window.Lookup.query) window.Lookup.query(w);
+});

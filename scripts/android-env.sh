@@ -30,7 +30,26 @@ export ANDROID_HOME=G:/Programming/01-toolchains/android/sdk
 export NDK_HOME=G:/Programming/01-toolchains/android/sdk/ndk/26.3.11579264
 export JAVA_HOME=G:/Programming/04-runtimes/java/jdk
 
-export PATH="$RUSTUP_HOME/toolchains/stable-x86_64-pc-windows-msvc/bin:$CARGO_HOME/bin:$PATH"
+# ★★ PATH 这一条必须转成 POSIX 形式（/g/...），其余环境变量保持 Windows 盘符。
+#
+#   为什么两套形式并存：
+#   - bash 的 PATH 用 `:` 分隔，而 Windows 盘符里就有一个 `:`。把
+#     `G:/Programming/...` 直接塞进 PATH，bash 会把它拆成 `G` 和
+#     `/Programming/...` 两条 —— 两条都不存在，于是 `command -v cargo-tauri`
+#     报「不在 PATH」，哪怕那个 31MB 的 exe 好端端躺在 CARGO_HOME/bin 里。
+#     这是纯粹的**假阴性**，曾让人误以为 tauri-cli 没装、白白去重装。
+#   - 反过来，`RUSTUP_HOME` / `ANDROID_HOME` / `JAVA_HOME` 这些是给**原生 Win32
+#     子进程**读的，它们不认 `/g/...`，必须保持 `G:/...`。
+#   - 子进程要拿到能用的 PATH 也不用担心：MSYS 在 spawn 原生 Windows 程序时会
+#     把 PATH 里的 POSIX 路径自动转回 Windows 形式。
+#   cygpath 只在 MSYS/Git Bash 下有，其它环境下退化为「原样拼接」并给出提示。
+if command -v cygpath >/dev/null 2>&1; then
+  _ww_posix() { cygpath -u "$1"; }
+else
+  _ww_posix() { echo "$1"; }
+  echo "[提示] 没有 cygpath，PATH 可能仍是 Windows 盘符形式，自检或报假阴性"
+fi
+export PATH="$(_ww_posix "$RUSTUP_HOME")/toolchains/stable-x86_64-pc-windows-msvc/bin:$(_ww_posix "$CARGO_HOME")/bin:$PATH"
 
 # 自检：四样东西都必须在
 _ww_android_env_check() {

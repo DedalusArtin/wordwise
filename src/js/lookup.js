@@ -60,19 +60,11 @@ const Detail = (() => {
 
     document.getElementById('dc-word').textContent = entry.word || '';
 
-    // 朗读按钮的数据挂载。
+    // 朗读入口只剩音标行里的「英 / 美」两个按钮 —— 词头旁那个小喇叭已删
+    // （重复入口，且下方本来就有英美发音）。音标行不在任何
+    // `[data-entry-word]` 容器里，所以委托取不到词，必须把词 / 音频 / 语言
+    // 写到音标容器上，并在 bind() 里给整个 overlay 挂一次委托。
     //
-    // 详情卡是 index.html 里的**静态**结构，`#dc-audio` 与音标行里的 🔇 都
-    // 不在任何 `[data-entry-word]` 容器里 —— 所以委托取不到词，点了没反应
-    // （这正是「朗读按钮点不动」的来源之一）。这里把词 / 音频 / 语言直接
-    // 写到按钮和音标容器上，并在 bind() 里给整个 overlay 挂一次委托。
-    const audioBtn = document.getElementById('dc-audio');
-    if (audioBtn) {
-      audioBtn.dataset.speakWord = entry.word || '';
-      audioBtn.dataset.speakAudio = (entry.phonetic && entry.phonetic.audio) || '';
-      audioBtn.dataset.speakLang = entry.lang || 'en';
-    }
-
     // 音标：统一走 phoneticHtml —— 语言标注（英/美/拼音/读音/罗马音）、
     // 斜杠规则、IPA 字体都只有一份实现，改样式只改一处。
     const phonEl = document.getElementById('dc-phonetic');
@@ -80,8 +72,16 @@ const Detail = (() => {
     // 一个音标都没有时也留一个纯发音按钮（TTS 兜底），别整块空着
     phonEl.innerHTML = phonHtml
       || `<span class="phon-item">${U().speakBtn(entry, 'us', '发音')}</span>`;
-    // 让音标行里的 🔊 也能取到词（委托会找最近的 [data-entry-word]）
-    phonEl.setAttribute('data-entry-word', entry.word || '');
+    // 让音标行里的发音按钮也能取到词（委托会找最近的 [data-entry-word]）
+    //
+    // ★ 这里用 `dataset.x = ...` 而不是 `setAttribute('data-x', ...)`：
+    //   两者在浏览器里等价，但全项目其它地方（背诵页的题面 / 反馈 / 上一个词）
+    //   都是 dataset 赋值 —— 统一写法才能被冒烟测试按同一口径断言。
+    //   历史上这一处用 setAttribute，测试就查不出「容器根本没挂上词」，
+    //   于是「详情卡里的喇叭点了没反应」能一直活着。
+    phonEl.dataset.entryWord = entry.word || '';
+    phonEl.dataset.speakLang = entry.lang || 'en';
+    phonEl.dataset.speakAudio = (entry.phonetic && entry.phonetic.audio) || '';
 
     // 标签
     const tags = [];
@@ -106,6 +106,10 @@ const Detail = (() => {
     document.getElementById('dc-pane-infl').innerHTML = renderInfl(entry);
     document.getElementById('dc-pane-ex').innerHTML = renderEx(entry);
     document.getElementById('dc-pane-rel').innerHTML = renderRel(entry);
+    // 需求 5：同族派生词异步补上（本地词库确认过的真词）。
+    // 刻意不 await —— 详情卡要立刻出现，派生词晚几十毫秒补在下面就行。
+    // loadFamily 内部自己吞掉异常，不会产生 unhandled rejection。
+    void loadFamily(entry.word, entry.lang);
     document.getElementById('dc-pane-ai').innerHTML =
       '<p class="muted">点击下方「AI 讲解」按钮，让本地大模型讲解这个单词。</p>';
 
@@ -189,6 +193,45 @@ const Detail = (() => {
       `<span class="rel-chip" data-word="${U().esc(r)}">${U().esc(r)}</span>`).join('') + '</div>';
   }
 
+  /**
+   * 同族派生词（需求 5）：`happy → happiness / happier …`。
+   *
+   * 这些词由后端用词形规则生成候选、再**去本地词库确认**存在性，所以每一条
+   * 都是点得动、查得到的真词。挂在「相关词」标签页下面而不是单独一个标签：
+   * 它们本来就是相关词的一种，用户不该为此多点一次鼠标。
+   */
+  function renderFamily(list) {
+    if (!list || !list.length) return '';
+    return '<div class="deriv-block"><div class="deriv-title">同族派生词' +
+      '<span class="deriv-note">本地词库已收录</span></div>' +
+      '<div class="deriv-list">' + list.map(d => {
+        const pos = d.pos ? `<i class="deriv-pos">${U().esc(d.pos)}</i>` : '';
+        const def = d.definition ? `<span class="deriv-def">${U().esc(d.definition)}</span>` : '';
+        return `<button type="button" class="rel-chip deriv-chip" data-word="${U().esc(d.word)}"` +
+          ` title="查询 ${U().esc(d.word)}">` +
+          `<b class="deriv-word">${U().esc(d.word)}</b>${pos}${def}</button>`;
+      }).join('') + '</div></div>';
+  }
+
+  /** 异步补上派生词块（拿不到就什么都不加，绝不留空壳）。 */
+  async function loadFamily(word, lang) {
+    const pane = document.getElementById('dc-pane-rel');
+    if (!pane || !API.wordFamily) return;
+    let list = [];
+    try {
+      list = await API.wordFamily(word, lang || null);
+    } catch (e) {
+      // 派生词只是补充信息，失败就当没有 —— 不该污染整个详情卡
+      return;
+    }
+    if (!list || !list.length) return;
+    // 详情卡可能已经被关掉/切到别的词：只有还停在这个词上才追加
+    if (!current || current.word !== word) return;
+    pane.insertAdjacentHTML
+      ? pane.insertAdjacentHTML('beforeend', renderFamily(list))
+      : (pane.innerHTML += renderFamily(list));
+  }
+
   async function loadState(word) {
     const el = document.getElementById('dc-state');
     try {
@@ -231,17 +274,13 @@ const Detail = (() => {
       t.addEventListener('click', () => U().switchDetailTab(t.dataset.tab));
     });
 
-    // 相关词点击 → 直接查词
-    document.getElementById('dc-pane-rel')?.addEventListener('click', (e) => {
-      const chip = e.target.closest('.rel-chip');
-      if (chip && chip.dataset.word) Lookup.query(chip.dataset.word);
-    });
-
-    // 变形点击 → 查询该变形词
-    document.getElementById('dc-pane-infl')?.addEventListener('click', (e) => {
-      const f = e.target.closest('.infl-form.clickable');
-      if (f && f.dataset.word) Lookup.query(f.dataset.word);
-    });
+    // 相关词 / 变形点击 → 直接查词。
+    // 统一走 bindWordChips（冒泡阶段 + 已处理标记），不再逐个元素绑监听：
+    // 这两个面板的内容每次 open 都会被整段替换，逐个绑必然重复绑且泄漏。
+    // ★ 曾经的写法是一个**捕获阶段**的全局兜底在做 stopPropagation，
+    //   把这里的委托整个废掉了 —— 表现为「相关词点了没反应」。
+    U().bindWordChips('dc-pane-rel', (w) => Lookup.query(w));
+    U().bindWordChips('dc-pane-infl', (w) => Lookup.query(w));
 
     // 例句中的词点击（可选，双击才触发，避免误触）
     document.getElementById('dc-pane-ex')?.addEventListener('dblclick', (e) => {
@@ -294,6 +333,10 @@ const Detail = (() => {
     const label = window.WordWiseAPI.explainLangLabel(res.lang);
 
     const meta = [res.translated ? `已自动翻译为 ${label}` : `讲解语言：${label}`];
+    // 需求 5：如实说明本次讲解参考了几条联网资料 —— 用户看到例句时
+    // 才知道那是「本地查不到、由模型依据网页补的」，而不是凭空生成。
+    const refs = Array.isArray(res.web_refs) ? res.web_refs.filter(r => r && r.url) : [];
+    if (refs.length) meta.push(`已联网检索 ${refs.length} 条资料`);
     if (res.note) meta.push(res.note);
 
     const differs = !!(res.original && res.original !== res.text);
@@ -312,9 +355,22 @@ const Detail = (() => {
       ? '<button class="ghost-btn xs is-disabled" disabled>已并入词库</button>'
       : '<button class="ghost-btn xs ai-to-book">并入词库</button>';
 
+    // 参考资料折叠块：默认收起，不把讲解正文挤到屏幕外；点标题在**应用内**
+    // 打开（需求 11），不再把用户甩到系统浏览器。
+    const refsHtml = refs.length
+      ? '<details class="ai-refs"><summary>联网参考资料 · ' + refs.length + ' 条</summary><ol>' +
+        refs.map(r =>
+          '<li><button type="button" class="ai-ref-link" data-url="' + U().esc(r.url) + '">' +
+          U().esc(r.title || r.url) + '</button>' +
+          (r.snippet ? '<span class="ai-ref-snip">' + U().esc(r.snippet) + '</span>' : '') +
+          '</li>').join('') +
+        '</ol></details>'
+      : '';
+
     box.innerHTML =
       `<div class="ai-lang-bar"><span class="ai-lang-meta">${U().esc(meta.join(' · '))}</span>` +
       `<span class="ai-lang-actions">${origBtn}${regenBtn}${bookBtn}</span></div>` +
+      refsHtml +
       U().renderMarkdown(body);
 
     // 用 box.querySelector 而不是 getElementById：查词页的 #ai-body 与详情卡的
@@ -326,6 +382,20 @@ const Detail = (() => {
     box.querySelector('.ai-regen')?.addEventListener('click', () => {
       // 显式要求跳过存档，强制重新调用模型
       explainInto(box.id, res.word, null, { preferArchive: false });
+    });
+
+    // 参考资料：在应用内打开（需求 11）。失败要如实说清，否则用户会以为
+    // 「点了没反应」，而不知道是内嵌窗口没起来。
+    box.querySelectorAll('.ai-ref-link').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        const url = btn.dataset.url;
+        if (!url) return;
+        try {
+          await API.openInApp(url);
+        } catch (e) {
+          U().toast('无法在应用内打开该链接：' + (e && e.message ? e.message : e), 'err');
+        }
+      });
     });
 
     box.querySelector('.ai-to-book')?.addEventListener('click', async (ev) => {
@@ -434,6 +504,8 @@ const Detail = (() => {
 
   return {
     open, close, bind, explainInto, renderExplain,
+    // 同族派生词的渲染单独暴露：冒烟测试要能直接断言「每条都带词性」
+    renderFamily,
     lastExplain: (id) => explainCache[id] || null,
     // 供词库页展示「讲解存档」时复用同一套渲染 + 「并入词库」按钮逻辑：
     // 存档正文直接画出来，不重新调用模型。
@@ -1079,14 +1151,9 @@ const Lookup = (() => {
         showPhonetic: true,
       });
 
-      // 对应词卡里的词头可点击单独查询
-      box.querySelectorAll('.pair-word.clickable').forEach(el => {
-        el.addEventListener('click', () => query(el.dataset.word));
-      });
-      // 卡内的变形词条也要能点（沿用主卡片的 class）
-      box.querySelectorAll('.infl-form.clickable').forEach(f => {
-        f.addEventListener('click', () => query(f.dataset.word));
-      });
+      // 对应词卡里的词头与变形都能点，统一走 bindWordChips
+      // （#lk-pairs 会被整段重渲染，逐个绑监听必然重复绑 + 泄漏）
+      U().bindWordChips(box, (w) => query(w));
       U().speakBind(box);
     } catch (e) {
       if (my !== pairsSeq) return;
@@ -1163,13 +1230,10 @@ const Lookup = (() => {
       });
     }
 
-    box.querySelectorAll('.rel-chip').forEach(c => {
-      c.addEventListener('click', () => query(c.dataset.word));
-    });
-    // 变形词点击 → 查询该变形
-    box.querySelectorAll('.infl-form.clickable').forEach(f => {
-      f.addEventListener('click', () => query(f.dataset.word));
-    });
+    // 相关词 / 变形 / 对应词词头：统一入口，冒泡阶段处理并打标记，
+    // 不会与容器内的发音委托互相干扰（旧写法是捕获 + stopPropagation，
+    // 会把同元素上的其它监听一起掐掉）。
+    U().bindWordChips(box, (w) => query(w));
     // 发音按钮委托（作用于本次结果区）
     U().speakBind(box);
     document.getElementById('lk-add')?.addEventListener('click', async () => {
@@ -1410,8 +1474,10 @@ const Lookup = (() => {
       </div>`).join('');
     box.querySelectorAll('.web-item').forEach(it => {
       it.addEventListener('click', async () => {
-        try { await API.openUrl(it.dataset.url); }
-        catch (e) { U().toast('打开失败：' + e.message, 'err'); }
+        // 需求 11：搜索结果在**应用内**打开，不再把用户甩到系统浏览器。
+        // 后端在桌面端开应用内浏览窗口，移动端没有多窗口语义时会自行回退。
+        try { await API.openInApp(it.dataset.url); }
+        catch (e) { U().toast('打开失败：' + (e && e.message ? e.message : e), 'err'); }
       });
     });
   }

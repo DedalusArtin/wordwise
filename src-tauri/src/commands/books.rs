@@ -161,9 +161,61 @@ pub fn cmd_import_words_to_book(
     lang: Option<String>,
 ) -> Result<ImportResult, String> {
     let cfg = state.cfg();
-    let lang = lang.unwrap_or(cfg.target_lang.clone());
     let now = timeutil::now_ts();
     let hint = format_hint.unwrap_or_default();
+
+    // 目标词库：给了 id 用之；否则新建。
+    //
+    // ★ 先定词库、再定语言 —— 顺序很关键。
+    //   原来的写法是 `let lang = lang.unwrap_or(target_lang)` 排在最前面，
+    //   于是「往已有词库里导入」也一律按**当前在学的语言**给词条打标：
+    //   在学日语时往「考研核心词汇」里补几百个词，那批词就被写成 ja，
+    //   而词库本身是 en —— `words_in_book` 按 `w.lang = bw.lang` 取词，
+    //   这批词立刻变成「看得到条数、点进去没内容」。
+    //   现在改成三级决议：
+    //     ① 目录里有的内置词库 → 以目录标注为准（最权威，且不可被绕过）
+    //     ② 库里已存在的词库   → 跟着**这本词库自己的**语言走
+    //     ③ 其余（新建词库）   → 才用调用方传的 / 当前目标语言
+    let target_book = match book_id.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        Some(id) => state.db.get_wordbook(id).map_err(err)?,
+        None => None,
+    };
+
+    let builtin_lang = importer::builtin_book_langs()
+        .into_iter()
+        .find(|(id, _)| {
+            target_book
+                .as_ref()
+                .map(|b| b.id.as_str() == id)
+                .unwrap_or(false)
+        })
+        .map(|(_, l)| l);
+
+    let lang = if let Some(cl) = builtin_lang.filter(|l| !l.trim().is_empty()) {
+        if let Some(l) = lang.as_deref().map(str::trim).filter(|l| !l.is_empty()) {
+            if !l.eq_ignore_ascii_case(&cl) {
+                log::warn!(
+                    "导入到内置词库 {} 时语言 {} 与目录标注 {} 不一致，以目录为准",
+                    target_book.as_ref().map(|b| b.id.as_str()).unwrap_or(""),
+                    l,
+                    cl
+                );
+            }
+        }
+        cl
+    } else if let Some(bl) = target_book
+        .as_ref()
+        .map(|b| b.lang.trim().to_string())
+        .filter(|l| !l.is_empty())
+    {
+        bl
+    } else {
+        lang.as_deref()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .unwrap_or(cfg.target_lang.as_str())
+            .to_string()
+    };
 
     let mapping = ImportMapping::default();
     let entries = importer::parse_auto(&content, &mapping, &lang, &hint).map_err(err)?;
@@ -355,10 +407,40 @@ pub async fn cmd_download_book(
     // 词条语言以**目录里标注的语言**为准，而不是「用户当前在学的语言」：
     // 在学英语时下载日语词库，若按 target_lang 入库，几千个日语词会被标成 en，
     // 之后既搜不到、也背不到（背的时候按 ja 去查，库里却是 en）。
-    let lang = match lang {
-        Some(l) if !l.trim().is_empty() => l.trim().to_string(),
-        _ if !rb.lang.trim().is_empty() => rb.lang.clone(),
-        _ => "en".to_string(),
+    //
+    // ★ 目录里标注的语言是**权威**，调用方传进来的 lang 只作为兜底。
+    //
+    //   原来这里是反过来的：`Some(l) if !l.is_empty() => l` 排在第一位，于是
+    //   前端只要传了值，就完全绕过目录。而前端传的是卡片上的 `data-lang`
+    //   （来自 `cmd_remote_catalog`），一旦那一层出现任何偏差，几千个词就会
+    //   被整批写成错的语种 —— 实机上的「考研核心词汇（5057 · 日语）」就是这么来的：
+    //   wordbooks.lang / wordbook_words.lang / words.lang 三张表全被写成 ja，
+    //   而这份词表本身是**英语**大纲词汇（April / Bible / Catholic …）。
+    //   错标的代价不只是界面标签难看：`words_in_book` 是按
+    //   `wordbook_words JOIN words ON w.lang = bw.lang` 取词的，语种一旦错位，
+    //   背诵选词、搜索、复习计划全部跟着错。
+    //
+    //   所以这里改成：目录有值就用目录的；两边不一致时把差异记进日志（便于排查
+    //   「为什么我下的这本是别的语种」），但以目录为准。
+    let lang = if !rb.lang.trim().is_empty() {
+        let catalog_lang = rb.lang.trim().to_string();
+        if let Some(l) = lang.as_deref().map(str::trim).filter(|l| !l.is_empty()) {
+            if !l.eq_ignore_ascii_case(&catalog_lang) {
+                log::warn!(
+                    "词库 {} 的调用方语言 {} 与目录标注 {} 不一致，以目录为准",
+                    rb.id,
+                    l,
+                    catalog_lang
+                );
+            }
+        }
+        catalog_lang
+    } else {
+        lang.as_deref()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .unwrap_or("en")
+            .to_string()
     };
     let now = timeutil::now_ts();
 

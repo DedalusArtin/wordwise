@@ -33,7 +33,7 @@
 ; ★ 要改版本号请改 tauri.conf.json —— 两处各写一个版本号必然会漂移，
 ;   表现是「安装包文件名 / 界面显示 / 程序属性」三个版本号对不上。
 #ifndef MyAppVersion
-  #define MyAppVersion "0.42.0"
+  #define MyAppVersion "0.43.0"
 #endif
 
 ; 相对本 .iss 文件定位构建产物；若使用自定义 target 目录，
@@ -146,10 +146,194 @@ ArchitecturesAllowed=x64compatible
 Name: "chinesesimplified"; MessagesFile: "compiler:Languages\ChineseSimplified.isl"
 Name: "english"; MessagesFile: "compiler:Default.isl"
 
+; ============================================================
+;  多语言消息表
+; ============================================================
+;  ★ 为什么要有这一段：**直接写死的中文在英文系统上照样显示中文**，
+;    安装向导于是变成「一半英文按钮、一半中文描述」的夹生界面 ——
+;    这就是用户报的「安装包的语言没有跟随系统提示」。
+;    [Languages] 里的 Name 就是这里的前缀；不带前缀的那份是所有语言的兜底
+;    （某语言没定义时用兜底，而不是退化成空白）。
+;
+;  ★ 新增面向用户的文字时，一律加到这里，不要写死在 [Tasks] / [Components]
+;    / [Icons] 或 Code 段里。
+;  ★ 多行文本用 %n 表示换行（Inno 的转义），%% 表示百分号本身。
+[CustomMessages]
+english.WWGroupStartup=Startup options:
+chinesesimplified.WWGroupStartup=启动选项:
+WWGroupStartup=Startup options:
+
+english.WWTaskStartup=Start the WordWise sidebar at sign-in, so you can look words up anytime
+chinesesimplified.WWTaskStartup=开机时自动启动 WordWise 侧边栏（随时查词）
+WWTaskStartup=Start the WordWise sidebar at sign-in
+
+english.WWCompCore=Main program and documentation (required)
+chinesesimplified.WWCompCore=主程序与说明文档（必需）
+WWCompCore=Main program and documentation (required)
+
+english.WWCompOpt=Optional modules: downloaded during setup when checked (you can also add them later inside the app)
+chinesesimplified.WWCompOpt=可选模块 —— 勾选后在安装过程中联网下载（也可之后在软件内下载）
+WWCompOpt=Optional modules: downloaded during setup when checked
+
+english.WWCompEngine=Local LLM engine llama.cpp (~118 MB; needed for offline AI explanations)
+chinesesimplified.WWCompEngine=本地大模型推理引擎 llama.cpp（约 118 MB，离线 AI 讲解要用）
+WWCompEngine=Local LLM engine llama.cpp (~118 MB)
+
+english.WWCompVoice=Local neural TTS engine Piper + English voice (~85 MB; needed for offline read-aloud)
+chinesesimplified.WWCompVoice=本地神经语音引擎 Piper + 英文语音（约 85 MB，离线朗读要用）
+WWCompVoice=Local neural TTS engine Piper + English voice (~85 MB)
+
+english.WWCompModel=Qwen3-0.6B model weights (~378 MB; enables offline AI explanations)
+chinesesimplified.WWCompModel=Qwen3-0.6B 模型权重（约 378 MB，下载后即可离线 AI 讲解）
+WWCompModel=Qwen3-0.6B model weights (~378 MB)
+
+english.WWShortcutComment=Vocabulary learning with AI explanations
+chinesesimplified.WWShortcutComment=背单词与 AI 讲解
+WWShortcutComment=Vocabulary learning with AI explanations
+
+; —— Code 段对话框 ——
+; 注：%% 表示百分号本身（Inno 把 % 当转义引导符，写成单个 % 会被吃掉）。
+
+english.WWMUpgradeL1=This is an upgrade: your existing study data may not be in the new folder.
+chinesesimplified.WWMUpgradeL1=这是升级安装：你当前的学习数据可能不在新目录里。
+WWMUpgradeL1=This is an upgrade: your existing study data may not be in the new folder.
+
+english.WWMUpgradeL2=The model will be downloaded to
+chinesesimplified.WWMUpgradeL2=模型将下载到
+WWMUpgradeL2=The model will be downloaded to
+
+english.WWMUpgradeL3=If the old version kept its data in %%APPDATA%%\WordWise, download the model from inside the app instead - it will place it in the folder actually in use.
+chinesesimplified.WWMUpgradeL3=（如果旧版本的数据目录是 %%APPDATA%%\WordWise，模型应改在软件内下载，软件会放到它真正在用的那一份目录。）
+WWMUpgradeL3=If the old version kept its data in %%APPDATA%%\WordWise, download the model from inside the app instead.
+
+english.WWMUpgradeQ=Download to the new folder now anyway?
+chinesesimplified.WWMUpgradeQ=仍然现在下载到新目录吗？
+WWMUpgradeQ=Download to the new folder now anyway?
+
+english.WWPrevFound=WordWise is already installed at:
+chinesesimplified.WWPrevFound=已安装的 WordWise 在：
+WWPrevFound=WordWise is already installed at:
+
+english.WWPrevChosen=You have chosen:
+chinesesimplified.WWPrevChosen=你现在选的是：
+WWPrevChosen=You have chosen:
+
+english.WWPrevWarn=Installing to a different folder creates two independent copies; your existing wordbooks and study progress will not follow.
+chinesesimplified.WWPrevWarn=装到别的目录会变成两个独立副本，原有的词库与背诵进度不会跟过去。
+WWPrevWarn=Installing to a different folder creates two independent copies; your existing wordbooks and study progress will not follow.
+
+english.WWPrevYes=[Yes] = upgrade in place at the original folder and continue
+chinesesimplified.WWPrevYes=「是」 = 覆盖升级到原目录并继续
+WWPrevYes=[Yes] = upgrade in place at the original folder and continue
+
+english.WWPrevNo=[No] = install to the new folder and continue (two independent copies; progress will not follow)
+chinesesimplified.WWPrevNo=「否」 = 装到新目录并继续（会变成两个独立副本，原有词库与背诵进度不会跟过去）
+WWPrevNo=[No] = install to the new folder and continue (two independent copies)
+
+english.WWPrevCancel=[Cancel] = stay on this page and think about it
+chinesesimplified.WWPrevCancel=「取消」 = 留在本页，我再想想
+WWPrevCancel=[Cancel] = stay on this page and think about it
+
+english.WWDLFailHead=Download failed:
+chinesesimplified.WWDLFailHead=下载失败：
+WWDLFailHead=Download failed:
+
+english.WWDLFailBody=A failed optional-module download does not affect the main installation.
+chinesesimplified.WWDLFailBody=可选模块下载失败不影响主程序安装。
+WWDLFailBody=A failed optional-module download does not affect the main installation.
+
+english.WWDLFailAsk=Continue installing? (you can download these modules later inside the app)
+chinesesimplified.WWDLFailAsk=是否继续安装（之后可在软件内再下载这些模块）？
+WWDLFailAsk=Continue installing? (you can download these modules later inside the app)
+
+english.WWDoneTitle=Installation complete!
+chinesesimplified.WWDoneTitle=安装完成！
+WWDoneTitle=Installation complete!
+
+english.WWDoneBody1=WordWise's "AI word explanations" need a model service. Pick any one of three options:
+chinesesimplified.WWDoneBody1=WordWise 的「AI 单词讲解」需要一个模型服务，三种办法任选：
+WWDoneBody1=WordWise's "AI word explanations" need a model service. Pick any one of three options:
+
+english.WWDoneA1=  A. One-click deploy (recommended, no extra software)
+chinesesimplified.WWDoneA1=  A. 一键部署（推荐，无需额外软件）
+WWDoneA1=  A. One-click deploy (recommended, no extra software)
+
+english.WWDoneA2=     Click the "AI service" status bar at the bottom left, then Download model, then Start
+chinesesimplified.WWDoneA2=     点窗口左下角「AI 服务」状态条 → 下载模型 → 启动
+WWDoneA2=     Click the "AI service" status bar at the bottom left, then Download model, then Start
+
+english.WWDoneA3=     The engine ships with the installer; only the model needs downloading (~400 MB to 1.1 GB)
+chinesesimplified.WWDoneA3=     引擎已随安装包附带，只需下载模型（约 400MB～1.1GB）
+WWDoneA3=     The engine ships with the installer; only the model needs downloading (~400 MB to 1.1 GB)
+
+english.WWDoneA4=     To launch it automatically each time, turn on "launch on startup" in that panel
+chinesesimplified.WWDoneA4=     想让每次开程序自动起，打开面板里的「启动时自动拉起」
+WWDoneA4=     To launch it automatically each time, turn on "launch on startup" in that panel
+
+english.WWDoneB1=  B. Connect to an existing LM Studio
+chinesesimplified.WWDoneB1=  B. 连接已有的 LM Studio
+WWDoneB1=  B. Connect to an existing LM Studio
+
+english.WWDoneB2=     Start the server inside LM Studio, then click "Test connection" back in WordWise
+chinesesimplified.WWDoneB2=     LM Studio 里 Start Server，回 WordWise 点「测试连接」
+WWDoneB2=     Start the server inside LM Studio, then click "Test connection" back in WordWise
+
+english.WWDoneC1=  C. Use an online API (DeepSeek / Qwen / Kimi / Zhipu GLM, etc.)
+chinesesimplified.WWDoneC1=  C. 用在线 API（DeepSeek / 通义千问 / Kimi / 智谱 GLM 等）
+WWDoneC1=  C. Use an online API (DeepSeek / Qwen / Kimi / Zhipu GLM, etc.)
+
+english.WWDoneC2=     Settings, AI service, pick a provider and paste your API key
+chinesesimplified.WWDoneC2=     设置 → AI 服务 → 服务来源里选一家，填上 API Key 即可
+WWDoneC2=     Settings, AI service, pick a provider and paste your API key
+
+english.WWDoneTail=Without a configured model, lookup, translation, study and the knowledge graph all keep working normally.
+chinesesimplified.WWDoneTail=不配置模型时，查词、翻译、背诵、知识图谱全部照常可用。
+WWDoneTail=Without a configured model, lookup, translation, study and the knowledge graph all keep working normally.
+
+english.WWDoneAsk=Open the LM Studio download page now?
+chinesesimplified.WWDoneAsk=是否现在打开 LM Studio 官网下载页？
+WWDoneAsk=Open the LM Studio download page now?
+
+english.WWUninstAsk=Also delete your study data (wordbooks and study progress)?
+chinesesimplified.WWUninstAsk=是否同时删除学习数据（词库与背诵记录）？
+WWUninstAsk=Also delete your study data (wordbooks and study progress)?
+
+english.WWUninstAt=Data location:
+chinesesimplified.WWUninstAt=数据位置：
+WWUninstAt=Data location:
+
+english.WWUninstKeep=Choosing "No" keeps the data, so a later reinstall can pick up where you left off.
+chinesesimplified.WWUninstKeep=选择「否」将保留数据，日后重新安装可继续使用原有进度。
+WWUninstKeep=Choosing "No" keeps the data, so a later reinstall can pick up where you left off.
+
+english.WWUninstNote=(If you changed the data folder in settings, that copy is not listed above and must be cleaned up manually.)
+chinesesimplified.WWUninstNote=（如果你在设置里换过数据目录，那份数据不在上面，需要自己清理。）
+WWUninstNote=(If you changed the data folder in settings, that copy is not listed above and must be cleaned up manually.)
+
+english.WWWhereUninst=uninstall entry
+chinesesimplified.WWWhereUninst=卸载项
+WWWhereUninst=uninstall entry
+
+english.WWWhereCommon=common install location
+chinesesimplified.WWWhereCommon=常见安装位置
+WWWhereCommon=common install location
+
+english.WWFound=Found an existing WordWise
+chinesesimplified.WWFound=检测到已安装的 WordWise
+WWFound=Found an existing WordWise
+
+english.WWWillUpgrade=Will upgrade to
+chinesesimplified.WWWillUpgrade=将升级到
+WWWillUpgrade=Will upgrade to
+
+english.WWKeepProgress=Your existing wordbooks and study progress will be kept.
+chinesesimplified.WWKeepProgress=原有词库与背诵进度会保留。
+WWKeepProgress=Your existing wordbooks and study progress will be kept.
+
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: checkedonce
 Name: "quicklaunchicon"; Description: "{cm:CreateQuickLaunchIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
-Name: "startup"; Description: "开机时自动启动 WordWise 侧边栏（随时查词）"; GroupDescription: "启动选项:"
+Name: "startup"; Description: "{cm:WWTaskStartup}"; GroupDescription: "{cm:WWGroupStartup}"
 
 ; ============================================================
 ;  组件选择
@@ -162,11 +346,11 @@ Name: "startup"; Description: "开机时自动启动 WordWise 侧边栏（随时
 ;    都不依赖本地模型或本地语音）。用户后面想加，软件内的「一键部署」和
 ;    「语音包管理」随时能补，走的是同一批镜像源。
 [Components]
-Name: "core"; Description: "主程序与说明文档（必需）"; Flags: fixed
-Name: "opt"; Description: "可选模块 —— 勾选后在安装过程中联网下载（也可之后在软件内下载）"; Flags: checkablealone
-Name: "opt\engine"; Description: "本地大模型推理引擎 llama.cpp（约 118 MB，离线 AI 讲解要用）"
-Name: "opt\voice"; Description: "本地神经语音引擎 Piper + 英文语音（约 85 MB，离线朗读要用）"
-Name: "opt\model"; Description: "Qwen3-0.6B 模型权重（约 378 MB，下载后即可离线 AI 讲解）"
+Name: "core"; Description: "{cm:WWCompCore}"; Flags: fixed
+Name: "opt"; Description: "{cm:WWCompOpt}"; Flags: checkablealone
+Name: "opt\engine"; Description: "{cm:WWCompEngine}"
+Name: "opt\voice"; Description: "{cm:WWCompVoice}"
+Name: "opt\model"; Description: "{cm:WWCompModel}"
 
 [Files]
 ; 主程序
@@ -222,9 +406,9 @@ Source: "..\BUILD.md"; DestDir: "{app}\docs"; Flags: ignoreversion skipifsourced
 Source: "..\docs\*"; DestDir: "{app}\docs"; Flags: ignoreversion recursesubdirs createallsubdirs skipifsourcedoesntexist
 
 [Icons]
-Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Comment: "背单词与 AI 讲解"
+Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Comment: "{cm:WWShortcutComment}"
 Name: "{group}\{cm:UninstallProgram,{#MyAppName}}"; Filename: "{uninstallexe}"
-Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon; Comment: "背单词与 AI 讲解"
+Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon; Comment: "{cm:WWShortcutComment}"
 Name: "{userappdata}\Microsoft\Internet Explorer\Quick Launch\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: quicklaunchicon
 
 [Registry]
@@ -359,7 +543,7 @@ begin
       if (PrevVer = '') and (Ver <> '') then PrevVer := Ver;
       if (Dir <> '') or (Ver <> '') then
       begin
-        PrevWhere := '卸载项';
+        PrevWhere := ExpandConstant('{cm:WWWhereUninst}');
         Result := True;
       end;
     end;
@@ -395,7 +579,7 @@ begin
     if DirExists(Candidates[I]) and FileExists(Candidates[I] + '\{#MyAppExeName}') then
     begin
       PrevDir := Candidates[I];
-      PrevWhere := '常见安装位置';
+      PrevWhere := ExpandConstant('{cm:WWWhereCommon}');
       Result := True;
       Exit;
     end;
@@ -461,10 +645,11 @@ begin
     WizardForm.DirEdit.Text := PrevDir;
 
     if PrevVer <> '' then
-      Note := '检测到已安装的 WordWise v' + PrevVer + '（' + PrevWhere + '：' + PrevDir + '）'
+      Note := ExpandConstant('{cm:WWFound}') + ' v' + PrevVer + ' (' + PrevWhere + ': ' + PrevDir + ')'
     else
-      Note := '检测到已安装的 WordWise（' + PrevWhere + '：' + PrevDir + '）';
-    Note := Note + #13#10 + '将升级到 v{#MyAppVersion}，保留原有词库与背诵进度。';
+      Note := ExpandConstant('{cm:WWFound}') + ' (' + PrevWhere + ': ' + PrevDir + ')';
+    Note := Note + #13#10 + ExpandConstant('{cm:WWWillUpgrade}') + ' v{#MyAppVersion}' + '. '
+          + ExpandConstant('{cm:WWKeepProgress}');
   end
   else
   begin
@@ -538,11 +723,10 @@ begin
     if IsUpgrade then
     begin
       DoModel := MsgBox(
-        '这是升级安装：你当前的学习数据可能不在新目录里。' + #13#10#13#10 +
-        '模型将下载到 ' + ExpandConstant('{app}') + '\data\models' + #13#10 +
-        '（如果旧版本的数据目录是 %APPDATA%\WordWise，模型应改在软件内下载，' +
-        '软件会放到它真正在用的那一份目录。）' + #13#10#13#10 +
-        '仍然现在下载到新目录吗？', mbConfirmation, MB_YESNO) = IDYES;
+        ExpandConstant('{cm:WWMUpgradeL1}') + #13#10#13#10 +
+        ExpandConstant('{cm:WWMUpgradeL2}') + ' ' + ExpandConstant('{app}') + '\data\models' + #13#10 +
+        ExpandConstant('{cm:WWMUpgradeL3}') + #13#10#13#10 +
+        ExpandConstant('{cm:WWMUpgradeQ}'), mbConfirmation, MB_YESNO) = IDYES;
     end;
     if DoModel then
     begin
@@ -557,26 +741,42 @@ function NextButtonClick(CurPageID: Integer): Boolean;
 var
   Error: String;
   Has: Boolean;
+  Answer: Integer;
 begin
   Result := True;
 
   // 升级场景：用户把目录改到了别处 → 提醒一次。
-  // 只提醒一次、且给「改回原目录」的按钮：目的不是拦他，是让他知道
-  // 「装到别处 = 两个独立副本，进度不会跟过去」。
+  // 目的不是拦他，是让他知道「装到别处 = 两个独立副本，进度不会跟过去」。
+  //
+  // 用 MB_YESNOCANCEL 三选一，三个分支都能明确收场：
+  //   「是」  → 改回原目录并继续（覆盖升级）
+  //   「否」  → 尊重所选目录并继续（变成两个独立副本）
+  //   「取消」→ 留在本页，不改任何东西，下次再点还能问
+  // 关键：这里是「提醒」，不是「拦截」——绝不能出现「只有点否才能继续」。
   if (CurPageID = wpSelectDir) and IsUpgrade and not WarnedOffPrevDir then
   begin
     if CompareText(WizardForm.DirEdit.Text, PrevDir) <> 0 then
     begin
-      if MsgBox('已安装的 WordWise 在：' + #13#10 + PrevDir + #13#10#13#10 +
-                '你现在选的是：' + #13#10 + WizardForm.DirEdit.Text + #13#10#13#10 +
-                '装到别的目录会变成两个独立副本，原有的词库与背诵进度不会跟过去。' + #13#10#13#10 +
-                '改为覆盖升级到原目录吗？', mbConfirmation, MB_YESNO) = IDYES then
+      Answer := MsgBox(ExpandConstant('{cm:WWPrevFound}') + #13#10 + PrevDir + #13#10#13#10 +
+                ExpandConstant('{cm:WWPrevChosen}') + #13#10 + WizardForm.DirEdit.Text + #13#10#13#10 +
+                ExpandConstant('{cm:WWPrevWarn}') + #13#10#13#10 +
+                ExpandConstant('{cm:WWPrevYes}') + #13#10 +
+                ExpandConstant('{cm:WWPrevNo}') + #13#10 +
+                ExpandConstant('{cm:WWPrevCancel}'),
+                mbConfirmation, MB_YESNOCANCEL);
+      if Answer = IDYES then
       begin
         WizardForm.DirEdit.Text := PrevDir;
-        Result := False;   // 留在本页，让用户确认一眼再点下一步
+        WarnedOffPrevDir := True;
+        Result := True;    // 目录已改回原目录，直接继续推进
+      end
+      else if Answer = IDNO then
+      begin
+        WarnedOffPrevDir := True;   // 用户执意装别处，不再追问
+        Result := True;             // 尊重所选目录，继续推进
       end
       else
-        WarnedOffPrevDir := True;   // 用户执意装别处，不再追问
+        Result := False;   // IDCANCEL：留在本页，下次还能再问
     end;
   end;
 
@@ -602,9 +802,9 @@ begin
             // ★ 下载失败**绝不阻断主程序安装**：没有这些可选模块，
             //   查词 / 翻译 / 背诵 / 图谱全都照常可用，之后在软件内的
             //   「一键部署」「语音包管理」随时能补，走的是同一批镜像源。
-            Result := MsgBox('下载失败：' + AddPeriod(Error) + #13#10#13#10 +
-              '可选模块下载失败不影响主程序安装。' + #13#10#13#10 +
-              '是否继续安装（之后可在软件内再下载这些模块）？',
+            Result := MsgBox(ExpandConstant('{cm:WWDLFailHead}') + AddPeriod(Error) + #13#10#13#10 +
+              ExpandConstant('{cm:WWDLFailBody}') + #13#10#13#10 +
+              ExpandConstant('{cm:WWDLFailAsk}'),
               mbError, MB_YESNO) = IDYES;
           end;
         end;
@@ -644,18 +844,18 @@ begin
     // 不再往「用户 AppData」写东西（用户要的就是「别写 C 盘」）。
     if not FileExists(ExpandConstant('{app}\data\.llm_hinted')) then
     begin
-      if MsgBox('安装完成！' + #13#10 + #13#10 +
-                'WordWise 的「AI 单词讲解」需要一个模型服务，三种办法任选：' + #13#10 +
-                '  A. 一键部署（推荐，无需额外软件）' + #13#10 +
-                '     点窗口左下角「AI 服务」状态条 → 下载模型 → 启动' + #13#10 +
-                '     引擎已随安装包附带，只需下载模型（约 400MB～1.1GB）' + #13#10 +
-                '     想让每次开程序自动起，打开面板里的「启动时自动拉起」' + #13#10 +
-                '  B. 连接已有的 LM Studio' + #13#10 +
-                '     LM Studio 里 Start Server，回 WordWise 点「测试连接」' + #13#10 +
-                '  C. 用在线 API（DeepSeek / 通义千问 / Kimi / 智谱 GLM 等）' + #13#10 +
-                '     设置 → AI 服务 → 服务来源里选一家，填上 API Key 即可' + #13#10 + #13#10 +
-                '不配置模型时，查词、翻译、背诵、知识图谱全部照常可用。' + #13#10 + #13#10 +
-                '是否现在打开 LM Studio 官网下载页？',
+      if MsgBox(ExpandConstant('{cm:WWDoneTitle}') + #13#10 + #13#10 +
+                ExpandConstant('{cm:WWDoneBody1}') + #13#10 +
+                ExpandConstant('{cm:WWDoneA1}') + #13#10 +
+                ExpandConstant('{cm:WWDoneA2}') + #13#10 +
+                ExpandConstant('{cm:WWDoneA3}') + #13#10 +
+                ExpandConstant('{cm:WWDoneA4}') + #13#10 +
+                ExpandConstant('{cm:WWDoneB1}') + #13#10 +
+                ExpandConstant('{cm:WWDoneB2}') + #13#10 +
+                ExpandConstant('{cm:WWDoneC1}') + #13#10 +
+                ExpandConstant('{cm:WWDoneC2}') + #13#10 + #13#10 +
+                ExpandConstant('{cm:WWDoneTail}') + #13#10 + #13#10 +
+                ExpandConstant('{cm:WWDoneAsk}'),
                 mbConfirmation, MB_YESNO) = IDYES then
       begin
         ShellExec('open', 'https://lmstudio.ai/', '', '', SW_SHOWNORMAL, ewNoWait, ErrorCode);
@@ -697,10 +897,10 @@ begin
 
     { 用户可能在设置页把数据目录改到过别的地方；那种情况这里管不到，
       所以顺带提醒一句「指针文件」的存在。 }
-    Msg := '是否同时删除学习数据（词库与背诵记录）？' + #13#10 + #13#10 +
-           '数据位置：' + #13#10 + Found + #13#10 + #13#10 +
-           '选择「否」将保留数据，日后重新安装可继续使用原有进度。' + #13#10 +
-           '（如果你在设置里换过数据目录，那份数据不在上面，需要自己清理。）';
+    Msg := ExpandConstant('{cm:WWUninstAsk}') + #13#10 + #13#10 +
+           ExpandConstant('{cm:WWUninstAt}') + #13#10 + Found + #13#10 + #13#10 +
+           ExpandConstant('{cm:WWUninstKeep}') + #13#10 +
+           ExpandConstant('{cm:WWUninstNote}');
 
     if MsgBox(Msg, mbConfirmation, MB_YESNO) = IDYES then
     begin

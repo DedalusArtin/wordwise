@@ -197,8 +197,8 @@ src-tauri\target\release\wordwise.exe    ← 直接双击即可运行
 推送一个 `v*` 形式的 tag，就会自动构建并发布 Release：
 
 ```bash
-git tag v0.42.0
-git push origin v0.42.0
+git tag v0.43.0
+git push origin v0.43.0
 ```
 
 流水线（`.github/workflows/release.yml`）做的事：

@@ -66,6 +66,21 @@ impl SearchEngine {
         }
     }
 
+    /// 把配置里的字符串解析成引擎枚举。
+    ///
+    /// 这是**唯一**的解析入口：`cmd_web_search`、AI 讲解的联网补充等场景
+    /// 都从这里走，避免每个调用点各写一份 `match`（一字之差就会让
+    /// 用户在选择器里挑了 360、实际却仍然打必应）。
+    pub fn parse(s: &str) -> SearchEngine {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "baidu" => SearchEngine::Baidu,
+            "so360" | "360" | "so" => SearchEngine::So360,
+            "bingintl" | "bing_intl" | "bing-intl" => SearchEngine::BingIntl,
+            "duckduckgo" | "ddg" => SearchEngine::DuckDuckGo,
+            _ => SearchEngine::Bing,
+        }
+    }
+
     /// 构造 RSS 地址（只有必应提供 RSS 输出）。
     fn rss_url(&self, q: &str) -> Option<String> {
         let e = urlencoding::encode(q);
@@ -495,5 +510,20 @@ mod tests {
         assert!(is_engine_internal("https://www.baidu.com/s?wd=x"));
         assert!(!is_engine_internal("https://www.so.com/link?m=abc"));
         assert!(!is_engine_internal("https://example.com/x"));
+    }
+
+    #[test]
+    fn parse_engine_config_strings() {
+        // 配置里写的是小写 id；大小写与空格都要能容忍
+        assert_eq!(SearchEngine::parse("bing"), SearchEngine::Bing);
+        assert_eq!(SearchEngine::parse(" Bing "), SearchEngine::Bing);
+        assert_eq!(SearchEngine::parse("so360"), SearchEngine::So360);
+        assert_eq!(SearchEngine::parse("360"), SearchEngine::So360);
+        assert_eq!(SearchEngine::parse("baidu"), SearchEngine::Baidu);
+        assert_eq!(SearchEngine::parse("bingIntl"), SearchEngine::BingIntl);
+        assert_eq!(SearchEngine::parse("ddg"), SearchEngine::DuckDuckGo);
+        // 未知值退回默认，绝不能 panic（旧配置里可能是空串）
+        assert_eq!(SearchEngine::parse(""), SearchEngine::Bing);
+        assert_eq!(SearchEngine::parse("google"), SearchEngine::Bing);
     }
 }

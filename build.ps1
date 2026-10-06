@@ -62,7 +62,7 @@ $DefaultIscc      = "G:\Programming\07-utils\Inno Setup 7\ISCC.exe"
 $SupportedIsccMajors = @(6, 7)
 
 # 版本号统一从 tauri.conf.json 读，避免与安装包、界面显示的版本脱节
-$AppVersion = "0.42.0"
+$AppVersion = "0.43.0"
 try {
     $cfgPath = Join-Path $Root "src-tauri\tauri.conf.json"
     $cfg = Get-Content $cfgPath -Raw -ErrorAction Stop | ConvertFrom-Json
@@ -336,7 +336,8 @@ if (Test-Path $engineExe) {
 # 但引擎这一步卡住就等于整个功能不可用 —— 所以引擎必须随包。
 #
 # 英文默认语音一并随包（开箱即用），其他语种按需下载。
-# 用 scripts\fetch_tts_vendor.py 准备 vendor\piper 与 vendor\tts-voices。
+# 用 scripts\fetch_tts_vendor.py 准备 vendor\piper 与 vendor\tts-voices
+# （早期脚本产出的是 vendor\voices，下面两个目录都会打包）。
 $piperSrc = Join-Path $Root "vendor\piper"
 $piperExe = Join-Path $piperSrc "piper.exe"
 if (Test-Path $piperExe) {
@@ -354,17 +355,36 @@ if (Test-Path $piperExe) {
     Write-Dim "本地神经朗读将回退到联网下载（gh-proxy 限速，可能要十几分钟）"
 }
 
-# 预置语音包（当前只有英文默认语音 en_US-amy-medium）
-$voiceSrc = Join-Path $Root "vendor\tts-voices"
-if (Test-Path $voiceSrc) {
-    $voiceDst = Join-Path $distDir "vendor\tts-voices"
+# 预置语音包。
+#
+# ★ 为什么要从**两个**目录取：历史上预置语音放过两个位置 ——
+#   早期是 `vendor\voices\<id>.onnx`（平铺），后来统一成
+#   `vendor\tts-voices\<id>\<id>.onnx`（一条一个目录）。两种布局在实机上
+#   并存过（本机就留着一份 `vendor\voices\zh_CN-huayan-x_low.onnx`）。
+#   只打包其中一个，另一份在用户机器上就「文件明明在、设置页里却没有」——
+#   因为 Rust 侧（tts::bundled_voice_roots）虽然两个目录都扫，但安装包里
+#   压根没带另一个目录的文件。
+#   → 两个都可能存在，所以两个都打包；都不存在时提示用户需自行下载。
+$piperVoiceSources = @(
+    @{ Src = (Join-Path $Root "vendor\tts-voices"); Name = "tts-voices" },
+    @{ Src = (Join-Path $Root "vendor\voices");     Name = "voices" }
+)
+$piperVoicePacked = 0
+foreach ($pv in $piperVoiceSources) {
+    if (-not (Test-Path $pv.Src)) {
+        Write-Dim "未找到 vendor\$($pv.Name)，跳过"
+        continue
+    }
+    $voiceDst = Join-Path $distDir "vendor\$($pv.Name)"
     New-Item -ItemType Directory -Path $voiceDst -Force | Out-Null
-    Copy-Item (Join-Path $voiceSrc "*") $voiceDst -Recurse -Force
+    Copy-Item (Join-Path $pv.Src "*") $voiceDst -Recurse -Force
     $voiceMB = [math]::Round(((Get-ChildItem $voiceDst -File -Recurse |
         Measure-Object -Property Length -Sum).Sum) / 1MB, 1)
-    Write-Ok "已随包预置语音 → dist\vendor\tts-voices（$voiceMB MB）"
-} else {
-    Write-Dim "未找到 vendor\tts-voices，安装包不含预置语音（用户需自行下载）"
+    Write-Ok "已随包预置语音 → dist\vendor\$($pv.Name)（$voiceMB MB）"
+    $piperVoicePacked++
+}
+if ($piperVoicePacked -eq 0) {
+    Write-Dim "未找到任何预置语音目录（vendor\tts-voices 或 vendor\voices），安装包不含预置语音（用户需自行下载）"
 }
 
 if (Test-Path (Join-Path $Root "README.md")) {

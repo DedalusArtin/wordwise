@@ -671,8 +671,8 @@ installer\output\WordWise-0.41.0-portable-with-models.zip  便携包，含已下
 推一个 tag 就自动构建并发布 Release，不用再手工打包上传：
 
 ```bash
-git tag v0.42.0
-git push origin v0.42.0
+git tag v0.43.0
+git push origin v0.43.0
 ```
 
 流水线会读 tag 当版本号（同步写回 `tauri.conf.json` 与 `Cargo.toml`，
@@ -692,8 +692,8 @@ git push origin v0.42.0
 
 ```bash
 # 推荐：用 gh CLI（已认证后一条命令即可）
-gh release create v0.42.0 --title "WordWise v0.42.0" \
-  --notes-file docs/releases/v0.42.0.md \
+gh release create v0.43.0 --title "WordWise v0.43.0" \
+  --notes-file docs/releases/v0.43.0.md \
   installer/output/WordWise-Setup-0.42.0.exe \
   installer/output/WordWise-0.42.0-portable.zip
 

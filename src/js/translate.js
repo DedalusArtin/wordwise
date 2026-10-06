@@ -117,6 +117,78 @@ const Translate = (() => {
     else { el.textContent = ''; el.classList.add('hidden'); }
   }
 
+  /* ---------------- 词性与释义（需求 4 / 5） ---------------- */
+
+  /**
+   * 把「词性 + 释义」的一行拆成两段。
+   *
+   * 有道 `basic.explains` 的格式是 `adj. 快乐的；愉快的`，词性总是以 `.` 结尾
+   * 且很短。不按这个规则硬拆会出事：`网络释义` 这类没有词性的行会被切出
+   * 一个假词性，界面就会显示出 `网络释义` 当作 pos 的怪东西。
+   */
+  function splitPos(line) {
+    const s = String(line || '').trim();
+    const i = s.indexOf(' ');
+    if (i > 0 && i <= 8 && /[.．]$/.test(s.slice(0, i))) {
+      return { pos: s.slice(0, i), def: s.slice(i + 1).trim() };
+    }
+    return { pos: '', def: s };
+  }
+
+  /** 缩略义项条：**带词性**、一行一条，点开才展开全文。 */
+  function renderSenses(lines, singleWord) {
+    if (!lines.length) return '';
+    // 计数单独一个 span、按钮文案保持**静态**：动态拼出来的中文（「全部 5 条」）
+    // 无法命中界面语言字典，切到英文时就会漏出一句中文。
+    const more = lines.length > 3
+      ? '<button type="button" class="ghost-btn xs tr-sense-more">展开全部' +
+        `<span class="tr-sec-count">${lines.length}</span></button>`
+      : '';
+    // 单词才有「详细讲解」的意义；整句翻译跳过去只会查到句子里的第一个词
+    const jump = singleWord
+      ? '<button type="button" class="ghost-btn xs tr-goto-lookup">详细讲解</button>'
+      : '';
+    const items = lines.map((line, i) => {
+      const p = splitPos(line);
+      return `<button type="button" class="tr-sense${i < 3 ? '' : ' is-extra hidden'}"` +
+        ` title="点击展开完整释义">` +
+        (p.pos ? `<span class="tr-sense-pos">${U().esc(p.pos)}</span>` : '') +
+        `<span class="tr-sense-def">${U().esc(p.def)}</span></button>`;
+    }).join('');
+    return '<div class="tr-sec">' +
+      '<div class="tr-sec-head"><span class="tr-sec-title">词性与释义</span>' +
+      `<span class="tr-sec-actions">${more}${jump}</span></div>` +
+      `<div class="tr-sense-list">${items}</div></div>`;
+  }
+
+  /** 网络释义：同样是缩略呈现，但保留原样（它们本身就很短）。 */
+  function renderWeb(list) {
+    if (!list.length) return '';
+    return '<div class="tr-sec">' +
+      '<div class="tr-sec-head"><span class="tr-sec-title">网络释义</span></div>' +
+      '<div class="tr-web-list">' +
+      list.map(t => `<span class="tr-web-item">${U().esc(t)}</span>`).join('') +
+      '</div></div>';
+  }
+
+  function bindSenses(box, res) {
+    // 点义项：在原位展开/收起（缩略 → 全文）。跳走会把用户正在看的东西弄丢。
+    box.querySelectorAll('.tr-sense').forEach(b => {
+      b.addEventListener('click', () => b.classList.toggle('open'));
+    });
+    // 默认只露 3 条，避免把译文区撑得老高；要全看就点一下
+    box.querySelector('.tr-sense-more')?.addEventListener('click', (ev) => {
+      box.querySelectorAll('.tr-sense.is-extra').forEach(x => x.classList.remove('hidden'));
+      ev.currentTarget?.remove();
+    });
+    // 需要完整讲解就跳查词页 —— 那里已有详情卡与 AI 讲解，
+    // **复用同一套实现**，绝不在这里另写一份（需求 6）。
+    box.querySelector('.tr-goto-lookup')?.addEventListener('click', () => {
+      if (window.Pages && window.Pages.go) window.Pages.go('lookup');
+      if (window.Lookup && window.Lookup.query) window.Lookup.query(res.source);
+    });
+  }
+
   /** 渲染一次翻译结果。 */
   function renderResult(res) {
     const D = dir();
@@ -143,6 +215,28 @@ const Translate = (() => {
       } else {
         ph.textContent = '';
         ph.classList.add('hidden');
+      }
+    }
+
+    // ★ 需求 4：不能只给一个主要释义。
+    //   有道 `basic.explains` 是「词性 + 释义」的行，这里缩略成一行 chips
+    //   （默认露 3 条，每条带词性），点开才展开全文；`web` 是网络释义，
+    //   同样缩略呈现。要完整讲解则跳查词页复用那边的详情卡与 AI 讲解。
+    const senses = (res.dict && Array.isArray(res.dict.explains))
+      ? res.dict.explains.filter(s => s && String(s).trim())
+      : [];
+    const webNote = (res.web || []).filter(s => s && String(s).trim());
+    const senseBox = $('tr-senses');
+    if (senseBox) {
+      if (senses.length || webNote.length) {
+        const single = !(window.Lookup && window.Lookup.looksLikeSentence)
+          || !window.Lookup.looksLikeSentence(res.source || '');
+        senseBox.innerHTML = renderSenses(senses, single) + renderWeb(webNote);
+        senseBox.classList.remove('hidden');
+        bindSenses(senseBox, res);
+      } else {
+        senseBox.innerHTML = '';
+        senseBox.classList.add('hidden');
       }
     }
 
@@ -180,6 +274,8 @@ const Translate = (() => {
   function clearResult() {
     const box = $('tr-dst');
     if (box) box.innerHTML = '<p class="muted">译文会显示在这里。</p>';
+    const sense = $('tr-senses');
+    if (sense) { sense.innerHTML = ''; sense.classList.add('hidden'); }
     ['tr-phonetic', 'tr-alt', 'tr-note'].forEach(id => $(id)?.classList.add('hidden'));
     setEngine('待翻译');
     current = null;
@@ -460,7 +556,9 @@ const Translate = (() => {
 
   // `run` / `renderResult` 对外暴露是为了冒烟测试能直接断言「选日语必须得到
   // こんにちは」这类核心行为，不必靠模拟输入事件绕一圈。
-  return { bind, load, run, renderResult, syncDir, get current() { return current; } };
+  // `splitPos` 同理：「词性与释义」的拆分规则很容易被随手「简化」成
+  // 按第一个空格切，那会把「网络释义」这类没词性的行切出一个假词性。
+  return { bind, load, run, renderResult, syncDir, splitPos, get current() { return current; } };
 })();
 
 window.Translate = Translate;

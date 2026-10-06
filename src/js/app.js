@@ -68,21 +68,65 @@ async function refreshStudy() {
 
   // ---- 今日复习统一入口 ----
   //
-  //  为什么要把「到期 + 常错」合成一个数字放到主按钮上：原来页面上只有泛泛的
+  //  为什么要把「到期的词」做成主按钮上的一个数字：原来页面上只有泛泛的
   //  「开始背诵」，用户得自己看懂「待复习 / 强化记忆」两张卡、在心里加起来，
-  //  才知道今天到底该背多少 —— 而这两类词恰恰就是今天该背的全部。
-  //  进站即背的入口只有一个，就不存在「先研究再开始」这一步。
-  const todo = (s.due_today || 0) + (s.leeches || 0);
+  //  才知道今天到底该背多少。
+  //
+  //  ★ 这里曾经把 todo 算成 `due_today + leeches`，而 leech 是 due 的**子集**，
+  //    于是按钮上的数字天生偏大；点进去还会走背诵接口、被补足到「每轮题量」
+  //    （12 变 20）。用户对数字的信任是一次性的，所以现在：
+  //      - 数字只用 `due_today`（与复习队列**同一个 SQL 口径**，不重不漏）；
+  //      - 点击走 `cmd_start_review_session`（独立槽位，绝不补足）。
+  //    「常错词的攻坚」有它自己的入口（错词本页 + 勾选框），不在这里重复计入。
+  const due = s.due_today || 0;
+
+  // 目标视图：今日目标 - 今日已完成 = 还要背多少「新词 + 到期」。
+  // 目标拉不到（老后端 / 数据库异常）不该拖垮整个概览，退回纯复习入口即可。
+  let goal = null;
+  try {
+    goal = await API.studyGoal(window.Study?.state?.bookId || null,
+                              window.Study?.state?.bookLang || null);
+    if (window.Study) {
+      window.Study.state.goal = goal;
+      window.Study.state.goalLoaded = true;
+      window.Study.renderGoal();
+    }
+  } catch (e) { /* 目标不是核心功能，失败就静默 */ }
+
+  const goalOn = !!(goal && goal.mode && goal.mode !== 'off');
+  // 今天还需要背多少（含新词）。已经到期的词优先，剩下的才是新词额度。
+  const goalLeft = goalOn ? Math.max(0, goal.today_remaining || 0) : 0;
+  const newLeft = Math.max(0, goalLeft - due);
+
   const cta = document.getElementById('btn-today');
   if (cta) {
-    cta.textContent = todo > 0 ? `开始今日复习（${todo} 词）` : '开始今日复习';
-    cta.dataset.todo = String(todo);
+    if (due > 0) {
+      cta.textContent = `开始今日复习（${due} 词）`;
+      cta.dataset.mode = 'review';
+      cta.dataset.size = String(due);
+    } else if (newLeft > 0) {
+      cta.textContent = `背今天的新词（${newLeft} 词）`;
+      cta.dataset.mode = 'study';
+      cta.dataset.size = String(newLeft);
+    } else {
+      cta.textContent = goalOn ? '今天的目标已完成' : '开始背诵';
+      cta.dataset.mode = goalOn ? 'done' : 'study';
+      cta.dataset.size = '';
+    }
   }
   const hint = document.getElementById('today-hint');
   if (hint) {
-    hint.textContent = todo > 0
-      ? `到期 ${s.due_today || 0} 词 + 常错 ${s.leeches || 0} 词。系统会先排到期与常错词，再补薄弱词与新词。`
-      : '今天没有到期词，可以学点新词，或者去复习薄弱词。';
+    if (due > 0) {
+      hint.textContent = `今天有 ${due} 个词到期（含逾期的）。点进去就是这 ${due} 个，`
+        + `不会掺新词、也不会被补足到别的一轮题量。`;
+    } else if (newLeft > 0) {
+      hint.textContent = `今天到期的词已经清完了，按目标还剩 ${newLeft} 个新词。`;
+    } else if (goalOn) {
+      hint.textContent = `今天的目标（${goal.today_target} 词）已经完成，`
+        + `已完成 ${goal.today_done} 词。想多背可以在下面「多背一点」。`;
+    } else {
+      hint.textContent = '今天没有到期词，可以学点新词，或者去错词本复习常错的词。';
+    }
   }
 
   const greet = document.getElementById('study-greeting');
@@ -255,15 +299,32 @@ const App = (() => {
     });
 
     // 今日复习统一入口：进站即背，省掉「先读懂两张卡再决定背多少」这一步。
-    // 已经在背的时候不重开一轮 —— 重开会丢弃当前进度，这时只把页面切过去。
+    //
+    // ★ 两种去向互不混用（需求 14）：
+    //   data-mode="review" → 走 `cmd_start_review_session`（只出今天到期的词，
+    //     独立会话槽位，绝不补足到 batch_size）
+    //   data-mode="study"  → 按目标剩余量开一轮新词（背诵槽位）
+    //   已经在背的时候不重开一轮 —— 重开会丢弃当前进度，这时只把页面切过去。
     document.getElementById('btn-today')?.addEventListener('click', () => {
       Pages.go('study');
-      if (window.Study && window.Study.state && window.Study.state.running) {
+      const running = window.Study && window.Study.state && window.Study.state.running;
+      if (running) {
         document.getElementById('quiz-card')
           ?.scrollIntoView({ behavior: 'smooth', block: 'center' });
         return;
       }
-      Study.start();
+      const btn = document.getElementById('btn-today');
+      const mode = (btn && btn.dataset.mode) || 'study';
+      if (mode === 'done') {
+        U().toast('今天的目标已经完成，想多背就在下面点「多背一点」', 'ok');
+        return;
+      }
+      if (mode === 'review') {
+        Study.startToday();
+        return;
+      }
+      const size = parseInt((btn && btn.dataset.size) || '', 10);
+      Study.start(Number.isFinite(size) && size > 0 ? { size } : {});
     });
 
     // 互译方向选择器要先于各页面绑定：查词页与翻译页都靠它驱动
@@ -310,10 +371,13 @@ const App = (() => {
     Pages.go('study');
 
     // 监听托盘「开始复习」
+    // 与页面上那个主按钮走**完全同一条**路径（直接触发它的点击）：
+    // 托盘菜单和界面按钮对「今天该背什么」的判断必须一致，
+    // 否则从托盘进来背的是新词、从界面进来背的是复习词。
     try {
       await window.WordWiseAPI.listen('app://start-review', () => {
         Pages.go('study');
-        Study.start();
+        document.getElementById('btn-today')?.click();
       });
     } catch (e) { /* 忽略 */ }
 

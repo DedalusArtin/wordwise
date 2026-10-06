@@ -140,7 +140,23 @@ const API = {
   wiki: (word, lang) => invoke('cmd_wiki', { word, lang: lang || null }),
   dictLinks: (word, lang) => invoke('cmd_dict_links', { word, lang: lang || null }),
   openUrl: (url) => invoke('cmd_open_url', { url }),
+  /**
+   * 在**应用内**打开网页（需求 11）。
+   *
+   * 与 `openUrl` 的分工：`openUrl` 一律弹系统默认浏览器（「权威辞书」那排
+   * 跳转仍然走它 —— 那里的意图就是「离开软件去官网看原文」）；本接口走应用内
+   * 浏览窗口，用于「在线搜索结果」这类**看个片段就够了**的场景。
+   * 桌面端开应用内窗口，移动端没有多窗口语义，后端会自己回退到系统浏览器。
+   */
+  openInApp: (url) => invoke('cmd_open_in_app', { url }),
   getWord: (word, lang) => invoke('cmd_get_word', { word, lang: lang || null }),
+  /**
+   * 同族派生词（需求 5）：`happy → happiness / happier …`。
+   *
+   * 后端由词形规则生成候选、再去**本地词库**确认哪些真的存在，所以返回的
+   * 每一条都点得动、查得到。不联网、不调模型，瞬间返回。
+   */
+  wordFamily: (word, lang) => invoke('cmd_word_family', { word, lang: lang || null }),
   searchWords: (query, lang, limit) =>
     invoke('cmd_search_words', { query, lang: lang || null, limit: limit || 50 }),
   recentSearches: () => invoke('cmd_recent_searches'),
@@ -251,29 +267,73 @@ const API = {
     invoke('cmd_check_spelling', { input, answer, strict: !!strict }),
   spellHint: (word, reveal) => invoke('cmd_spell_hint', { word, reveal: reveal || 0 }),
   maskExample: (sentence, word) => invoke('cmd_mask_example', { sentence, word }),
-  buildAdvancedCard: (mode, lang) =>
-    invoke('cmd_build_advanced_card', { mode, lang: lang || null }),
+  buildAdvancedCard: (mode, lang, kind) =>
+    invoke('cmd_build_advanced_card', { mode, lang: lang || null, kind: kind || null }),
+
+  /* ---------------- 背诵 / 复习是两个独立会话 ----------------
+     `kind` 一路透传到后端：缺省 / 'study' → 背诵槽位，'review' → 复习槽位。
+     两者互不覆盖，所以「正在背新词」时点开今日复习，不会把背诵进度清掉，
+     反之亦然（需求 14：不要复用背诵和复习的容器）。
+
+     ★ 所有会话类命令都必须带同一个 kind，漏一个的后果是
+       「题从复习槽出、答案记进背诵槽」—— 判分与计数会静默错位。 */
 
   // 背诵
-  startSession: (mode, size, leechOnly, lang, defLang) =>
+  startSession: (mode, size, leechOnly, lang, defLang, kind) =>
     invoke('cmd_start_session', {
       mode: mode || null,
       size: size || null,
       leechOnly: !!leechOnly,
       lang: lang || null,
       defLang: defLang || null,
+      kind: kind || null,
     }),
-  currentQuestion: (lang) => invoke('cmd_current_question', { lang: lang || null }),
-  submitAnswer: (word, grade, elapsedMs, lang) =>
+  /**
+   * 开始一轮**今日复习**。
+   *
+   * ★ 与 startSession 的关键区别：队列**只由今天到期的词构成，绝不补足**。
+   *   入口按钮上写「12 个」，点进去就必须是 12 个 —— 补到 batch_size 会让
+   *   用户觉得数字是假的（需求 14）。一个到期的都没有时返回 total: 0，
+   *   属于正常状态，不是错误。
+   * @param {number|null} size 截断上限，null = 全部到期词
+   */
+  startReviewSession: (mode, size, lang, defLang) =>
+    invoke('cmd_start_review_session', {
+      mode: mode || null,
+      size: size || null,
+      lang: lang || null,
+      defLang: defLang || null,
+    }),
+  currentQuestion: (lang, kind) =>
+    invoke('cmd_current_question', { lang: lang || null, kind: kind || null }),
+  submitAnswer: (word, grade, elapsedMs, lang, kind) =>
     invoke('cmd_submit_answer', {
       word: word || null,
       grade,
       elapsedMs: elapsedMs || 0,
       lang: lang || null,
+      kind: kind || null,
     }),
-  skip: () => invoke('cmd_skip'),
-  endSession: () => invoke('cmd_end_session'),
+  skip: (kind) => invoke('cmd_skip', { kind: kind || null }),
+  endSession: (kind) => invoke('cmd_end_session', { kind: kind || null }),
   wordState: (word, lang) => invoke('cmd_word_state', { word, lang: lang || null }),
+
+  /* ---------------- 学习目标（需求 15） ----------------
+     一个目标 = 模式(off/days/per_day) + 天数 + 每日词量 + 词库范围。
+     后端一次算出今日目标、完成度、预计完成日、复习压力与是否达标，
+     前端只负责显示 —— 两边各算一遍迟早会出现「界面说还差 3 个、
+     点进去却已经完成」这种自相矛盾。 */
+  studyGoal: (bookId, lang) =>
+    invoke('cmd_study_goal', { bookId: bookId || null, lang: lang || null }),
+  setStudyGoal: (opts) => invoke('cmd_set_study_goal', {
+    mode: (opts && opts.mode) || 'off',
+    days: (opts && opts.days != null) ? opts.days : null,
+    perDay: (opts && opts.perDay != null) ? opts.perDay : null,
+    bookId: (opts && opts.bookId != null) ? opts.bookId : null,
+  }),
+  /** 「多背一点」：只抬高**今天**的目标，跨天自动失效。 */
+  extraStudy: (extra, bookId, lang) =>
+    invoke('cmd_extra_study', { extra, bookId: bookId || null, lang: lang || null }),
 
   // 统计
   stats: (lang) => invoke('cmd_stats', { lang: lang || null }),
@@ -405,6 +465,10 @@ const Mock = (() => {
     words: [],
     states: {},
     session: null,
+    // 背诵与复习各自一个会话槽位（需求 14：不要复用容器）。
+    // 后端是 `AppState.study` / `AppState.review` 两个 RwLock，
+    // 调试模式必须同构，否则「一边背一边复习」的交互在调试模式里验不出来。
+    sessions: { study: null, review: null },
     // AI 讲解存档：key = `${word}|${lang}|${explain_lang}`（与后端主键同构）
     explains: new Map(),
     config: {
@@ -414,6 +478,9 @@ const Mock = (() => {
         show_inflections: true, show_examples: true, show_related: false,
         show_mnemonic: true, show_phonetic: true, auto_popup_on_wrong: true,
         ai_explain: true, batch_size: 20, daily_limit: 120,
+        // 与后端 StudyOptions 的新字段一一对应（选项个数 / 学习目标）
+        option_count: 4, goal_mode: 'off', goal_days: 30, goal_per_day: 30,
+        goal_book_id: '', goal_started_at: '', goal_extra_today: 0, goal_extra_date: '',
       },
       target_lang: 'en', ui_lang: 'zh-CN', sidebar_always_on_top: true, sidebar_width: 380,
       source_lang: 'auto',
@@ -427,6 +494,9 @@ const Mock = (() => {
     transHistory: [],
   };
 
+  /** kind → 槽位名。无法识别的 kind 一律当背诵（与后端 session_slot 同口径）。 */
+  const slotOf = (kind) => (kind === 'review' ? 'review' : 'study');
+
   /* ---- 调试模式的翻译小词典：让界面能显示出「真的翻了」的样子 ---- */
   const MOCK_TRANS = {
     '你好|ja': 'こんにちは',
@@ -439,6 +509,31 @@ const Mock = (() => {
     'hello|zh': '你好',
     'hello world|zh': '你好世界',
     'こんにちは|zh': '你好',
+    'happy|zh': '快乐的',
+    '快乐|en': 'happy',
+  };
+
+  /**
+   * 调试专用的「词性与释义」样本（需求 4）。
+   *
+   * 后端这两个字段来自有道 `basic.explains` / `web`，调试环境里没有网络。
+   * 与其编一份假的通用释义污染所有词，不如只给少数常用词备真实内容 ——
+   * 其余词不出这块 UI，正好也验证了「没数据就不渲染」这条降级路径。
+   */
+  const MOCK_DICT = {
+    'happy|zh': {
+      explains: [
+        'adj. 快乐的；幸福的；愉快的',
+        'adj. 乐意的；甘愿的',
+        'adj. 幸运的；恰到好处的',
+        'adj. （言语或行为）得体的，恰当的',
+      ],
+      web: ['快乐的', '幸福的', '高兴的', '愉快的'],
+    },
+    '快乐|en': {
+      explains: ['n. happiness; joy; delight', 'adj. happy; cheerful; joyful'],
+      web: ['happy', 'joyful', 'cheerful', 'merry'],
+    },
   };
 
   const MOCK_LANG_NAMES = {
@@ -568,6 +663,61 @@ const Mock = (() => {
     store.words = demo.map(d => entry(d[0], d[1], d[2], d[3]));
   }
 
+  /**
+   * 学习目标（调试模式）。
+   *
+   * 与后端 `compute_study_goal` **同一套口径**，不是随便造几个数：
+   * 今天的目标 = 新词摊派 + 今天到期；已完成 = 今天答过的去重词数。
+   * 界面要验的是「数字自洽 + 进度条 + 压力提示 + 达标判定」，
+   * 口径一旦不同，调试模式里通过、真机上打脸，比没有调试模式更糟。
+   */
+  function mockGoal(bookId) {
+    const st = store.config.study || {};
+    const today = new Date().toISOString().slice(0, 10);
+    const mode = st.goal_mode || 'off';
+    const extra = (st.goal_extra_date === today) ? (st.goal_extra_today || 0) : 0;
+
+    const total = store.words.length;
+    const learned = Math.max(0, Math.min(total, Math.round(total * 0.4)));
+    const remaining = Math.max(0, total - learned);
+    // 调试模式的「今天到期」就取 60%（与 cmd_start_review_session 同源）
+    const dueToday = total ? Math.max(1, Math.round(total * 0.6)) : 0;
+    const todayDone = Math.max(0, Math.round(dueToday * 0.5));
+
+    let daily = 0;
+    let days = 0;
+    if (mode === 'days') {
+      days = st.goal_days || 30;
+      daily = Math.max(1, Math.ceil(remaining / days));
+    } else if (mode === 'per_day') {
+      daily = st.goal_per_day || 30;
+    }
+    const todayTarget = mode === 'off' ? 0 : daily + dueToday + extra;
+    const todayRemaining = Math.max(0, todayTarget - todayDone);
+    // 复习压力：今天的目标一旦超过未来 7 天平均复习量的 3 倍，就判 high
+    const load7d = dueToday * 3;
+    const pressure = (todayTarget > 0 && todayTarget > (load7d / 7) * 3) ? 'high' : 'normal';
+    const finished = remaining === 0;
+    // ★ 与后端同一口径：按**计划的每日新词量**外推，不是按今天已背了多少。
+    //   后端曾经写成 remaining / today_done，结果「30 天目标」报出「2028 年」。
+    //   没有目标（off）或速率为 0 时不编造，返回空串让前端整条不显示。
+    const eta_date = (!daily || remaining === 0) ? (remaining === 0 ? today : '')
+      : new Date(new Date(`${today}T00:00:00`).getTime()
+        + Math.ceil(remaining / daily) * 86400000).toISOString().slice(0, 10);
+
+    return {
+      mode, days, per_day: mode === 'per_day' ? daily : 0,
+      book_id: bookId || st.goal_book_id || '',
+      book_name: (bookId || st.goal_book_id) ? '（调试模式词库）' : '全部词库',
+      total_words: total, learned, remaining,
+      today_target: todayTarget, today_done: todayDone, today_remaining: todayRemaining,
+      eta_date,
+      days_left: mode === 'days' ? days : 0,
+      due_today: dueToday, review_load_7d: load7d,
+      pressure, on_track: todayDone >= todayTarget, finished,
+    };
+  }
+
   return {
     async call(cmd, args) {
       init();
@@ -613,6 +763,20 @@ const Mock = (() => {
           ];
         }
         case 'cmd_open_url': return null;
+        case 'cmd_open_in_app': return null;
+        // 同族派生词（需求 5）：调试模式的词库只有少量样本词，
+        // 给 happy 备一份与真实词库同构的数据，界面才验得到。
+        case 'cmd_word_family': {
+          const w = String(args.word || '').toLowerCase();
+          if (w === 'happy' || w === 'happiness') {
+            return [
+              { word: 'happy', pos: 'adj.', definition: '快乐的；幸福的' },
+              { word: 'happiness', pos: 'n.', definition: '幸福；快乐' },
+              { word: 'happily', pos: 'adv.', definition: '快乐地；幸福地' },
+            ].filter(d => d.word !== w).slice(0, 8);
+          }
+          return [];
+        }
         // 网络与代理：调试模式一律报「直连」，与真实默认配置一致
         case 'cmd_network_info':
         case 'cmd_reload_network':
@@ -644,17 +808,39 @@ const Mock = (() => {
         case 'cmd_word_count': return store.words.length;
         case 'cmd_seed_demo': init(); return store.words.length;
         case 'cmd_start_session': {
-          store.session = { idx: 0, queue: store.words.slice(), correct: 0, wrong: 0,
-                            mode: args.mode || 'en_to_zh' };
-          return { mode: store.session.mode, total: store.session.queue.length, index: 0,
+          const s = {
+            idx: 0, queue: store.words.slice(), correct: 0, wrong: 0,
+            mode: args.mode || 'en_to_zh',
+          };
+          store.sessions[slotOf(args.kind)] = s;
+          store.session = s;   // 兼容旧调用点（调试模式内部）
+          return { mode: s.mode, total: s.queue.length, index: 0,
+                   correct: 0, wrong: 0, leech_only: !!args.leechOnly };
+        }
+        /* 今日复习（需求 14）：**不补足**到 batch_size。
+           调试模式里没有 SRS 到期信息，就用「前 60%」模拟一批到期词 ——
+           这不是为了精确，是为了让「按钮写 12 就一定是 12 题」这条约束
+           在调试模式里也能被验证。 */
+        case 'cmd_start_review_session': {
+          const all = store.words.slice();
+          const size = args.size ? Math.min(args.size, all.length)
+            : Math.max(1, Math.round(all.length * 0.6));
+          const s = {
+            idx: 0, queue: all.slice(0, size), correct: 0, wrong: 0,
+            mode: args.mode || 'en_to_zh',
+          };
+          store.sessions.review = s;
+          return { mode: s.mode, total: s.queue.length, index: 0,
                    correct: 0, wrong: 0, leech_only: false };
         }
         case 'cmd_current_question': {
-          const s = store.session;
+          const s = store.sessions[slotOf(args.kind)];
           if (!s || s.idx >= s.queue.length) return null;
           const e = s.queue[s.idx];
           const en = s.mode === 'en_to_zh';
-          const others = store.words.filter(x => x.word !== e.word).slice(0, 3)
+          // 选项个数跟着配置走（2~8），并按后端同样口径去掉正确答案自身
+          const want = Math.min(8, Math.max(2, Number(store.config.study.option_count) || 4));
+          const others = store.words.filter(x => x.word !== e.word).slice(0, want - 1)
             .map(x => en ? x.senses[0].definition : x.word);
           return {
             prompt: en ? e.word : e.senses[0].definition,
@@ -665,7 +851,7 @@ const Mock = (() => {
           };
         }
         case 'cmd_submit_answer': {
-          const s = store.session;
+          const s = store.sessions[slotOf(args.kind)];
           const e = store.words.find(x => x.word === args.word) || store.words[0];
           if (s) { if (args.grade === 'wrong') s.wrong++; else s.correct++; s.idx++; }
           return {
@@ -677,13 +863,42 @@ const Mock = (() => {
           };
         }
         case 'cmd_skip': {
-          if (store.session) store.session.idx++;
-          return { mode: 'en_to_zh', total: store.session.queue.length, index: store.session.idx,
-                   correct: store.session.correct, wrong: store.session.wrong, leech_only: false };
+          const s = store.sessions[slotOf(args.kind)];
+          if (s) s.idx++;
+          return { mode: 'en_to_zh', total: s ? s.queue.length : 0, index: s ? s.idx : 0,
+                   correct: s ? s.correct : 0, wrong: s ? s.wrong : 0, leech_only: false };
         }
-        case 'cmd_end_session': store.session = null;
+        case 'cmd_end_session': {
+          // 只清被指定的那个槽位：结束复习不该把背诵会话一起清掉
+          store.sessions[slotOf(args.kind)] = null;
           return { mode: 'en_to_zh', total: 0, index: 0, correct: 0, wrong: 0, leech_only: false };
+        }
         case 'cmd_word_state': return null;
+
+        /* ---- 学习目标（调试模式：按同一套公式算，便于验证界面） ---- */
+        case 'cmd_study_goal': return mockGoal(args.bookId);
+        case 'cmd_set_study_goal': {
+          const st = store.config.study;
+          const wasOff = st.goal_mode === 'off';
+          st.goal_mode = args.mode || 'off';
+          if (args.days != null) st.goal_days = args.days;
+          if (args.perDay != null) st.goal_per_day = args.perDay;
+          if (args.bookId != null) st.goal_book_id = args.bookId;
+          // 只有首次从「不设目标」切过来才记开始日期（与后端口径一致）
+          if (wasOff && st.goal_mode !== 'off') {
+            st.goal_started_at = new Date().toISOString().slice(0, 10);
+          }
+          if (st.goal_mode === 'off') { st.goal_extra_today = 0; st.goal_extra_date = ''; }
+          return mockGoal(null);
+        }
+        case 'cmd_extra_study': {
+          const st = store.config.study;
+          const today = new Date().toISOString().slice(0, 10);
+          st.goal_extra_today = (st.goal_extra_date === today)
+            ? (st.goal_extra_today || 0) + (args.extra || 0) : (args.extra || 0);
+          st.goal_extra_date = today;
+          return mockGoal(args.bookId);
+        }
         case 'cmd_stats':
           return { total_words: store.words.length, learned: 5, mastered: 2, leeches: 1, due_today: 3,
                    reviewed_today: 8, correct_today: 6, wrong_today: 2, streak_days: 3,
@@ -1048,6 +1263,11 @@ const Mock = (() => {
             phonetic: to === 'ja' ? 'konnichiwa' : '',
             tts_url: '', engine: 'youdao', from_cache: false,
             record_id: rec.id, favorite: rec.favorite,
+            // 需求 4：真实后端会带上有道 basic.explains（「词性 + 释义」的行）
+            // 与 web（网络释义）。调试环境里没有这些数据，但界面结构必须能验，
+            // 所以给常用词备一份**真实内容**，其它词就老老实实不出这块。
+            dict: (MOCK_DICT[key] && { phonetic: '', explains: MOCK_DICT[key].explains }) || undefined,
+            web: (MOCK_DICT[key] && MOCK_DICT[key].web) || [],
           };
         }
         case 'cmd_translate_ai':
@@ -1074,8 +1294,22 @@ const Mock = (() => {
         case 'cmd_ai_explain':
         case 'cmd_ai_explain_sync': {
           const t = '## 调试模式\n\n当前运行在浏览器调试环境中，未连接本地大模型服务。\n\n- 请通过 Tauri 桌面程序启动以使用 AI 讲解';
+          // 调试模式没有后端检索。给两条**真实可用**的辞书链接占位，
+          // 否则「联网参考资料」那块 UI 在调试环境下永远看不到、也点不动。
+          // 非流式版（批量导出）在后端刻意不联网，这里也保持一致。
+          const refs = cmd === 'cmd_ai_explain'
+            ? [
+                { title: 'Cambridge Dictionary', engine: '调试模式',
+                  url: `https://dictionary.cambridge.org/dictionary/english/${encodeURIComponent(args.word || '')}`,
+                  snippet: '（调试模式占位）联网资料的标题与摘要会显示在这里。' },
+                { title: 'Merriam-Webster', engine: '调试模式',
+                  url: `https://www.merriam-webster.com/dictionary/${encodeURIComponent(args.word || '')}`,
+                  snippet: '（调试模式占位）实时检索到的内容仅供 AI 补充例句与派生变形。' },
+              ]
+            : [];
           return { word: args.word || '', text: t, original: t,
-                   lang: (store.config.explain_lang || 'zh'), translated: false };
+                   lang: (store.config.explain_lang || 'zh'), translated: false,
+                   web_refs: refs };
         }
         // 切换讲解语言：立刻记住，下次讲解生效
         case 'cmd_set_explain_lang':
@@ -1242,17 +1476,18 @@ const Mock = (() => {
           return String(args.sentence || '').replace(
             new RegExp(String(args.word || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i'), '____');
         case 'cmd_build_advanced_card': {
-          const s = store.session;
+          const s = store.sessions[slotOf(args.kind)];
           if (!s || s.idx >= s.queue.length) return null;
           const e = s.queue[s.idx];
           const m = args.mode || 'EnToZh';
           const ex = (e.senses[0].examples[0] || {}).text || '';
           const masked = ex.replace(new RegExp(e.word, 'i'), '____');
           const showEx = m === 'ExToZh' || m === 'ExPickWord';
+          const want = Math.min(8, Math.max(2, Number(store.config.study.option_count) || 4));
           return {
             prompt: showEx ? masked : e.word,
             answer: (m === 'ExToZh') ? e.senses[0].definition : e.word,
-            entry: e, options: store.words.filter(x => x.word !== e.word).slice(0, 3)
+            entry: e, options: store.words.filter(x => x.word !== e.word).slice(0, want - 1)
               .map(x => (m === 'ExToZh' ? x.senses[0].definition : x.word)),
             mode: m, is_leech: false,
             example_masked: masked, example_raw: ex, example_translation: '（示例译文）',
@@ -1264,33 +1499,33 @@ const Mock = (() => {
       // 在线更新（调试模式：假装已经有一个新版本，方便看「有更新」的样子）
       case 'cmd_check_update':
         return {
-          current: '0.42.0', repo: 'DedalusArtin/wordwise',
-          latest: '0.42.0', tag: 'v0.42.0', has_update: true, prerelease: false,
-          name: 'WordWise v0.42.0',
+          current: '0.43.0', repo: 'DedalusArtin/wordwise',
+          latest: '0.43.0', tag: 'v0.43.0', has_update: true, prerelease: false,
+          name: 'WordWise v0.43.0',
           notes: '## 调试模式\n\n- 这是一条示例更新说明\n- 真实数据来自 GitHub Releases',
           published_at: new Date().toISOString().slice(0, 10),
           page_url: 'https://github.com/DedalusArtin/wordwise/releases',
           asset: {
-            name: 'WordWise-Setup-0.42.0.exe', url: 'https://example.com/WordWise-Setup-0.42.0.exe',
+            name: 'WordWise-Setup-0.43.0.exe', url: 'https://example.com/WordWise-Setup-0.43.0.exe',
             size: 19000000, size_text: '18 MB', kind: 'installer', installable: true, digest: '',
           },
           assets: [{
-            name: 'WordWise-Setup-0.42.0.exe', url: 'https://example.com/WordWise-Setup-0.42.0.exe',
+            name: 'WordWise-Setup-0.43.0.exe', url: 'https://example.com/WordWise-Setup-0.43.0.exe',
             size: 19000000, size_text: '18 MB', kind: 'installer', installable: true, digest: '',
           }, {
-            name: 'WordWise-0.42.0-portable.zip', url: 'https://example.com/WordWise-0.42.0-portable.zip',
+            name: 'WordWise-0.43.0-portable.zip', url: 'https://example.com/WordWise-0.43.0-portable.zip',
             size: 37000000, size_text: '35 MB', kind: 'portable', installable: false, digest: '',
           }],
           checked_at: Math.floor(Date.now() / 1000),
-          skipped: (store.config.skip_update_version || '') === '0.42.0',
+          skipped: (store.config.skip_update_version || '') === '0.43.0',
           note: null,
           source: '调试模式（假数据，不联网）',
         };
       case 'cmd_download_update':
         return {
           ok: true, already: false,
-          path: '(调试模式)\\data\\updates\\WordWise-Setup-0.42.0.exe',
-          size: 19000000, size_text: '18 MB', sha256: 'deadbeefdeadbeef', version: '0.42.0',
+          path: '(调试模式)\\data\\updates\\WordWise-Setup-0.43.0.exe',
+          size: 19000000, size_text: '18 MB', sha256: 'deadbeefdeadbeef', version: '0.43.0',
           message: '调试模式：假装下载完成',
         };
       case 'cmd_update_cancel':

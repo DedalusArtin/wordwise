@@ -1281,12 +1281,22 @@ const cases = [
     }
     return '';
   }],
-  ['发音：详情卡 🔊 带上词条数据（静态结构取不到词的老问题）', async () => {
+  ['发音：详情卡的音标行带上词条数据（静态结构取不到词的老问题）', async () => {
+    // 词头旁那个小喇叭已按需求删除（下方本来就有英美两个发音按钮）。
+    // 朗读入口现在只剩音标行里的 .speak-btn，而音标行不在任何
+    // [data-entry-word] 容器里 —— 所以委托能取到词的前提是
+    // **音标容器自己挂着 data-entry-word / data-speak-lang / data-speak-audio**。
+    // 这三条一丢，详情卡就变成「点了没反应」。
     await sandbox.Detail.open(entry);
-    const b = elById('dc-audio');
-    if (b.dataset.speakWord !== 'abandon') throw new Error('dc-audio 没挂上词：' + b.dataset.speakWord);
-    if (!b.dataset.speakLang) throw new Error('dc-audio 没挂上语言');
-    if (!b.dataset.speakAudio && b.dataset.speakAudio !== '') throw new Error('dc-audio 的音频字段缺失');
+    const p = elById('dc-phonetic');
+    if (p.dataset.entryWord !== 'abandon') {
+      throw new Error('音标容器没挂上词：' + p.dataset.entryWord);
+    }
+    if (!p.dataset.speakLang) throw new Error('音标容器没挂上语言');
+    // 假 DOM 不解析 innerHTML，只能直接查字符串（它确实就是这么渲染出来的）
+    if (!String(p.innerHTML).includes('speak-btn')) {
+      throw new Error('音标行里没有发音按钮：' + p.innerHTML);
+    }
     return '';
   }],
 
@@ -2145,12 +2155,21 @@ const cases = [
       const stop = rest.search(/\n  (?:async )?function \w/);
       return rest.slice(0, stop < 0 ? rest.length : stop);
     };
-    for (const fn of ['start', 'end', 'nextQuestion']) {
+    // start() / startToday() 现在把「进答题界面」这段整体交给 beginRun
+    // （背诵与复习共用一份，见需求 14 的槽位分离）—— 所以 clearAdvance
+    // 要断言在真正干活的那个函数上，而不是两个入口上。
+    for (const fn of ['beginRun', 'end', 'nextQuestion']) {
       if (!bodyOf(fn).includes('clearAdvance()')) {
         throw new Error(`${fn}() 里没调 clearAdvance`);
       }
     }
-    return 'start / end / nextQuestion';
+    // 两个入口都必须真的走 beginRun，否则就是「绕过清定时器那条路」
+    for (const fn of ['start', 'startToday']) {
+      if (!bodyOf(fn).includes('beginRun(')) {
+        throw new Error(`${fn}() 没走 beginRun（那就不保证会清掉上一题的推进定时器）`);
+      }
+    }
+    return 'beginRun / end / nextQuestion';
   }],
   ['背诵：空格在任意模式都发音（不再是绑在 listen_spell 上的死分支）', () => {
     const src = fs.readFileSync(path.join(ROOT, 'src/js/study.js'), 'utf8');
@@ -2170,24 +2189,315 @@ const cases = [
     if (!/e\.key === 'Enter' && state\.advanceNow/.test(keys)) throw new Error('缺回车立即下一题');
     return spaces + ' 处空格分支';
   }],
-  ['背诵：今日复习入口把「到期 + 常错」合成一个数字（进站即背，不用自己加）', async () => {
-    // Mock 的 stats：due_today=3 / leeches=1 → 今天该背 4 个
+  ['背诵：今日复习按钮上的数字 = 实际题数（不重不漏，点进去就是这么多）', async () => {
+    // Mock 的 stats：due_today=3 / leeches=1。
+    // ★ 断言的核心是「不重不漏」：leeches 是 due 的**子集**，把两者相加会把
+    //   常错的词算两遍，按钮上的数字天生偏大 —— 用户对数字的信任是一次性的。
+    //   所以数字只取 due_today，并且必须走独立的复习入口（review）。
     await sandbox.refreshStudy();
     const btn = elById('btn-today');
-    if (!btn.textContent.includes('4')) {
-      throw new Error('按钮上没写今天该背的总数：' + btn.textContent);
+    if (!btn.textContent.includes('3')) {
+      throw new Error('按钮上的数字不等于今天到期的词数：' + btn.textContent);
     }
-    if (btn.dataset.todo !== '4') throw new Error('todo 该落进 dataset，实际 ' + btn.dataset.todo);
+    if (btn.textContent.includes('4')) {
+      throw new Error('到期 + 常错被相加了（常错是到期的子集，会重复计数）：' + btn.textContent);
+    }
+    if (btn.dataset.mode !== 'review') {
+      throw new Error('今日复习入口没走独立会话（data-mode 应为 review）：' + btn.dataset.mode);
+    }
+    if (btn.dataset.size !== '3') throw new Error('题数没落进 dataset：' + btn.dataset.size);
     const hint = elById('today-hint').textContent;
-    if (!hint.includes('到期 3') || !hint.includes('常错 1')) {
-      throw new Error('提示没把两类词拆开说清楚：' + hint);
-    }
+    if (!hint.includes('3')) throw new Error('提示没写清今天到底有几个词：' + hint);
     return btn.textContent;
+  }],
+  ['背诵：今日复习走独立槽位且绝不补足（需求 14）', () => {
+    const study = fs.readFileSync(path.join(ROOT, 'src/js/study.js'), 'utf8');
+    const api = fs.readFileSync(path.join(ROOT, 'src/js/api.js'), 'utf8');
+    // ① 复习必须走自己的接口
+    if (!/startReviewSession/.test(study)) throw new Error('study.js 没用 cmd_start_review_session');
+    if (!/cmd_start_review_session/.test(api)) throw new Error('api.js 没暴露 startReviewSession');
+    // ② size 只能当截断上限，绝不能用来补足 —— 后端那侧由 Rust 单测钉死，
+    //    前端至少要保证不会把 batch_size 传下去。
+    const at = study.indexOf('async function startToday');
+    if (at < 0) throw new Error('找不到 startToday');
+    const body = study.slice(at, at + 900);
+    if (/opt-batch/.test(body)) throw new Error('startToday 读了「每轮题量」——复习绝不能被补足');
+    // ③ 会话类型必须一路透传，漏一处就是「题从复习槽出、答案记进背诵槽」。
+    //    断言的是「api 层把 kind 参数暴露出来」+「study 层确实传了 kind」。
+    for (const call of ['startReviewSession:', 'currentQuestion:', 'submitAnswer:', 'buildAdvancedCard:', 'endSession:']) {
+      if (!api.includes(call)) throw new Error('api.js 缺 ' + call);
+    }
+    const kinds = (study.match(/state\.kind/g) || []).length;
+    if (kinds < 5) {
+      throw new Error(`study.js 里 state.kind 只出现 ${kinds} 次 —— 会话类调用必然有漏传`);
+    }
+    return `state.kind × ${kinds}`;
+  }],
+
+  // ---- 需求 5：AI 讲解的联网补充 ----
+  ['查词：AI 讲解如实展示联网参考资料（需求 5）', () => {
+    const lookup = fs.readFileSync(path.join(ROOT, 'src/js/lookup.js'), 'utf8');
+    // ① 提示条要交代本次参考了几条资料 —— 用户看到例句时才知道
+    //    那是「本地没有、按网页补的」，而不是模型凭空生成。
+    if (!/已联网检索/.test(lookup)) throw new Error('讲解提示条没说明本次联网了几条资料');
+    // ② 来源做成可点项，且走应用内打开（需求 11），不再甩到系统浏览器
+    if (!/ai-ref-link/.test(lookup)) throw new Error('参考资料渲染成了不可点的纯文本');
+    const refStart = lookup.indexOf('const refsHtml');
+    if (refStart < 0) throw new Error('找不到 refsHtml —— 参考资料渲染被删了？');
+    if (!/API\.openInApp\(/.test(lookup.slice(refStart))) {
+      throw new Error('参考资料没走应用内打开（应该用 API.openInApp）');
+    }
+
+    // ③ 真渲染一遍：光看源码可能「写了但没拼进 innerHTML」
+    const box = elById('ai-body');
+    sandbox.Detail.renderExplain(box, {
+      word: 'happy', text: '# 讲解正文', original: '# 讲解正文', lang: 'zh',
+      translated: false,
+      web_refs: [
+        { title: 'Cambridge Dictionary', url: 'https://example.com/c', snippet: '例句来源' },
+        { title: 'Merriam-Webster', url: 'https://example.com/m', snippet: '' },
+      ],
+    }, false);
+    const html = String(box.innerHTML);
+    if (!html.includes('已联网检索 2 条资料')) {
+      throw new Error('提示条没写清资料条数：' + html.slice(0, 160));
+    }
+    if (!html.includes('data-url="https://example.com/c"')) throw new Error('来源没带上可点链接');
+    if (!html.includes('# 讲解正文') && !html.includes('讲解正文')) throw new Error('讲解正文被挤掉了');
+
+    // ④ 没联网时不出现空的「0 条资料」——那会让人以为联网坏了
+    sandbox.Detail.renderExplain(box, {
+      word: 'happy', text: 'x', original: 'x', lang: 'zh', translated: false, web_refs: [],
+    }, false);
+    const html2 = String(box.innerHTML);
+    if (html2.includes('联网检索') || html2.includes('ai-refs')) {
+      throw new Error('没有资料却渲染出了资料块：' + html2.slice(0, 160));
+    }
+    return '有资料 2 条 / 无资料不渲染';
+  }],
+
+  ['在线搜索：结果改在应用内打开（需求 11）', () => {
+    const lookup = fs.readFileSync(path.join(ROOT, 'src/js/lookup.js'), 'utf8');
+    const api = fs.readFileSync(path.join(ROOT, 'src/js/api.js'), 'utf8');
+    if (!/openInApp:/.test(api)) throw new Error('api.js 没暴露 openInApp');
+    const at = lookup.indexOf('.web-item');
+    if (at < 0) throw new Error('找不到在线搜索结果的绑定');
+    const seg = lookup.slice(at, at + 600);
+    if (!/API\.openInApp\(/.test(seg)) throw new Error('搜索结果仍然走系统浏览器（应改 openInApp）');
+    if (/API\.openUrl\(/.test(seg)) throw new Error('搜索结果里还留着 openUrl');
+    // 「权威辞书」那一排**应当**继续走 openUrl（那里的意图就是离开软件看官网），
+    // 所以这里只禁止搜索结果那一段，不做全局断言。
+    return 'web-item → openInApp';
+  }],
+
+  // ---- 需求 4：翻译结果不能只给一个主要释义 ----
+  ['翻译：「词性 + 释义」的拆分规则（不能切出假词性）', () => {
+    const sp = sandbox.Translate.splitPos;
+    const a = sp('adj. 快乐的；幸福的');
+    if (a.pos !== 'adj.' || a.def !== '快乐的；幸福的') throw new Error('常见格式没拆对：' + JSON.stringify(a));
+    // 没有词性的行（有道 web / 网络释义就长这样）不能凭空造一个词性出来
+    const b = sp('网络释义');
+    if (b.pos !== '' || b.def !== '网络释义') throw new Error('没词性的行被切出了假词性：' + JSON.stringify(b));
+    // 词性里带 & 的组合（vt.& vi.）也算词性，不能当成释义的开头
+    const c = sp('vt.& vi. 使快乐');
+    if (c.pos !== 'vt.&' && c.pos !== '') throw new Error('不能把中间的空格当分界：' + JSON.stringify(c));
+    // 超长前缀（不是词性）同样不能硬拆
+    const d = sp('a very long line without pos');
+    if (d.pos !== '') throw new Error('长前缀被误判成词性：' + JSON.stringify(d));
+    return '4 例';
+  }],
+
+  ['翻译：多义项缩略呈现、带词性、可展开（需求 4）', () => {
+    sandbox.Translate.renderResult({
+      source: 'happy', text: '快乐的', alternatives: [],
+      from: 'en', to: 'zh', phonetic: 'ˈhæpi', tts_url: '',
+      engine: 'youdao', from_cache: false,
+      dict: { phonetic: 'ˈhæpi', explains: [
+        'adj. 快乐的；幸福的；愉快的',
+        'adj. 乐意的；甘愿的',
+        'adj. 幸运的；恰到好处的',
+        'adj. （言语或行为）得体的，恰当的',
+      ] },
+      web: ['快乐的', '幸福的', '高兴的'],
+    });
+    const html = String(elById('tr-senses').innerHTML);
+    if (elById('tr-senses').classList.contains('hidden')) throw new Error('有多义项却没显示');
+    // 每条都要带词性 —— 没有词性的话「快乐的」和「使快乐」看着一模一样
+    if (!html.includes('tr-sense-pos')) throw new Error('义项没有词性标签');
+    if (!html.includes('adj.')) throw new Error('词性内容没渲染出来');
+    if (!html.includes('快乐的；幸福的；愉快的')) throw new Error('释义内容没渲染出来');
+    if (!html.includes('tr-web-item')) throw new Error('网络释义没渲染');
+    // 默认只露 3 条，其余的折叠 —— 否则译文区会被撑得老高
+    const extra = (html.match(/is-extra/g) || []).length;
+    if (extra !== 1) throw new Error(`4 条义项应折叠 1 条，实际 ${extra}`);
+    if (!html.includes('tr-sense-more')) throw new Error('折叠了却没有「展开全部」入口');
+    // 单词才给「详细讲解」跳转（复用查词页的实现，需求 6）
+    if (!html.includes('tr-goto-lookup')) throw new Error('缺「详细讲解」入口');
+
+    // 没有词典数据时必须整块隐藏，不能留个空壳
+    sandbox.Translate.renderResult({
+      source: '你好', text: 'Hello', alternatives: [], from: 'zh', to: 'en',
+      phonetic: '', tts_url: '', engine: 'youdao', from_cache: false,
+    });
+    if (!elById('tr-senses').classList.contains('hidden')) {
+      throw new Error('没有词性与释义时仍显示空块');
+    }
+    if (String(elById('tr-senses').innerHTML) !== '') throw new Error('空块没清干净');
+    return '4 条义项 / 折叠 1 条';
+  }],
+
+  // ---- 需求 5：同族派生词（本地词库确认，不编造） ----
+  ['查词：同族派生词带词性 + 主释义且可点（需求 5）', () => {
+    const html = String(sandbox.Detail.renderFamily([
+      { word: 'happiness', pos: 'n.', definition: '幸福；快乐' },
+      { word: 'happier', pos: 'adj.', definition: '更快乐的' },
+    ]));
+    // 每条都要有词性 —— 只给词形的话用户还得点进去才知道是什么意思
+    if (!html.includes('deriv-pos')) throw new Error('派生词没带词性');
+    if (!html.includes('n.')) throw new Error('词性内容没渲染');
+    if (!html.includes('幸福；快乐')) throw new Error('主释义没渲染');
+    // 必须能被 bindWordChips 的委托选中（data-word + .rel-chip）
+    if (!html.includes('data-word="happiness"')) throw new Error('派生词不可点：缺 data-word');
+    if (!html.includes('rel-chip')) throw new Error('派生词没用 rel-chip 类，点击委托选不中');
+    // 空列表必须什么都不渲染（不能留个空标题在那儿）
+    if (String(sandbox.Detail.renderFamily([])) !== '') throw new Error('空列表仍渲染了块');
+    if (String(sandbox.Detail.renderFamily(null)) !== '') throw new Error('null 时不该渲染');
+
+    // 详情卡必须真的去拉派生词，否则这块永远是空的
+    const lookup = fs.readFileSync(path.join(ROOT, 'src/js/lookup.js'), 'utf8');
+    if (!/loadFamily\(\s*entry\.word/.test(lookup)) throw new Error('Detail.open 没调用 loadFamily');
+    const api = fs.readFileSync(path.join(ROOT, 'src/js/api.js'), 'utf8');
+    if (!/wordFamily:/.test(api)) throw new Error('api.js 没暴露 wordFamily');
+    if (!/cmd_word_family/.test(api)) throw new Error('api.js 没接 cmd_word_family');
+    return '2 条';
+  }],
+
+  ['查词：派生词由本地词库确认（不联网、不编造）', () => {
+    // 这是这条需求最容易走歪的地方：直接凭规则生成 happiness 显示出来，
+    // 用户一点却发现查不到。断言后端确实做了「存在性确认」这一步。
+    const cmd = fs.readFileSync(path.join(ROOT, 'src-tauri/src/commands/mod.rs'), 'utf8');
+    const at = cmd.indexOf('pub fn cmd_word_family');
+    if (at < 0) throw new Error('找不到 cmd_word_family');
+    const body = cmd.slice(at, at + 2200);
+    if (!/existing_word_briefs/.test(body)) {
+      throw new Error('cmd_word_family 没做词库存在性确认 —— 会返回点不到的词');
+    }
+    // 规则生成必须与确认分开（生成在 morph.rs，确认在 db）
+    const morph = fs.readFileSync(path.join(ROOT, 'src-tauri/src/morph.rs'), 'utf8');
+    if (!/pub fn derivative_candidates/.test(morph)) throw new Error('缺少词形候选生成');
+    const db = fs.readFileSync(path.join(ROOT, 'src-tauri/src/db/mod.rs'), 'utf8');
+    if (!/pub fn existing_word_briefs/.test(db)) throw new Error('缺少 existing_word_briefs');
+    return '生成 + 确认';
+  }],
+
+  // ---- 样式：拦截「未定义 CSS 变量」这一类静默故障 ----
+  //
+  // ★ 这三条是一次真实事故的护栏：`:root` 里的自引用 / 漏定义让
+  //   `linear-gradient(..., var(--accent-2))` 整条声明在计算值阶段失效，于是
+  //     · `.logo-mark` 白底白字 → 用户报「图标没了」
+  //     · `.progress-fill` 填充透明 → 用户报「还是没有进度条」
+  //   而 CSS 不会报任何错，开发者本地也未必复现。所以必须由测试来钉。
+  ['样式：所有 var(--x) 都必须有定义或兜底（未定义会让整条声明作废）', () => {
+    // ★ 必须先把 /* 注释 */ 剥掉：本项目有若干处**注释里**写着「这里原本用的是
+    //   var(--text-1)，可惜没这个 token」——那是记录这个 bug 的说明文字。
+    //   不剥注释的话，检查器会把 bug 的说明书当成 bug 本身报出来。
+    const text = ['src/css/app.css', 'src/index.html']
+      .map(f => fs.readFileSync(path.join(ROOT, f), 'utf8')).join('\n')
+      .replace(/\/\*[\s\S]*?\*\//g, ' ');
+    // 定义处：`--name:`（变量声明）
+    const defs = new Set([...text.matchAll(/(--[a-z0-9-]+)\s*:/g)].map(m => m[1]));
+    const bad = new Set();
+    // 引用处：`var(--name)` 后面紧跟 `)` 表示**没有**兜底值；跟 `,` 表示有兜底
+    for (const m of text.matchAll(/var\(\s*(--[a-z0-9-]+)\s*([,)])/g)) {
+      if (m[2] === ')' && !defs.has(m[1])) bad.add(m[1]);
+    }
+    if (bad.size) {
+      throw new Error('引用了但从未定义、且没写兜底值的变量：' + [...bad].join('、')
+        + '（会让引用它的整条声明静默失效）');
+    }
+    // 单独再钉一次历史事故里必须存在的 token
+    for (const t of ['--accent-2', '--amber-text', '--border-hover']) {
+      if (!defs.has(t)) throw new Error(`缺少 ${t} —— 历史事故就是它漏定义导致图标/进度条消失`);
+    }
+    return defs.size + ' 个变量';
+  }],
+
+  ['样式：进度条必须真的画出来（轨道可见 + 填充有颜色）', () => {
+    const css = fs.readFileSync(path.join(ROOT, 'src/css/app.css'), 'utf8');
+    const barAt = css.indexOf('.progress-bar {');
+    if (barAt < 0) throw new Error('找不到 .progress-bar');
+    const bar = css.slice(barAt, css.indexOf('.progress-fill {'));
+    // 轨道不能用 --border-2：它在白卡片上几乎与底色同色，未完成那段会「消失」
+    if (/background:\s*var\(--border-2\)/.test(bar)) {
+      throw new Error('进度条轨道用了 --border-2 —— 白底上几乎看不见，看起来就像没有进度条');
+    }
+    if (!/background:\s*var\(--border\)/.test(bar)) {
+      throw new Error('进度条轨道没有用可见的 --border');
+    }
+    const h = /height:\s*(\d+)px/.exec(bar);
+    if (!h || Number(h[1]) < 8) throw new Error('进度条太细（<8px），视觉上读不出来：' + (h && h[1]));
+    // 填充的渐变引用的变量必须都在（上一条已全量校验，这里钉住「确实是渐变」）
+    const fill = css.slice(css.indexOf('.progress-fill {'), css.indexOf('.progress-text'));
+    if (!/linear-gradient/.test(fill)) throw new Error('.progress-fill 没有背景色');
+    // 宽度必须由 JS 驱动，否则永远是 0
+    const js = fs.readFileSync(path.join(ROOT, 'src/js/study.js'), 'utf8');
+    if (!/q-progress[\s\S]{0,120}?style\.width/.test(js)) throw new Error('没有任何地方设置进度条宽度');
+    return h[1] + 'px';
+  }],
+
+  ['样式：勾选项是胶囊而不是方框（用户点名的「方形滑块」）', () => {
+    const css = fs.readFileSync(path.join(ROOT, 'src/css/app.css'), 'utf8');
+    // ★ 查 :has() 必须先剥注释：本项目有多处注释**解释为什么不能用 :has()**，
+    //   不剥的话守卫会被自己的说明书骗过去。
+    const live = css.replace(/\/\*[\s\S]*?\*\//g, ' ');
+    if (/:has\(/.test(live)) {
+      throw new Error('样式里用了 :has() —— 旧内核不支持时整条规则会静默失效');
+    }
+    const at = css.indexOf('.check input {');
+    if (at < 0) throw new Error('找不到 .check input');
+    const native = css.slice(at, css.indexOf('.check > span {'));
+    // 原生方框必须被收起（视觉隐藏但保留键盘可达）
+    if (!/clip-path|appearance/.test(native)) throw new Error('原生方框勾选框还露在外面');
+    if (/display:\s*none|visibility:\s*hidden/.test(native)) {
+      throw new Error('把勾选框 display:none 掉了 —— 键盘用户将彻底选不中');
+    }
+    // 选中态用相邻兄弟选择器
+    if (!/\.check input:checked\s*\+\s*span/.test(live)) {
+      throw new Error('选中态没有用 input:checked + span 驱动');
+    }
+    const chip = css.slice(css.indexOf('.check > span {'), css.indexOf('.check:hover > span'));
+    if (!/border-radius:\s*999px/.test(chip)) throw new Error('勾选项不是全圆角胶囊');
+    if (!/padding:\s*5px 12px/.test(chip)) throw new Error('胶囊内边距过小，点不中');
+    // 选中态要真的有底色，否则「选了没反应」
+    if (!/input:checked\s*\+\s*span\s*\{[^}]*background:\s*var\(--blue\)/.test(live)) {
+      throw new Error('选中的胶囊没有变蓝');
+    }
+    return '胶囊 chip + 相邻兄弟选择器';
   }],
 
   // ---- 整应用启动链路 ----
   ['App.init()', () => sandbox.App.init()],
   ['Settings.load()', () => sandbox.Settings.load()],
+
+  // ---- 需求 9：语音包按语言分组 + 缺包语言如实说明 ----
+  ['设置：语音包按语言分组，且缺包语言有交代（需求 9）', async () => {
+    await sandbox.Settings.loadTts();
+    const html = String(elById('tts-voice-list').innerHTML);
+    // 分组标题必须出现（平铺一列在语音包多了之后没法用）
+    if (!html.includes('tts-lang-group')) throw new Error('语音包没有按语言分组');
+    if (!html.includes('tts-lang-name')) throw new Error('分组缺语言名');
+    if (!html.includes('tts-lang-count')) throw new Error('分组缺「已装/总数」计数');
+    // mock 里只有 en / zh，那么 ja 这类学习语言必须被点名说清 ——
+    // 不解释的话，用户的第一反应是「软件漏了日语」，而不是「上游没有」。
+    if (!html.includes('tts-missing')) throw new Error('缺包语言没有交代');
+    if (!html.includes('日语')) throw new Error('缺包清单里没列出日语');
+    if (!/在线语音|系统语音/.test(html)) throw new Error('没说清缺包时的回退通道');
+    // 系统音色那侧早就按语言 optgroup 分组了，两处口径必须一致
+    const src = fs.readFileSync(path.join(ROOT, 'src/js/settings.js'), 'utf8');
+    if (!/optgroup label=/.test(src)) throw new Error('系统音色下拉丢了语言分组');
+    return 'en/zh 分组 + 4 门缺包语言';
+  }],
+
   ['Plan.load()', () => sandbox.Plan.load()],
 ];
 

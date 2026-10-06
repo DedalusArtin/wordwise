@@ -38,24 +38,23 @@ const Sidebar = (() => {
       explain(w);
     });
 
-    // 侧边栏内的相关词/变形词点击
-    document.getElementById('sb-body')?.addEventListener('click', (e) => {
-      const chip = e.target.closest('.rel-chip');
-      if (chip && chip.dataset.word) { query(chip.dataset.word); return; }
-      const inf = e.target.closest('.infl-form.clickable');
-      if (inf && inf.dataset.word) { query(inf.dataset.word); return; }
+    // 相关词 / 变形词 / 对应词词头：统一入口。
+    //
+    // ★ 这里必须指定「查到之后画到**侧边栏**」，不能让它落到默认的主查词页 ——
+    //   侧边栏是独立窗口，主窗口的 #lk-result 在它里面是隐藏的，画进去就是
+    //   「点了没反应」。这正是原来那个捕获阶段全局兜底造成的现象。
+    const body = document.getElementById('sb-body');
+    U().bindWordChips(body, (w) => query(w));
+    // 标签切换（不受上面影响：走的不是 .rel-chip）
+    body?.addEventListener('click', (e) => {
       const tab = e.target.closest('[data-sbtab]');
       if (tab) switchPane(tab.dataset.sbtab);
     });
     // 发音委托（作用于整个侧边栏体）
-    document.getElementById('sb-body')?.addEventListener('click', (e) => {
-      const b = e.target.closest('.speak-btn');
-      if (!b) return;
-      e.stopPropagation();
-      const host = b.closest('[data-entry-word]');
-      const w = b.dataset.speakWord || (host && host.dataset.entryWord) || (currentEntry && currentEntry.word) || '';
-      if (w) U().speak(w, { accent: b.dataset.speakAccent || 'us', audio: b.dataset.speakAudio || '', lang: b.dataset.speakLang || 'en' });
-    });
+    // 统一走 speak.js 的委托：取词 / 取音频的三级回退只有一份实现，
+    // 侧边栏这里不再自己拼一遍（旧版本只读按钮自身的 data-speak-audio，
+    // 读不到容器上的真人录音，于是侧边栏里的发音永远走 TTS）。
+    U().speakBind(body);
   }
 
   function clearSuggest() {
@@ -163,7 +162,7 @@ const Sidebar = (() => {
 
         <div class="dc-pane" data-sbpane="rel">
           <div class="rel-list">
-            ${(entry.related || []).map(r =>
+            ${U().splitRelated(entry.related).map(r =>
               `<span class="rel-chip" data-word="${U().esc(r)}">${U().esc(r)}</span>`).join('')
               || '<div class="muted">暂无相关词</div>'}
           </div>

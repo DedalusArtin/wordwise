@@ -962,9 +962,44 @@ pub fn remote_catalog() -> Vec<RemoteBook> {
     ]
 }
 
+/// 内置目录的「词库 id → 权威语言」清单。
+///
+/// ★ 必须与目录**同源**：直接由 [`remote_catalog`] 派生，**绝不另抄一份**。
+///   用户实机上的「考研核心词汇」被存成日语，正是「两处各写一份语言表、
+///   时间一长就漂移」的后果。数据库语言修复迁移（`Db::fix_builtin_book_langs`）
+///   以本函数为唯一权威。
+pub fn builtin_book_langs() -> Vec<(String, String)> {
+    remote_catalog().into_iter().map(|b| (b.id, b.lang)).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `builtin_book_langs()` 必须与目录**同源**：它就是 `remote_catalog()` 的
+    /// 投影。这里钉死几条关键值 —— 尤其 `kaoyan-core` 必须是 `en`
+    /// （实机上被错标成 `ja` 的那个词库）。
+    #[test]
+    fn builtin_book_langs_matches_catalog() {
+        let from_fn = builtin_book_langs();
+        let from_catalog: Vec<(String, String)> = remote_catalog()
+            .into_iter()
+            .map(|b| (b.id, b.lang))
+            .collect();
+        assert_eq!(from_fn, from_catalog, "两处必须完全一致，不允许各自维护");
+
+        let get = |id: &str| {
+            from_fn
+                .iter()
+                .find(|(i, _)| i == id)
+                .map(|(_, l)| l.as_str())
+                .unwrap_or_else(|| panic!("目录里应有 {id}"))
+        };
+        assert_eq!(get("kaoyan-core"), "en", "考研核心词汇是英语词库");
+        assert_eq!(get("cet4-core"), "en");
+        assert_eq!(get("jlpt-n5"), "ja");
+        assert_eq!(get("jlpt-n1"), "ja");
+    }
 
     #[test]
     fn text_line_variants() {

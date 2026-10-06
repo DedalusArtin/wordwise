@@ -99,6 +99,9 @@
     '参考释义': 'Original-language Definitions',
     '单词变形': 'Inflections',
     '相关词': 'Related Words',
+    // 需求 5：同族派生词（happy → happiness…）
+    '同族派生词': 'Word Family',
+    '本地词库已收录': 'In your dictionary',
     '记忆法': 'Mnemonic',
     '例句': 'Examples',
     '数据来源': 'Sources',
@@ -112,6 +115,10 @@
     '知识点': 'Key Points',
     '词根词缀': 'Roots & Affixes',
     '网络释义': 'Web Definitions',
+    // 需求 4：翻译结果里的「缩略多义项」区块
+    '词性与释义': 'Parts of Speech & Meanings',
+    '展开全部': 'Show all',
+    '详细讲解': 'Full explanation',
     '语言': 'Language',
     '界面语言': 'Interface Language',
     '讲解语言': 'AI Output Language',
@@ -271,7 +278,11 @@
     '例如：四级核心词汇': 'e.g. CET-4 core vocabulary',
     '完整释义 ›': 'Full entry ›',
     '← 返回': '← Back',
-    '☾ 深色': '☾ Dark',
+    // 主题切换按钮：图标改成内联 SVG 后，按钮里**只剩这两个纯文字**，
+    // 所以键也得跟着换成纯文字（原来键里带着 ☾ / ☀ 那两个字形）。
+    '深色': 'Dark',
+    '浅色': 'Light',
+    '跟随系统': 'Follow system',
     '查询语言（要学习的语言）': 'Lookup language (the language you are learning)',
 
     // ---- 背诵：今日复习入口 / 连对 / 错词攻坚 ----

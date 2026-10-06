@@ -715,6 +715,40 @@ fn entry_from_json(v: &Value, fallback_word: &str, lang: &str) -> WordEntry {
     e
 }
 
+/// 把联网检索到的资料拼进讲解提示词（需求 5）。
+///
+/// 入参是 `(标题, 摘要)` 的切片，刻意**不**依赖 `search` 模块的类型 ——
+/// 「怎么格式化一份参考资料」是提示词工程的事，与「怎么抓搜索结果」无关，
+/// 分开之后这个函数就是纯函数，可以直接写单测。
+///
+/// 摘要里的空白会被压平：搜索引擎返回的 snippet 常带换行与制表符，
+/// 直接贴进去会让模型把一行资料读成多行，进而把半句话当成一个独立要点。
+pub fn with_web_refs(prompt: &str, refs: &[(String, String)]) -> String {
+    // 过滤掉没标题也没摘要的噪声项；这类条目只会在提示词里占位
+    let items: Vec<(String, String)> = refs
+        .iter()
+        .filter(|(t, s)| !t.trim().is_empty() || !s.trim().is_empty())
+        .map(|(t, s)| (flatten_ws(t), flatten_ws(s)))
+        .collect();
+    if items.is_empty() {
+        return prompt.to_string();
+    }
+
+    let mut block = String::from("\n\n【联网检索资料（补充例句/变形的唯一依据，见 system 约束）】\n");
+    for (i, (title, snippet)) in items.iter().enumerate() {
+        block.push_str(&format!("{}. 标题：{}\n", i + 1, title));
+        if !snippet.is_empty() {
+            block.push_str(&format!("   摘要：{}\n", snippet));
+        }
+    }
+    format!("{}{}", prompt.trim_end(), block)
+}
+
+/// 把一段文本里的换行/制表符压成单个空格，并丢掉首尾空白。
+fn flatten_ws(s: &str) -> String {
+    s.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 /// 构造讲解提示词（需求 5：答错时的完整讲解）。
 pub fn explain_prompt(entry: &WordEntry, mode_hint: &str) -> String {
     let senses = entry
@@ -771,6 +805,17 @@ pub fn explain_lang_name(code: &str) -> &'static str {
 pub fn with_lang_constraint(system_prompt: &str, explain_lang: &str) -> String {
     let lang = explain_lang_name(explain_lang);
     let block = crate::models::EXPLAIN_LANG_CONSTRAINT.replace("{LANG}", lang);
+    format!("{}\n\n{}", system_prompt.trim_end(), block)
+}
+
+/// 把《联网资料·用法》约束追加到 system prompt 末尾（需求 5）。
+///
+/// 与 [`with_lang_constraint`] 分开是刻意的：**只有真的抓到资料时才注入**。
+/// 没有资料却要求模型「只能依据资料补充例句」，它会连一句例句都写不出来 ——
+/// 那是把一个加分项变成了减分项。
+pub fn with_web_ref_constraint(system_prompt: &str, explain_lang: &str) -> String {
+    let lang = explain_lang_name(explain_lang);
+    let block = crate::models::EXPLAIN_WEB_REF_CONSTRAINT.replace("{LANG}", lang);
     format!("{}\n\n{}", system_prompt.trim_end(), block)
 }
 
@@ -1119,6 +1164,43 @@ fn truncate(s: &str, n: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn web_refs_block_absent_when_no_refs() {
+        // 没抓到资料时必须**原样**返回：多一个空标题的资料块会让模型
+        // 以为「有联网资料可用」却一条也找不到，反而更容易编。
+        let p = "请讲解单词「happy」。";
+        assert_eq!(with_web_refs(p, &[]), p);
+        // 全是空白的条目等同于没有资料
+        let blank = vec![("  ".to_string(), "\n\t".to_string())];
+        assert_eq!(with_web_refs(p, &blank), p);
+    }
+
+    #[test]
+    fn web_refs_block_formats_and_flattens() {
+        let refs = vec![
+            ("  happiness 的用法 ".to_string(), "派生名词：\n  happiness  n.\t快乐".to_string()),
+            ("只用标题的条目".to_string(), String::new()),
+        ];
+        let out = with_web_refs("请讲解单词「happy」。", &refs);
+        // 原文保留在开头
+        assert!(out.starts_with("请讲解单词「happy」。"));
+        assert!(out.contains("【联网检索资料"));
+        // 编号 + 标题
+        assert!(out.contains("1. 标题：happiness 的用法"));
+        // 摘要里的换行/制表符被压成空格，模型不会把半句当独立要点
+        assert!(out.contains("摘要：派生名词： happiness n. 快乐"));
+        // 没摘要的条目只写标题，不出现空的「摘要：」行
+        assert!(out.contains("2. 标题：只用标题的条目"));
+        assert!(!out.contains("2. 标题：只用标题的条目\n   摘要：\n"));
+    }
+
+    #[test]
+    fn web_ref_constraint_mentions_lang_placeholder() {
+        // 约束块要能被 with_lang_constraint 的替换流程处理（含 {LANG}）
+        assert!(crate::models::EXPLAIN_WEB_REF_CONSTRAINT.contains("{LANG}"));
+        assert!(crate::models::EXPLAIN_WEB_REF_CONSTRAINT.contains("编造"));
+    }
 
     #[test]
     fn endpoint_normalization() {

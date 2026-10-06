@@ -53,6 +53,46 @@ button, input, select, textarea { font-family: inherit; font-size: inherit; colo
 button { cursor: pointer; border: none; background: none; }
 .hidden { display: none !important; }
 .muted { color: var(--text-3); font-size: 12.5px; line-height: 1.7; }
+
+/* ---------------- 内联 SVG 图标（全站统一） ----------------
+   ★ 为什么界面图标一律用内联 SVG 而不是 emoji / 实体字符：
+     emoji 的字形宽度由**字体**决定，而字体由**平台**决定 ——
+     同一个 🔊 在 Windows（Segoe UI Emoji）与 Android（Noto Color Emoji）
+     上的 advance width 不一样，同一个 &#9881; 在有的机器上还会被渲染成
+     彩色 emoji、有的机器上是纯文本符号。结果就是「同一排图标在 Windows
+     上参差不齐」。
+     内联 SVG 的尺寸与基线完全由 CSS 决定，与平台字体无关 —— 一次写死，
+     到处一致。stroke 用 currentColor，所以鼠标悬停/选中态的换色自动跟随。
+
+   尺寸策略：默认 1em（跟随所在元素的 font-size）。想改大小就改父元素的
+   font-size，不要给 svg 写死 px —— 写死了大小图标就在不同上下文里打架。 */
+svg.ico {
+  width: 1em; height: 1em;
+  display: block;
+  flex: none;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.9;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  /* 描边不参与字体基线对齐，避免个别内核把 svg 当行内元素往下压 */
+  vertical-align: middle;
+}
+/* 需要实心填充的图标（如小圆点）：加 .fill */
+svg.ico.fill { fill: currentColor; stroke: none; }
+
+/* 按钮里同时有图标和文字时，给按钮加 .ico-row：
+   用 flex 保证「图标 + 文字」这一行的垂直居中与间距恒定。
+   不用 `:has()` —— 它在旧内核上不支持，一旦不支持整条规则失效，
+   退化成「有的机器对齐、有的机器不对齐」，正是我们要消灭的问题。 */
+.ico-row {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+}
+/* 图标与文字混排时，图标略小于字号更接近视觉平衡 */
+.ico-row > svg.ico { width: .95em; height: .95em; }
 code {
   font-family: var(--mono);
   font-size: 12px;
@@ -151,7 +191,17 @@ code {
   background: var(--blue);
   border-radius: 0 3px 3px 0;
 }
-.ni-icon { width: 18px; text-align: center; font-size: 14px; }
+/* 导航图标位：固定 18px 见方 + 定宽，与文字基线垂直居中。
+   ★ 原来是 `width:18px; text-align:center; font-size:14px` 配 emoji 实体 ——
+     emoji 的实际字形宽度不等于 18px，`text-align:center` 只能居中「字形盒」，
+     不同平台居中后的落点不同，于是整列图标看着就是歪的。
+     换成 SVG 后由 flex 居中，与平台字体彻底解耦。 */
+.ni-icon {
+  width: 18px; height: 18px;
+  font-size: 18px;
+  display: flex; align-items: center; justify-content: center;
+  flex: none;
+}
 .ni-badge {
   margin-left: auto;
   min-width: 18px; height: 18px;
@@ -408,6 +458,109 @@ code {
   .today-cta .tc-keys { text-align: left; }
 }
 
+/* ---------------- 学习目标（需求 15） ----------------
+   这一块是**设置 + 进度回显**，所以用白卡而不是蓝底主行动区：
+   用户来这里改参数，改完还是回到上面的主按钮开始背。 */
+.goal-panel { margin-top: 16px; }
+.goal-head {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 12px; flex-wrap: wrap; margin-bottom: 4px;
+}
+.goal-head .panel-title { margin: 0; }
+.goal-inputs {
+  display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
+  margin-top: 10px;
+}
+/* 两个输入框按模式二选一显示：按天数时「每天 N 个」没有意义，反之亦然。
+   显示不匹配的输入框只会让人以为「两个同时生效」。 */
+.goal-inputs.hide-days #goal-days-wrap,
+.goal-inputs.hide-perday #goal-perday-wrap { display: none; }
+.goal-inputs input[type="number"] {
+  width: 84px; padding: 6px 9px;
+  border: 1px solid var(--border); border-radius: var(--radius-sm);
+  background: var(--panel); font-variant-numeric: tabular-nums;
+}
+.goal-progress { margin-top: 12px; }
+.goal-progress .gp-empty { font-size: 12.5px; color: var(--text-3); line-height: 1.8; }
+
+/* 进度条：与背诵页的进度条同一套观感（细轨 + 蓝色填充 + 右侧数字） */
+.gp-row { display: flex; align-items: center; gap: 12px; min-width: 0; }
+.gp-bar {
+  flex: 1 1 auto; min-width: 96px; height: 7px;
+  background: var(--border-2); border-radius: 4px; overflow: hidden;
+}
+.gp-fill {
+  height: 100%; width: 0;
+  background: linear-gradient(90deg, var(--blue), var(--accent-2));
+  border-radius: 4px; transition: width .35s ease;
+}
+.gp-fill.warn { background: linear-gradient(90deg, var(--orange), #ffca6b); }
+.gp-num {
+  flex: none; font-size: 12px; color: var(--text-2);
+  font-variant-numeric: tabular-nums;
+}
+/* 目标相关的一组小指标（今日目标 / 已完成 / 还差 / 预计完成日）。
+   grid + auto-fit：条目数会随后端字段变化，不写死列数。 */
+.gp-facts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  gap: 8px 16px; margin-top: 10px;
+}
+.gp-fact { min-width: 0; }
+.gp-fact .k { font-size: 11.5px; color: var(--text-3); }
+.gp-fact .v {
+  font-size: 14px; font-weight: 600; color: var(--text);
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+.gp-fact .v.ok { color: var(--green); }
+.gp-fact .v.warn { color: var(--orange); }
+/* 复习压力提示：加量会抬高后续复习量，这件事必须让用户看见 */
+.gp-note {
+  margin-top: 10px; padding: 9px 11px;
+  border-radius: var(--radius-sm);
+  font-size: 12.5px; line-height: 1.75;
+  background: var(--orange-soft); color: var(--amber-text);
+  border: 1px solid rgba(245, 166, 35, .3);
+}
+.gp-note.calm {
+  background: var(--blue-soft); color: var(--blue-dark);
+  border-color: rgba(26, 108, 232, .22);
+}
+@media (max-width: 900px) { .goal-inputs { gap: 12px; } }
+
+/* ---------------- 「今日目标完成」祝贺卡 ---------------- */
+.goal-done-modal { max-width: 520px; text-align: center; }
+.gd-badge {
+  width: 62px; height: 62px; margin: 4px auto 14px;
+  border-radius: 50%;
+  display: grid; place-items: center;
+  font-size: 30px;
+  color: #fff;
+  background: linear-gradient(135deg, var(--green), #43c79a);
+  box-shadow: 0 8px 22px rgba(23, 166, 115, .35);
+}
+.goal-done-modal h3 { font-size: 19px; margin-bottom: 6px; }
+.gd-stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(104px, 1fr));
+  gap: 10px; margin: 16px 0 4px;
+  text-align: center;
+}
+.gd-stats .k { font-size: 11.5px; color: var(--text-3); }
+.gd-stats .v { font-size: 17px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.gd-extra { text-align: left; margin: 8px 0 4px; }
+.gd-extra .gp-note { margin-top: 0; }
+.gd-extra .extra-row {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  margin-top: 12px;
+}
+.gd-extra input[type="number"] {
+  width: 84px; padding: 6px 9px;
+  border: 1px solid var(--border); border-radius: var(--radius-sm);
+  font-variant-numeric: tabular-nums;
+}
+
 /* ---------------- 表单 ---------------- */
 .field { display: flex; flex-direction: column; gap: 5px; margin-bottom: 12px; }
 .field > span { font-size: 12px; color: var(--text-3); font-weight: 500; }
@@ -451,8 +604,44 @@ code {
 .inline-input:focus { border-color: var(--blue); box-shadow: 0 0 0 3px var(--blue-soft); }
 
 .option-row { display: flex; align-items: center; gap: 16px; margin: 12px 0; flex-wrap: wrap; }
-.check { display: flex; align-items: center; gap: 7px; font-size: 13px; color: var(--text-2); cursor: pointer; }
-.check input { width: 15px; height: 15px; accent-color: var(--blue); cursor: pointer; }
+/* 勾选项做成**胶囊 chip**：选中即整块变蓝。
+   原来是原生方框勾选框（用户截图点名「这种方形滑块」）。方框既与全局的
+   胶囊 / 圆形语言不一致，15px 的点击目标在密集表单里也很难点中。
+   ★ 选中态必须靠**相邻兄弟**选择器（input + span）驱动，不能用 :has() ——
+     旧内核不支持 :has() 时整条规则会静默失效，退回「有的机器蓝、有的没反应」，
+     正是要消灭的那类问题。 */
+.check {
+  display: inline-flex; align-items: center;
+  font-size: 13px; color: var(--text-2);
+  cursor: pointer; user-select: none;
+}
+/* 原生勾选框只作无障碍保留：视觉收起，但仍在 Tab 顺序里、读屏仍能识别。
+   绝不用 display:none / visibility:hidden —— 那样键盘用户就彻底选不中了。 */
+.check input {
+  position: absolute;
+  width: 1px; height: 1px;
+  margin: -1px; padding: 0; border: 0;
+  overflow: hidden; clip-path: inset(50%); opacity: 0;
+}
+.check > span {
+  display: inline-flex; align-items: center;
+  padding: 5px 12px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--panel);
+  color: var(--text-2);
+  line-height: 1.45;
+  transition: background .15s, border-color .15s, color .15s;
+}
+.check:hover > span { border-color: var(--border-hover); color: var(--text); }
+.check input:checked + span {
+  background: var(--blue); border-color: var(--blue); color: #fff;
+}
+.check input:checked:hover + span {
+  background: var(--blue-dark); border-color: var(--blue-dark);
+}
+/* 焦点必须看得见：原生框已藏起来，得自己画一圈 */
+.check input:focus-visible + span { box-shadow: 0 0 0 3px var(--blue-soft); }
 .field-inline { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--text-2); }
 .field-inline input {
   width: 76px;
@@ -562,27 +751,65 @@ code {
 .dot-bad { background: var(--orange); }
 
 /* ---------------- 答题区 ---------------- */
+/*
+  ★ 这一行原来是 `display:flex; flex-wrap:wrap` + `.progress-wrap{flex:1;min-width:220px}`，
+  实机上是「进度条被挤成一条 20 来像素的灰线、右边 对/错/连对/结束本轮 挤成一排」。
+
+  为什么会挤没：`.progress-wrap` 的 flex-basis 是 0（`flex:1` = `1 1 0%`），
+  而 `.progress-bar` 自己又是 `flex:1`（basis 0）；只要右侧 `.quiz-counters`
+  的 min-content 宽（三个 pill + 一个按钮，且它**不换行**）顶上来，整条 wrap
+  就会被压到 `min-width` 附近，bar 再被二次压缩 → 看起来就「消失」了。
+  `min-width:220px` 挡不住这种嵌套压缩，因为它只管 wrap 自己、管不住里面的 bar。
+
+  改成 grid 才是确定性的：先给左侧一个**最小可用宽度**（160px，够画出一段
+  有意义的进度），右侧按内容自适应；窄屏时整体降为两行而不是互相挤压。
+*/
 .quiz-top {
-  display: flex; align-items: center; justify-content: space-between;
-  gap: 18px; margin-bottom: 16px; flex-wrap: wrap;
+  display: grid;
+  grid-template-columns: minmax(160px, 1fr) auto;
+  align-items: center;
+  gap: 12px 18px;
+  margin-bottom: 16px;
 }
-.progress-wrap { display: flex; align-items: center; gap: 11px; flex: 1; min-width: 220px; }
+.progress-wrap { display: flex; align-items: center; gap: 11px; min-width: 0; }
 .progress-bar {
-  flex: 1;
-  height: 7px;
-  background: var(--border-2);
-  border-radius: 4px;
+  /* `min-width` 是这条进度的最后一道保险：任何情况下都至少画出一小段，
+     而不是缩成 0 让用户以为「进度条坏了」。 */
+  flex: 1 1 auto;
+  min-width: 96px;
+  height: 8px;
+  /* ★ 轨道用 --border 而不是更浅的 --border-2：--border-2（#eef1f6）在白卡片上
+     几乎与底色同色，未完成的那一段等于「消失」，整条看起来就像没有进度条。
+     再叠一层内阴影，让它读起来是一条**凹槽**而不是一条分割线。 */
+  background: var(--border);
+  border-radius: 999px;
+  box-shadow: inset 0 1px 2px rgba(24, 39, 75, .07);
   overflow: hidden;
 }
 .progress-fill {
   height: 100%;
   width: 0;
   background: linear-gradient(90deg, var(--blue), var(--accent-2));
-  border-radius: 4px;
+  border-radius: 999px;
   transition: width .3s ease;
 }
-.progress-text { font-size: 12px; color: var(--text-3); font-variant-numeric: tabular-nums; }
-.quiz-counters { display: flex; align-items: center; gap: 8px; }
+.progress-text {
+  font-size: 12px;
+  color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+  flex-shrink: 0;
+}
+.quiz-counters {
+  display: flex; align-items: center; gap: 8px;
+  /* 窄屏时自己换行，而不是把左边的进度条压扁 */
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  min-width: 0;
+}
+@media (max-width: 760px) {
+  .quiz-top { grid-template-columns: 1fr; }
+  .quiz-counters { justify-content: flex-start; }
+}
 .pill {
   padding: 4px 11px;
   border-radius: 20px;
@@ -627,7 +854,15 @@ code {
   margin-bottom: 26px;
   min-height: 20px;
 }
-.qc-options { display: grid; gap: 10px; max-width: 620px; margin: 0 auto; }
+/* 选项最多 8 个（用户要求 2~8）。宽屏两列排布，短选项不至于把卡片撑得又高又空；
+   窄屏回落单列。`grid-auto-rows: 1fr` 让同一行的两项等高。 */
+.qc-options {
+  display: grid; gap: 10px;
+  max-width: 620px; margin: 0 auto;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  grid-auto-rows: 1fr;
+}
+@media (max-width: 560px) { .qc-options { grid-template-columns: 1fr; } }
 .opt-btn {
   border: 1.5px solid var(--border);
   background: var(--panel);
@@ -637,7 +872,12 @@ code {
   text-align: left;
   transition: all .15s;
   display: flex; align-items: center; gap: 12px;
+  /* 释文里会出现词典原文的长英文串/无空格串，不设断行会整条溢出卡片 */
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  min-width: 0;
 }
+.opt-btn > span:not(.opt-key) { min-width: 0; }
 .opt-btn:hover:not(:disabled) {
   border-color: var(--blue);
   background: var(--blue-soft);
@@ -841,6 +1081,60 @@ code {
   transition: all .15s;
 }
 .rel-chip:hover { background: var(--blue); color: #fff; }
+/* 同族派生词（需求 5）：每条**带词性 + 一句话意思**。
+   只给一个词形的话，用户还得再点进去才知道 happiness 是什么；既然词库里
+   就有这条信息，直接摆在旁边才算真的回答了「相关词太少」。 */
+.deriv-block {
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px dashed var(--border);
+}
+.deriv-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-3);
+  margin-bottom: 8px;
+}
+.deriv-note {
+  font-weight: 400;
+  font-size: 11px;
+  padding: 1px 7px;
+  border-radius: 20px;
+  background: var(--border-2);
+  color: var(--text-3);
+}
+.deriv-list { display: flex; flex-wrap: wrap; gap: 8px; }
+/* 继承 .rel-chip 的配色与点击态，只把它从「圆角小标签」改成「可点的小卡片」 */
+.deriv-chip {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  max-width: 100%;
+  border: 1px solid transparent;
+  font: inherit;
+  text-align: left;
+}
+.deriv-word { font-size: 12.5px; font-weight: 600; }
+.deriv-pos {
+  font-style: normal;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  opacity: .85;
+}
+.deriv-def {
+  font-size: 11.5px;
+  opacity: .85;
+  max-width: 160px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* 悬停时底色变蓝，这里必须把内部文字也一起提亮，否则会变成灰字压蓝底 */
+.deriv-chip:hover .deriv-def,
+.deriv-chip:hover .deriv-pos { opacity: 1; }
 .mnemonic-box {
   background: var(--orange-soft);
   border-left: 3px solid var(--orange);
@@ -1132,7 +1426,10 @@ h4.md-h, h5.md-h { font-size: 13.5px; font-weight: 600; color: var(--text); }
   border-top: 1px dashed var(--border);
   font-size: 13px;
   font-weight: 600;
-  color: var(--text-1);
+  /* ★ 这里原本写的是 `var(--text-1)` —— 全项目**没有**这个 token，且没写
+     兜底值，于是整条 `color` 声明失效、标题掉回继承色（在深色主题下会与
+     正文糊成一片）。项目里的正文色 token 是 `--text` / `--text-2` / `--text-3`。 */
+  color: var(--text);
 }
 .ex-row { background: var(--orange-soft); }
 .ex-row:hover { background: #ffe9c9; }
@@ -1352,6 +1649,48 @@ h4.md-h, h5.md-h { font-size: 13.5px; font-weight: 600; color: var(--text); }
 @keyframes toastIn {
   from { opacity: 0; transform: translate(-50%, 12px); }
   to { opacity: 1; transform: translate(-50%, 0); }
+}
+
+/* ---------- 「当前语音」提示条 ----------
+   fixed 定位（不是 absolute）：结果面板/列表都是 overflow:auto 的，
+   absolute 定位的提示条会被容器的 overflow 裁掉半截。
+   尺寸跟着内容走，最大宽度留足但不允许长语音名把界面顶开。 */
+.voice-tip {
+  position: fixed;
+  z-index: 210;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 280px;
+  padding: 5px 10px;
+  border-radius: 999px;
+  background: var(--toast-bg);
+  color: var(--toast-fg);
+  font-size: 11.5px;
+  line-height: 1.4;
+  box-shadow: var(--shadow-1);
+  pointer-events: none;   /* 纯状态显示，绝不能挡住下面的按钮 */
+  animation: voiceTipIn .16s ease-out;
+}
+.voice-tip .vt-ico { display: inline-flex; flex: none; font-size: 13px; opacity: .9; }
+.voice-tip .vt-text { min-width: 0; }
+.voice-tip .vt-text i {
+  font-style: normal;
+  opacity: .72;
+  margin-left: 5px;
+  max-width: 150px;
+  display: inline-block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  vertical-align: bottom;
+}
+/* 通道不同给个色彩微差：真人录音=绿、本地 AI=蓝、系统语音=中性 */
+.voice-tip[data-engine="dict"] { box-shadow: inset 0 0 0 1px rgba(23, 166, 115, .55), var(--shadow-1); }
+.voice-tip[data-engine="local"] { box-shadow: inset 0 0 0 1px rgba(26, 108, 232, .55), var(--shadow-1); }
+@keyframes voiceTipIn {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: translateY(0); }
 }
 
 /* ---------------- 侧边栏窗口 ---------------- */
@@ -1582,7 +1921,16 @@ h4.md-h, h5.md-h { font-size: 13.5px; font-weight: 600; color: var(--text); }
 .spell-tip { font-size: 12px; }
 .ex-prompt { font-size: 17px; line-height: 1.7; font-style: italic; color: var(--text); }
 .ex-prompt b, .ex-prompt strong { font-style: normal; }
-.speak-btn.big { font-size: 15px; padding: 6px 16px; }
+/* 「播放」这种带文字的大发音按钮：宽度必须由内容决定。
+   底座 `.speak-btn` 是 24×24 的圆形图标按钮，这里若不清掉固定宽高，
+   文字会被挤成两行竖排（图标换成 SVG 后更明显）。 */
+.speak-btn.big {
+  font-size: 15px;
+  width: auto; height: auto;
+  padding: 6px 16px;
+  border-radius: var(--radius-sm);
+  gap: 6px;
+}
 
 /* ---------------- 视觉统一（需求 7） ---------------- */
 .page-head { align-items: flex-start; }
@@ -1756,6 +2104,50 @@ body.col-resizing * { cursor: col-resize !important; }
   align-items: center;
   gap: 6px;
   flex: 0 0 auto;
+}
+/* 讲解的联网参考资料（需求 5）：默认收起，展开后逐条列出可点开的来源。
+   收起是刻意的 —— 讲解正文才是主角，参考资料只是「凭什么这么说」的凭据。 */
+.ai-refs {
+  margin: -2px 0 10px;
+  padding: 6px 9px;
+  background: var(--bg);
+  border: 1px dashed var(--border);
+  border-radius: 6px;
+  font-size: 11.5px;
+}
+.ai-refs > summary {
+  cursor: pointer;
+  color: var(--text-2);
+  font-weight: 600;
+  line-height: 1.6;
+}
+.ai-refs[open] > summary { margin-bottom: 6px; }
+.ai-refs ol {
+  margin: 0;
+  padding-left: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.ai-refs li { color: var(--text-3); }
+/* 来源标题做成按钮：点击在应用内打开（需求 11），不是 <a target=_blank> */
+.ai-ref-link {
+  padding: 0;
+  border: 0;
+  background: none;
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+  color: var(--blue);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.ai-ref-link:hover { background: none; color: var(--blue); }
+.ai-ref-snip {
+  display: block;
+  color: var(--text-3);
+  line-height: 1.55;
+  margin-top: 1px;
 }
 .ai-head-right .icon-btn {
   width: 26px; height: 26px; border-radius: 6px;
@@ -1992,6 +2384,74 @@ body.col-resizing * { cursor: col-resize !important; }
   background: var(--border-2);
   border-radius: 20px;
   color: var(--text-2);
+}
+/* 词性与释义（需求 4）：缩略义项 chips，点开才展开全文。
+   每条**必须**带词性 —— 没有词性的话「快乐的」和「使快乐」看起来一模一样，
+   用户没法判断该用哪个。 */
+.tr-senses { margin-top: 10px; display: flex; flex-direction: column; gap: 8px; }
+.tr-sec { display: flex; flex-direction: column; gap: 5px; }
+.tr-sec-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-height: 22px;
+}
+.tr-sec-title { font-size: 11.5px; color: var(--text-3); font-weight: 600; }
+.tr-sec-actions { display: inline-flex; align-items: center; gap: 6px; flex: 0 0 auto; }
+.tr-sec-count {
+  margin-left: 4px;
+  padding: 0 4px;
+  border-radius: 8px;
+  background: var(--blue-soft);
+  color: var(--blue);
+  font-size: 10.5px;
+}
+.tr-sense-list { display: flex; flex-wrap: wrap; gap: 6px; }
+.tr-sense {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  max-width: 100%;
+  padding: 4px 10px;
+  border: 1px solid var(--border-2);
+  border-radius: var(--radius-sm, 6px);
+  background: transparent;
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+  color: var(--text-2);
+  transition: background .15s, border-color .15s;
+}
+.tr-sense:hover { background: var(--blue-soft); border-color: var(--blue); }
+/* 缩略：单行截断。点开后解除截断、允许换行，一次看全该义项 */
+.tr-sense-def {
+  font-size: 12.5px;
+  line-height: 1.5;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.tr-sense.open .tr-sense-def { white-space: normal; overflow: visible; }
+.tr-sense-pos {
+  flex: none;
+  font-size: 11px;
+  font-family: var(--mono);
+  color: var(--blue);
+  font-weight: 600;
+}
+.tr-web-list { display: flex; flex-wrap: wrap; gap: 6px; }
+.tr-web-item {
+  font-size: 12px;
+  padding: 3px 9px;
+  border-radius: 20px;
+  background: var(--border-2);
+  color: var(--text-2);
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .tr-note {
   margin-top: 8px;
@@ -2590,9 +3050,20 @@ h1 .ver-chip { font-size: 11px; padding: 2px 8px; vertical-align: 4px; }
 :root {
   /* 语义补充 token */
   --card: #ffffff;
-  --accent-2: var(--accent-2);          /* 与强调色配套的浅一档，用于渐变与进度条 */
+  /* ★★ 这两个必须是**字面值**，绝不能写成 `var(--自己)`。
+     自定义属性的自引用构成循环引用，按 CSS 规范「循环引用」会使该属性在
+     计算值阶段直接失效（guaranteed-invalid），而**任何引用了它的声明也会
+     一起失效** —— 于是：
+       .logo-mark / .tb-logo 的 linear-gradient(...) 整条作废 → 白底白字，
+                               看起来就是「图标丢了」；
+       .progress-fill 的渐变作废 → 背诵进度条只剩灰色轨道，填充整条不可见；
+       .plan-row.today .plan-fill 同理。
+     默认主题色（data-accent 不是 teal/purple/amber/rose 时）下面这两行是
+     **唯一**的定义处，所以从主题改造那次提交起它们一直是坏的。
+     取值取主题改造前的硬编码值：#5b9bff（渐变浅档）、#b57500（橙字）。 */
+  --accent-2: #5b9bff;
   --border-hover: #c9d2e2;
-  --amber-text: var(--amber-text);        /* 橙色系提示文字：浅底上要够深 */
+  --amber-text: #b57500;
   --toast-bg: #1c2434;
   --toast-fg: #ffffff;
   --overlay: rgba(20, 28, 45, .42);
@@ -2722,7 +3193,10 @@ h1 .ver-chip { font-size: 11px; padding: 2px 8px; vertical-align: 4px; }
   box-shadow: inset 0 0 0 2px rgba(255, 255, 255, .25);
 }
 .accent-dot:hover { border-color: var(--border-hover); color: var(--text); }
-.accent-dot.active { border-color: var(--dot); color: var(--text); box-shadow: 0 0 0 3px color-mix(in srgb, var(--dot) 22%, transparent); }
+/* `--dot` 由 theme.js 内联写在这个元素上（`style="--dot:#xxx"`）。
+   仍然给兜底值：万一某次渲染忘了注入，主题圆点至少还有个蓝环，
+   而不是 `border-color` / `color-mix()` 双双失效、选中态彻底没反应。 */
+.accent-dot.active { border-color: var(--dot, var(--blue)); color: var(--text); box-shadow: 0 0 0 3px color-mix(in srgb, var(--dot, var(--blue)) 22%, transparent); }
 .accent-dot.active i { box-shadow: inset 0 0 0 2px rgba(255, 255, 255, .5); }
 
 /* 标题栏 / 侧边栏里的快速明暗切换 */
@@ -2909,6 +3383,34 @@ h1 .ver-chip { font-size: 11px; padding: 2px 8px; vertical-align: 4px; }
   border-radius: var(--radius-sm);
   background: var(--panel);
 }
+/* 按语言分组（需求 9）：语音包一多，平铺一列就找不着北；分组之后
+   「我要学的这门语言装没装、有没有得装」一眼可答，两处语音 UI 也统一了。 */
+.tts-lang-group { margin-bottom: 12px; }
+.tts-lang-group:last-of-type { margin-bottom: 0; }
+.tts-lang-head {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 8px; margin-bottom: 6px; padding-left: 2px;
+}
+.tts-lang-name {
+  font-size: 12px; font-weight: 600; color: var(--text-2);
+  /* 与系统音色下拉里的 optgroup 视觉同源：语言名就是这一层的分组标题 */
+}
+.tts-lang-count {
+  font-size: 11px; padding: 0 7px; border-radius: 20px;
+  background: var(--border-2); color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+}
+.tts-lang-body { display: flex; flex-direction: column; gap: 6px; }
+/* 没有本地语音包的语言必须**明说**，否则用户会以为软件漏做了 */
+.tts-missing {
+  margin-top: 12px; padding: 10px 12px;
+  display: flex; flex-direction: column; gap: 4px;
+  background: var(--orange-soft);
+  border-left: 3px solid var(--orange);
+  border-radius: var(--radius-sm);
+  font-size: 11.5px; line-height: 1.65; color: var(--amber-text);
+}
+.tts-missing b { font-size: 12px; }
 .tts-voice-main {
   display: flex; flex-direction: column; gap: 2px;
   min-width: 0;

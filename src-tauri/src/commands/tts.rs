@@ -364,15 +364,23 @@ pub async fn cmd_tts_speak(
         return Err("还没有可用的语音包".to_string());
     }
 
-    // 选定语音：用户指定 > 按语言自动挑 > 第一条已装的
+    // 选定语音：用户指定 > 按语言自动挑。
+    //
+    // ★ 这里**刻意不做**「挑不中就随便拿第一条已装语音」的兜底：
+    //   第一条通常就是英语语音，拿它去读日语/韩语会念出一串怪音，
+    //   用户还以为是「软件发音不准」。`pick_voice_for_lang` 已经改成
+    //   绝不跨语言降级（日语/韩语在 Piper 官方没有与随包引擎兼容的语音，
+    //   会返回 `None`），此时如实报错，前端会据此回退到**系统语音**
+    //   （Windows/Android 自带日韩语音），效果远好于错语言合成。
     let l = lang.unwrap_or_default();
     let a = accent.unwrap_or_default();
     let chosen = if !cfg.tts.voice_local.is_empty() && installed.contains(&cfg.tts.voice_local) {
         cfg.tts.voice_local.clone()
     } else {
-        tts::pick_voice_for_lang(&l, &a, &installed)
-            .or_else(|| installed.first().cloned())
-            .ok_or_else(|| "没有可用的语音包".to_string())?
+        tts::pick_voice_for_lang(&l, &a, &installed).ok_or_else(|| {
+            let lang_name = if l.trim().is_empty() { "该语言" } else { l.trim() };
+            format!("没有 {lang_name} 的本地语音包，已改用系统语音")
+        })?
     };
 
     let rate = cfg.tts.rate.clamp(0.5, 2.0);

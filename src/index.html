@@ -23,7 +23,7 @@
     <span class="tb-name">WordWise</span>
   </div>
   <div class="tb-right">
-    <button class="tb-btn" id="btn-theme-toggle" title="切换深色 / 浅色">&#9790;</button>
+    <button class="tb-btn" id="btn-theme-toggle" title="切换深色 / 浅色"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M20.4 14.6A8.6 8.6 0 0 1 9.4 3.6a8.6 8.6 0 1 0 11 11Z"/></svg></button>
     <button class="tb-btn" id="btn-minimize" title="最小化">&#8211;</button>
     <button class="tb-btn" id="btn-maximize" title="最大化 / 还原">&#9633;</button>
     <button class="tb-btn" id="btn-close-win" title="隐藏到托盘">&#10005;</button>
@@ -75,33 +75,38 @@
     </div>
 
     <nav class="nav-menu">
+      <!--
+        图标全部内联 SVG（class="ico"），不用 emoji 实体。
+        理由见 app.css 里 `svg.ico` 的注释：emoji 的字形宽度跟平台字体走，
+        Windows 上这一列图标因此高低不齐。SVG 的尺寸与基线由 CSS 决定。
+      -->
       <a class="nav-item active" data-page="study">
-        <span class="ni-icon">&#9997;</span><span>背诵</span>
+        <span class="ni-icon" aria-hidden="true"><svg class="ico" viewBox="0 0 24 24"><path d="M4 19.6h4.2L19.4 8.4a2.2 2.2 0 0 0-3.1-3.1L5 16.5v3.1Z"/><path d="M14.6 6.6l2.8 2.8"/></svg></span><span>背诵</span>
       </a>
       <a class="nav-item" data-page="lookup">
-        <span class="ni-icon">&#128269;</span><span>查词</span>
+        <span class="ni-icon" aria-hidden="true"><svg class="ico" viewBox="0 0 24 24"><circle cx="10.8" cy="10.8" r="6.3"/><path d="M15.5 15.5 20.5 20.5"/></svg></span><span>查词</span>
       </a>
       <a class="nav-item" data-page="translate">
-        <span class="ni-icon">&#127760;</span><span>翻译</span>
+        <span class="ni-icon" aria-hidden="true"><svg class="ico" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.4"/><path d="M3.6 12h16.8"/><path d="M12 3.6c2.4 2.5 2.4 14.4 0 16.8M12 3.6c-2.4 2.5-2.4 14.4 0 16.8"/></svg></span><span>翻译</span>
       </a>
       <a class="nav-item" data-page="graph">
-        <span class="ni-icon">&#128376;</span><span>知识图谱</span>
+        <span class="ni-icon" aria-hidden="true"><svg class="ico" viewBox="0 0 24 24"><circle cx="12" cy="4.9" r="2.4"/><circle cx="4.9" cy="18.4" r="2.4"/><circle cx="19.1" cy="18.4" r="2.4"/><path d="M10.4 6.9 6.5 16.2"/><path d="M13.6 6.9l3.9 9.3"/><path d="M7.3 18.4h9.4"/></svg></span><span>知识图谱</span>
       </a>
       <a class="nav-item" data-page="library">
-        <span class="ni-icon">&#128218;</span><span>词库</span>
+        <span class="ni-icon" aria-hidden="true"><svg class="ico" viewBox="0 0 24 24"><path d="M12 6.7C10.4 5.3 8.1 4.7 4.4 4.7v12.5c3.7 0 6 .6 7.6 2 1.6-1.4 3.9-2 7.6-2V4.7c-3.7 0-6 .6-7.6 2Z"/><path d="M12 6.7v12.5"/></svg></span><span>词库</span>
       </a>
       <a class="nav-item" data-page="leech">
-        <span class="ni-icon">&#9888;</span><span>错词本</span>
+        <span class="ni-icon" aria-hidden="true"><svg class="ico" viewBox="0 0 24 24"><path d="M12 4.4 3.3 19.6h17.4L12 4.4Z"/><path d="M12 9.9v4.4"/><path d="M12 17.2h.01"/></svg></span><span>错词本</span>
         <span class="ni-badge hidden" id="nav-leech-badge">0</span>
       </a>
       <a class="nav-item" data-page="plan">
-        <span class="ni-icon">&#128197;</span><span>复习计划</span>
+        <span class="ni-icon" aria-hidden="true"><svg class="ico" viewBox="0 0 24 24"><rect x="3.5" y="5.4" width="17" height="15.1" rx="2.4"/><path d="M3.5 10h17"/><path d="M8.2 3.4v4M15.8 3.4v4"/></svg></span><span>复习计划</span>
       </a>
       <a class="nav-item" data-page="stats">
-        <span class="ni-icon">&#128202;</span><span>学习统计</span>
+        <span class="ni-icon" aria-hidden="true"><svg class="ico" viewBox="0 0 24 24"><path d="M3.8 19.6h16.4"/><path d="M7.4 19.6v-8.2"/><path d="M12 19.6V4.6"/><path d="M16.6 19.6v-5.6"/></svg></span><span>学习统计</span>
       </a>
       <a class="nav-item" data-page="settings">
-        <span class="ni-icon">&#9881;</span><span>设置</span>
+        <span class="ni-icon" aria-hidden="true"><svg class="ico" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3.1"/><path d="M12 2.6v2.7M12 18.7v2.7M2.6 12h2.7M18.7 12h2.7M5.3 5.3l1.9 1.9M16.8 16.8l1.9 1.9M5.3 18.7l1.9-1.9M16.8 7.2l1.9-1.9"/></svg></span><span>设置</span>
         <!-- 右侧尾巴：小红点（有新版本）+ 版本号。包一层是为了在
              「有红点」和「没红点」两种状态下都能正确右对齐。 -->
         <span class="nav-tail">
@@ -218,6 +223,45 @@
           </div>
         </div>
 
+        <!--
+          学习目标（需求 15）：可以「N 天背完这本书」，也可以「每天背 N 个」。
+          两种模式本质上都是「把剩余词量摊到剩余时间上」，所以后端只存一个
+          mode + 两个数，由 compute_study_goal 统一算出今日目标、完成度、
+          预计完成日与复习压力 —— 前端不再自己算一遍，避免两边口径分叉。
+
+          目标只统计**选定词库**（goal_book_id）：不选就按全部词库算，
+          这与「背完这本书」的原话一致。
+        -->
+        <div class="panel goal-panel">
+          <div class="goal-head">
+            <h3 class="panel-title">学习目标</h3>
+            <div class="seg seg-sm" id="goal-mode">
+              <button class="seg-btn" data-goal="off">不设目标</button>
+              <button class="seg-btn" data-goal="days">按天数背完</button>
+              <button class="seg-btn" data-goal="per_day">按每日词量</button>
+            </div>
+          </div>
+          <div class="goal-inputs" id="goal-inputs">
+            <label class="field-inline" id="goal-days-wrap">
+              <span>计划</span>
+              <input type="number" id="goal-days" min="1" max="3650" step="1" value="30" />
+              <span>天背完</span>
+            </label>
+            <label class="field-inline" id="goal-perday-wrap">
+              <span>每天</span>
+              <input type="number" id="goal-perday" min="1" max="1000" step="1" value="30" />
+              <span>个词</span>
+            </label>
+            <label class="field-inline">
+              <span>范围</span>
+              <select id="goal-book" class="inline-select" title="目标只统计这本词库；不选则按全部词库计算"></select>
+            </label>
+            <button class="primary-btn sm" id="goal-save">保存目标</button>
+            <button class="ghost-btn sm" id="goal-extra" title="今天多背一些。加量会抬高后续几天的复习量，界面会给出提示。">多背一点</button>
+          </div>
+          <div class="goal-progress" id="goal-progress"></div>
+        </div>
+
         <div class="two-col">
           <div class="panel">
             <h3 class="panel-title">开始新的一轮</h3>
@@ -238,6 +282,13 @@
               <label class="field-inline">
                 <span>每轮题量</span>
                 <input type="number" id="opt-batch" min="5" max="100" value="20" />
+              </label>
+              <!-- 需求 14：选项个数不固定为 4，可到 8。
+                   上下限由后端 normalize_option_count 再夹一次，前端这里只是
+                   让用户能设置；词库候选词不够时会自动少给几个，不会硬凑。 -->
+              <label class="field-inline" title="每题给几个选项（2~8）。干扰项不够时会自动减少，绝不会凑数。">
+                <span>选项个数</span>
+                <input type="number" id="opt-option-count" min="2" max="8" value="4" />
               </label>
             </div>
             <p class="muted" id="study-def-lang-hint"></p>
@@ -465,6 +516,12 @@
             选日语时主体必须是「こんにちは」，罗马音只是下面这行小字。
           -->
           <div id="tr-phonetic" class="tr-phonetic hidden"></div>
+          <!--
+            词性与释义（需求 4）：有道 basic.explains 是「词性 + 释义」的行，
+            这里**缩略**成一行 chips（带词性），点开才展开全文。
+            绝不能只显示一个主要释义 —— 用户看不全就没法判断该用哪个。
+          -->
+          <div id="tr-senses" class="tr-senses hidden"></div>
           <div id="tr-alt" class="tr-alt hidden"></div>
           <div id="tr-note" class="tr-note hidden"></div>
         </div>
@@ -787,7 +844,7 @@
           <div class="panel-head-row">
             <h3 class="panel-title">外观与主题</h3>
             <div class="btn-row">
-              <button class="ghost-btn sm" id="btn-theme-quick">&#9790; 深色</button>
+              <button class="ghost-btn sm ico-row" id="btn-theme-quick"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M20.4 14.6A8.6 8.6 0 0 1 9.4 3.6a8.6 8.6 0 1 0 11 11Z"/></svg> 深色</button>
             </div>
           </div>
           <p class="muted">
@@ -1208,9 +1265,13 @@
   <div class="detail-card" id="detail-card">
     <button class="dc-close" id="dc-close">&#10005;</button>
     <div class="dc-head">
+      <!--
+        词头旁**不放**小喇叭：下方的音标行已经带「英 / 美」两个独立发音按钮，
+        这里再来一个是重复的，而且它是 emoji 🔊、与下方 SVG 图标的视觉重量
+        不一致（用户原话：「删除文字旁的小喇叭图标，因为下方已有英美发音」）。
+      -->
       <div class="dc-word-line">
         <h2 id="dc-word">word</h2>
-        <button class="icon-btn speak-btn" id="dc-audio" title="朗读单词" data-speak-accent="us">&#128266;</button>
       </div>
       <div class="dc-phonetic" id="dc-phonetic"></div>
       <div class="dc-tags" id="dc-tags"></div>
@@ -1240,6 +1301,30 @@
         <button class="ghost-btn sm" id="dc-add">加入词库</button>
         <button class="ghost-btn sm" id="dc-explain">AI 讲解</button>
       </div>
+    </div>
+  </div>
+</div>
+
+<!--
+  「今日目标完成」祝贺卡（需求 15）。
+
+  刻意**不做成自动弹窗轰炸**：它只在「今天的目标刚好完成」那一次出现，
+  而且里面给出的两个选项都是往前走的 —— 「今天到此为止」或「再多背一点」。
+  多背那一项会**明确提示复习压力会升高**（后端 pressure 字段算出来的），
+  而不是哄着用户无限加量：这些词全部会进入后续复习轮，
+  今天多背 30 个，明天就是实打实的 30 个复习任务。
+-->
+<div id="goal-done-overlay" class="overlay hidden">
+  <div class="modal goal-done-modal">
+    <button class="dc-close" id="goal-done-close">&#10005;</button>
+    <div class="gd-badge" aria-hidden="true"><svg class="ico" viewBox="0 0 24 24"><path d="M5 12.8 9.6 17.4 19 8"/></svg></div>
+    <h3 id="goal-done-title">今天的目标完成啦</h3>
+    <p class="muted" id="goal-done-text">今天的任务已经达标。</p>
+    <div class="gd-stats" id="goal-done-stats"></div>
+    <div class="gd-extra" id="goal-done-extra"></div>
+    <div class="btn-row right">
+      <button class="ghost-btn" id="goal-done-stop">今天到此为止</button>
+      <button class="primary-btn" id="goal-done-more">再多背一点</button>
     </div>
   </div>
 </div>
@@ -1304,6 +1389,13 @@
 
 <!-- ============ 全局提示 ============ -->
 <div id="toast" class="toast hidden"></div>
+
+<!--
+  「当前语音」提示条：朗读时贴到触发朗读的按钮旁边，说明这一句到底是
+  词典真人录音 / 本地 AI 语音 / 系统语音在读（读音质差别明显，用户有权知道）。
+  位置由 ui.js 的 positionVoiceTip() 在显示时算出来，所以这里不写死定位。
+-->
+<div id="voice-tip" class="voice-tip hidden"></div>
 
 <script src="js/api.js"></script>
 <script src="js/demo.js"></script>

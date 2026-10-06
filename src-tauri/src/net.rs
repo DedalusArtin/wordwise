@@ -11,6 +11,12 @@
 //!   「手动配置 → 环境变量 → 系统注册表」解析。之所以要自己读注册表，
 //!   是因为图形界面启动的桌面应用拿不到 `HTTP_PROXY` 环境变量，
 //!   而 Clash / v2ray 这类工具默认只写「Internet 选项」。
+//! - **手动代理优先级最高，且不被系统绕过表削弱**：只有真正走系统代理
+//!   时才并入 Windows 的 `ProxyOverride`。否则用户手填的代理会被那张表里
+//!   `github.com` 之类的「直连」规则踢回直连，表现为「软件说不可达、
+//!   浏览器却能打开」。详见 [`build_no_proxy`]。
+//! - **探测超时与真实请求对齐**：诊断用的 [`probe_with_timeout`] 不能比
+//!   真实下载用的超时短太多，否则代理握手偏慢时会假报失败。
 //! - 本机地址（127.0.0.1 / localhost）永远直连，避免把 LM Studio 的
 //!   `127.0.0.1:1234` 请求送进代理而连不上本地模型。
 //! - 所有错误转成中文可读文案，直接展示给用户。
@@ -26,6 +32,54 @@ use crate::models::NetworkConfig;
 pub const USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) WordWise/1.0 \
 (+https://github.com/DedalusArtin/wordwise)";
 
+/// 代理解析实际走的是**哪一条路径**。
+///
+/// 单独做成枚举、而不是只留一句 `origin` 文案，是因为它有两个不能靠字符串
+/// 凑合的用途：
+/// 1. 诊断面板要如实告诉用户「本次探测走的是手动代理还是系统代理」；
+/// 2. `build_no_proxy` 要据此判断**要不要并入 Windows 的 `ProxyOverride`**——
+///    这正是「用户手填的代理被系统绕过表悄悄削弱」那个 bug 的修复点
+///    （理由见 `build_no_proxy` 上方的长注释）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize)]
+pub enum ProxyPath {
+    /// 总开关关闭（默认）：一律直连
+    #[default]
+    Off,
+    /// 用户在设置页显式填写的代理地址
+    Manual,
+    /// 环境变量（HTTPS_PROXY / HTTP_PROXY / ALL_PROXY）
+    Env,
+    /// Windows「Internet 选项」里的系统代理
+    System,
+    /// 开了代理但没填地址、又关掉了自动探测 → 只能直连
+    AutoDetectOff,
+    /// 开了代理也开了自动探测，但环境变量与注册表里都没有地址 → 直连
+    NotFound,
+}
+
+impl ProxyPath {
+    /// 给诊断面板用的一句人话。
+    pub fn label(self) -> &'static str {
+        match self {
+            ProxyPath::Off => "直连（未启用代理）",
+            ProxyPath::Manual => "手动代理",
+            ProxyPath::Env => "环境变量代理",
+            ProxyPath::System => "系统代理",
+            ProxyPath::AutoDetectOff => "直连（已关闭自动探测且未填地址）",
+            ProxyPath::NotFound => "直连（启用代理但未检测到地址）",
+        }
+    }
+
+    /// 这条路径要不要把 Windows 的 `ProxyOverride`（系统绕过表）并进 no_proxy。
+    ///
+    /// 只有**真正用了系统代理**（`System`）时才并入：那时代理与绕过表来自
+    /// 同一个地方（同一份「Internet 选项」），尊重它既正确也符合用户预期。
+    /// 其余路径一律不并入，理由见 `build_no_proxy` 上方的长注释。
+    pub fn respects_system_bypass(self) -> bool {
+        matches!(self, ProxyPath::System)
+    }
+}
+
 /// 代理解析结果。带上来源说明，方便在设置页如实告诉用户
 /// 「当前到底走没走代理、走的是哪一个」，避免再出现「我明明开了代理」的困惑。
 #[derive(Debug, Clone, Default, serde::Serialize)]
@@ -36,6 +90,8 @@ pub struct ProxyResolution {
     pub origin: String,
     /// 是否已经显式关闭了 reqwest 的自动代理探测
     pub explicit: bool,
+    /// 本次实际走了哪条解析路径（诊断面板展示 + 决定 no_proxy 合并规则）
+    pub path: ProxyPath,
 }
 
 impl ProxyResolution {
@@ -194,21 +250,35 @@ pub const ORIGIN_DIRECT_NO_PROXY: &str = "未启用代理（直连）";
 /// 连 `HTTP_PROXY` 环境变量也不读。否则只要机器上残留一个环境变量，
 /// 「默认直连」就会失效，用户会莫名其妙地连不上内网资源。
 pub fn resolve_proxy(cfg: &NetworkConfig) -> ProxyResolution {
-    resolve_proxy_inner(cfg, proxy_from_env())
+    resolve_proxy_with(cfg, proxy_from_env(), system_proxy())
 }
 
-/// `resolve_proxy` 的实现体。
+/// 「只注入环境变量、系统代理走真实注册表」的便捷壳，**仅供单测使用**。
 ///
-/// 把「环境变量」作为入参而不是在函数里现读，是为了让测试能确定性地
-/// 断言「未启用代理时，即使环境里有 `HTTP_PROXY` 也必须直连」——
-/// 直接改进程环境变量的测试在并行执行时是不稳定且互相干扰的。
+/// 生产路径走 [`resolve_proxy`] → [`resolve_proxy_with`]。留着这个壳是为了
+/// 让那些只关心「环境变量 vs 总开关」的用例不必每次都显式写一个系统代理参数。
+#[cfg(test)]
 fn resolve_proxy_inner(cfg: &NetworkConfig, env_proxy: Option<String>) -> ProxyResolution {
+    resolve_proxy_with(cfg, env_proxy, system_proxy())
+}
+
+/// 代理解析的**纯逻辑**实现：环境变量与系统代理都做成入参。
+///
+/// 测试需要确定性地覆盖「手动代理会不会被系统绕过表削弱」这条分支，
+/// 而直接读注册表既不稳定（干净环境 / CI 上读不到，本机也可能随时被
+/// Clash 改掉）也不该在单测里发生，所以把两个外部来源都提成了参数。
+fn resolve_proxy_with(
+    cfg: &NetworkConfig,
+    env_proxy: Option<String>,
+    sys_proxy: Option<String>,
+) -> ProxyResolution {
     // 0) 总开关：默认关闭 → 一律直连，不探测任何代理来源。
     if !cfg.enable_proxy {
         return ProxyResolution {
             url: None,
             origin: ORIGIN_DIRECT_NO_PROXY.into(),
             explicit: true,
+            path: ProxyPath::Off,
         };
     }
 
@@ -219,6 +289,7 @@ fn resolve_proxy_inner(cfg: &NetworkConfig, env_proxy: Option<String>) -> ProxyR
             url: Some(normalize_proxy_url(manual)),
             origin: "手动配置".into(),
             explicit: true,
+            path: ProxyPath::Manual,
         };
     }
 
@@ -228,6 +299,7 @@ fn resolve_proxy_inner(cfg: &NetworkConfig, env_proxy: Option<String>) -> ProxyR
             url: None,
             origin: "已启用代理但未填写地址（自动探测已关闭）".into(),
             explicit: true,
+            path: ProxyPath::AutoDetectOff,
         };
     }
 
@@ -238,16 +310,18 @@ fn resolve_proxy_inner(cfg: &NetworkConfig, env_proxy: Option<String>) -> ProxyR
                 url: Some(normalize_proxy_url(&v)),
                 origin: "环境变量".into(),
                 explicit: true,
+                path: ProxyPath::Env,
             };
         }
     }
 
     // 4) 系统代理（Windows 注册表）
-    if let Some(v) = system_proxy() {
+    if let Some(v) = sys_proxy {
         return ProxyResolution {
             url: Some(normalize_proxy_url(&v)),
             origin: "Windows 系统代理设置".into(),
             explicit: true,
+            path: ProxyPath::System,
         };
     }
 
@@ -258,11 +332,39 @@ fn resolve_proxy_inner(cfg: &NetworkConfig, env_proxy: Option<String>) -> ProxyR
         url: None,
         origin: "已启用代理但未检测到可用地址".into(),
         explicit: true,
+        path: ProxyPath::NotFound,
     }
 }
 
-/// 组装 no_proxy 列表：用户配置 + 永远直连的本机地址 + 系统绕过列表。
-fn build_no_proxy(cfg: &NetworkConfig) -> String {
+/// 组装 no_proxy 列表。
+///
+/// ★ 关键判断：**不是所有代理路径都要并入 Windows 的 `ProxyOverride`**。
+///   只有「系统代理」路径才并入（`merge_system_bypass = true`）。
+///
+/// 为什么手动代理绝不能并入系统绕过表（用户报的「软件说 GitHub 不可达、
+/// 浏览器却能打开」的头号成因）：
+///   代理软件（Clash / v2ray 等）经常把 `github.com` 写进 `ProxyOverride`
+///   做「域名直连」，这在**系统代理**语境下是合理的。但用户在本软件里
+///   **显式填了代理地址**，意思很明确：「这些流量请走我指定的代理」。
+///   此时若把系统绕过表拼进来，`github.com` 就会被从手动代理里踢出去、
+///   退回直连——在国内必然失败；而浏览器走的是它自己那套绕过判定，
+///   照样能打开。于是表现成「软件说不可达、浏览器却通」。
+///   用户亲手填的代理优先级最高，不该被一份他**没在本软件里配置过**的
+///   绕过表削弱。环境变量路径同理：那张表是给系统代理用的，与一个外部
+///   工具设的环境变量没有关系。
+///
+/// 反过来，真正走系统代理时（`ProxyPath::System`）必须尊重这张表，
+/// 否则就是另一个回归：系统代理路径会去访问用户明确要求直连的站点。
+fn build_no_proxy(cfg: &NetworkConfig, merge_system_bypass: bool) -> String {
+    build_no_proxy_with(cfg, merge_system_bypass, system_proxy_override())
+}
+
+/// `build_no_proxy` 的纯逻辑实现（系统绕过表可注入 → 可单测）。
+fn build_no_proxy_with(
+    cfg: &NetworkConfig,
+    merge_system_bypass: bool,
+    system_override: Option<String>,
+) -> String {
     let mut parts: Vec<String> = Vec::new();
     for s in cfg.no_proxy.split(',') {
         let s = s.trim();
@@ -276,15 +378,44 @@ fn build_no_proxy(cfg: &NetworkConfig) -> String {
             parts.push(host.to_string());
         }
     }
-    if let Some(extra) = system_proxy_override() {
-        for s in extra.split(',') {
-            let s = s.trim();
-            if !s.is_empty() && !parts.iter().any(|p| p == s) {
-                parts.push(s.to_string());
+    // 用户在本软件里自己填的 no_proxy 任何时候都生效（那是他的明确意愿）；
+    // 系统的 ProxyOverride 则只在真的用系统代理时才参考。
+    if merge_system_bypass {
+        if let Some(extra) = system_override {
+            for s in extra.split(',') {
+                let s = s.trim();
+                if !s.is_empty() && !parts.iter().any(|p| p == s) {
+                    parts.push(s.to_string());
+                }
             }
         }
     }
     parts.join(",")
+}
+
+/// 本次请求**真正生效**的 no_proxy 排除表（诊断面板展示用）。
+///
+/// 直连时 reqwest 的代理逻辑整体关闭，排除表没有意义，直接说明清楚，
+/// 免得用户对着一个空列表猜「我的绕过规则到底起没起作用」。
+pub fn effective_no_proxy(cfg: &NetworkConfig, resolved: &ProxyResolution) -> String {
+    if resolved.is_direct() {
+        return "（直连，未使用排除表）".to_string();
+    }
+    build_no_proxy(cfg, resolved.path.respects_system_bypass())
+}
+
+/// 诊断面板里描述「本次探测实际走哪条路 + 排除表里有什么」的那一句话。
+///
+/// 把它放在 net.rs（而不是内联在命令里）是为了让这条**结论文案**能被单测
+/// 断言：用户排查「软件说不可达」时最先看到的就是这一行，它不该悄悄漂移。
+/// 反过来说，只要某个目标域名出现在这里列出的排除表里，它就**不经过代理**，
+/// 用户一眼就能看出问题出在自己的绕过配置上。
+pub fn describe_probe_path(cfg: &NetworkConfig, resolved: &ProxyResolution) -> String {
+    format!(
+        "本次探测实际走：{}；no_proxy 排除表：{}",
+        resolved.path.label(),
+        effective_no_proxy(cfg, resolved)
+    )
 }
 
 /// 创建 HTTP 客户端（使用默认网络配置）。
@@ -310,7 +441,10 @@ pub fn build_client_with(cfg: &NetworkConfig) -> Result<(reqwest::Client, ProxyR
         .user_agent(USER_AGENT);
 
     if let Some(url) = &resolved.url {
-        let no_proxy = build_no_proxy(cfg);
+        // 只有「系统代理」这条路径才并入 Windows 的 ProxyOverride：
+        // 手动地址/环境变量是用户（或外部工具）明确给的代理目标，
+        // 不能被系统的绕过表削弱。详见 `build_no_proxy` 的注释。
+        let no_proxy = build_no_proxy(cfg, resolved.path.respects_system_bypass());
         let proxy = reqwest::Proxy::all(url.as_str())
             .map_err(|e| anyhow!("代理地址无效（{}）：{}", url, e))?
             .no_proxy(reqwest::NoProxy::from_string(&no_proxy));
@@ -605,9 +739,35 @@ pub fn client_direct(timeout_secs: u64) -> reqwest::Client {
         })
 }
 
-/// 探测某地址是否可连通（用于 LM Studio 健康检查）。
+/// 连通性探测的默认超时（秒）。
+///
+/// ★ 必须与 `build_client_with` 给真实请求用的超时**保持同一量级**。
+///   探测和真实下载/查询走的是同一个客户端、同一条代理链路；如果探测比
+///   真实请求短一大截，在代理握手偏慢时（境外节点尤其明显）就会**假报失败**：
+///   软件说「GitHub 不可达」，用户转头用浏览器却打得开 —— 这正是
+///   「开了代理仍显示不可达」的成因之一。原先这里硬编码 5 秒，而真实请求
+///   默认 30 秒，两者差了 6 倍。
+///
+///   `probe_timeout_matches_real_request_timeout` 这条测试会把这个不变量钉住。
+pub const PROBE_TIMEOUT_SECS: u64 = 30;
+
+/// 探测某地址是否可连通（用于网络诊断 / LM Studio 健康检查）。
 pub async fn probe(client: &reqwest::Client, url: &str) -> bool {
-    match client.get(url).timeout(Duration::from_secs(5)).send().await {
+    probe_with_timeout(client, url, PROBE_TIMEOUT_SECS).await
+}
+
+/// 指定超时的探测版本。
+///
+/// 诊断面板按**本次实际使用的客户端**的超时来探测：远端项用真实客户端的
+/// `timeout_secs`，本机项用 `client_direct` 的超时。这样得到的「通/不通」
+/// 才等同于真实请求的结论，而不是某个更短超时下抓拍到的一张快照。
+pub async fn probe_with_timeout(client: &reqwest::Client, url: &str, timeout_secs: u64) -> bool {
+    match client
+        .get(url)
+        .timeout(Duration::from_secs(timeout_secs.clamp(3, 600)))
+        .send()
+        .await
+    {
         Ok(r) => r.status().is_success() || r.status().as_u16() < 500,
         Err(_) => false,
     }
@@ -654,6 +814,7 @@ mod tests {
         assert!(r.url.is_none(), "默认配置不应解析出代理");
         assert!(r.is_direct());
         assert_eq!(r.origin, ORIGIN_DIRECT_NO_PROXY);
+        assert_eq!(r.path, ProxyPath::Off, "默认配置走的是「总开关关闭」这条路径");
         // explicit=true 才会让 build_client_with 调 .no_proxy()，
         // 从而连 reqwest 自己的系统代理探测也一并关掉
         assert!(r.explicit, "直连时也必须显式关闭自动代理探测");
@@ -669,6 +830,7 @@ mod tests {
         let r = resolve_proxy_inner(&cfg, Some("http://127.0.0.1:7890".into()));
         assert!(r.url.is_none(), "未启用代理时不应采纳 HTTP_PROXY");
         assert_eq!(r.origin, ORIGIN_DIRECT_NO_PROXY);
+        assert_eq!(r.path, ProxyPath::Off);
     }
 
     /// 未启用代理时，手动填了地址也不生效——总开关优先级最高。
@@ -682,6 +844,7 @@ mod tests {
         let r = resolve_proxy_inner(&cfg, Some("http://10.0.0.1:8080".into()));
         assert!(r.url.is_none());
         assert_eq!(r.origin, ORIGIN_DIRECT_NO_PROXY);
+        assert_eq!(r.path, ProxyPath::Off, "总开关是第 0 道判断，必须压过手动地址");
     }
 
     // ---------- 启用代理后仍然完好 ----------
@@ -697,6 +860,7 @@ mod tests {
         assert!(client.get("https://example.com").build().is_ok());
         assert_eq!(resolved.url.as_deref(), Some("http://127.0.0.1:7890"));
         assert_eq!(resolved.origin, "手动配置");
+        assert_eq!(resolved.path, ProxyPath::Manual);
     }
 
     /// 启用代理 + 地址留空 → 自动探测，环境变量优先于注册表。
@@ -709,6 +873,7 @@ mod tests {
         let r = resolve_proxy_inner(&cfg, Some("socks5://127.0.0.1:7891".into()));
         assert_eq!(r.url.as_deref(), Some("socks5://127.0.0.1:7891"));
         assert_eq!(r.origin, "环境变量");
+        assert_eq!(r.path, ProxyPath::Env);
     }
 
     /// 启用代理但关掉自动探测、又没填地址 → 直连，且说明清楚原因。
@@ -722,7 +887,194 @@ mod tests {
         let r = resolve_proxy_inner(&cfg, Some("http://127.0.0.1:7890".into()));
         assert!(r.url.is_none());
         assert!(r.explicit);
+        assert_eq!(r.path, ProxyPath::AutoDetectOff);
         assert!(r.origin.contains("未填写地址"), "来源应说明原因：{}", r.origin);
+    }
+
+    // ---------- 代理解析优先级 & no_proxy 合并规则（纯逻辑，不联网） ----------
+
+    /// 手动代理 + 系统绕过表里正好有目标域名 → 手动代理必须仍然生效。
+    ///
+    /// 这是用户报的「软件说 GitHub 不可达、浏览器却能打开」的头号成因：
+    /// 代理软件（Clash 等）把 `github.com` 写进了 `ProxyOverride` 做直连，
+    /// 我们又把那张表并进了 no_proxy，于是用户手填的代理被绕过、退回直连
+    /// （国内必然失败）；而浏览器走它自己那套绕过判定，照样能打开。
+    #[test]
+    fn manual_proxy_is_not_weakened_by_system_bypass_list() {
+        let cfg = NetworkConfig {
+            enable_proxy: true,
+            proxy: "127.0.0.1:7890".into(),
+            // 就算用户同时开着「自动探测」，也不能拿系统绕过表来削手动地址
+            use_system_proxy: true,
+            ..NetworkConfig::default()
+        };
+        let r = resolve_proxy_with(
+            &cfg,
+            Some("http://10.0.0.1:8080".into()), // 环境变量也在
+            Some("10.0.0.1:8080".into()),        // 系统代理也在
+        );
+        assert_eq!(r.path, ProxyPath::Manual, "手填地址必须压过环境变量与系统代理");
+        assert_eq!(r.url.as_deref(), Some("http://127.0.0.1:7890"));
+
+        // 关键断言：手动路径不并入系统绕过表，github.com 必须留在代理里
+        let np = build_no_proxy_with(
+            &cfg,
+            r.path.respects_system_bypass(),
+            Some("github.com,*.githubusercontent.com".into()),
+        );
+        assert!(
+            !np.contains("github.com"),
+            "手动代理被系统绕过表削弱了，github.com 会被放行成直连：{np}"
+        );
+        // 但用户自己在本软件里填的 no_proxy 与「永远直连」的本机地址仍在
+        assert!(np.contains("127.0.0.1") && np.contains("localhost"));
+    }
+
+    /// 走系统代理时，系统绕过表必须被尊重 —— 修上面那个 bug 不能把它一起丢掉。
+    #[test]
+    fn system_proxy_respects_bypass_list() {
+        let cfg = NetworkConfig {
+            enable_proxy: true,
+            use_system_proxy: true,
+            ..NetworkConfig::default()
+        };
+        let r = resolve_proxy_with(&cfg, None, Some("127.0.0.1:7890".into()));
+        assert_eq!(r.path, ProxyPath::System);
+        assert!(r.path.respects_system_bypass(), "系统代理路径应当尊重绕过表");
+
+        let np = build_no_proxy_with(
+            &cfg,
+            r.path.respects_system_bypass(),
+            Some("github.com".into()),
+        );
+        assert!(np.contains("github.com"), "系统代理路径必须尊重系统的绕过表：{np}");
+    }
+
+    /// 环境变量代理同样不该被 Windows 的绕过表削弱：那张表是给系统代理用的，
+    /// 与一个外部工具设的环境变量没有关系。
+    #[test]
+    fn env_proxy_does_not_merge_system_bypass() {
+        let cfg = NetworkConfig {
+            enable_proxy: true,
+            use_system_proxy: true,
+            ..NetworkConfig::default()
+        };
+        let r = resolve_proxy_with(
+            &cfg,
+            Some("socks5://127.0.0.1:7891".into()),
+            Some("127.0.0.1:7890".into()),
+        );
+        assert_eq!(r.path, ProxyPath::Env);
+        assert!(!r.path.respects_system_bypass());
+
+        let np = build_no_proxy_with(
+            &cfg,
+            r.path.respects_system_bypass(),
+            Some("github.com".into()),
+        );
+        assert!(!np.contains("github.com"), "环境变量代理被系统绕过表削弱了：{np}");
+    }
+
+    /// 优先级全序：总开关 > 手动 > 环境变量 > 系统代理 > 未检测到。
+    #[test]
+    fn proxy_priority_order_is_total() {
+        let with_manual = NetworkConfig {
+            enable_proxy: true,
+            proxy: "127.0.0.1:7890".into(),
+            use_system_proxy: true,
+            ..NetworkConfig::default()
+        };
+        let env = Some("http://10.0.0.1:8080".to_string());
+        let sys = Some("10.0.0.1:8888".to_string());
+
+        assert_eq!(
+            resolve_proxy_with(&with_manual, env.clone(), sys.clone()).path,
+            ProxyPath::Manual
+        );
+
+        let no_manual = NetworkConfig { proxy: String::new(), ..with_manual.clone() };
+        assert_eq!(
+            resolve_proxy_with(&no_manual, env.clone(), sys.clone()).path,
+            ProxyPath::Env,
+            "没填手动地址时，环境变量应当压过系统代理"
+        );
+        assert_eq!(
+            resolve_proxy_with(&no_manual, None, sys.clone()).path,
+            ProxyPath::System
+        );
+        assert_eq!(
+            resolve_proxy_with(&no_manual, None, None).path,
+            ProxyPath::NotFound,
+            "开了代理但哪都没探测到，应如实报「未检测到地址」而不是随便挑一个"
+        );
+    }
+
+    /// 总开关关闭 → 一律直连，且诊断面板要明说排除表没被使用。
+    #[test]
+    fn master_switch_off_forces_direct() {
+        let cfg = NetworkConfig {
+            enable_proxy: false,
+            proxy: "127.0.0.1:7890".into(),
+            use_system_proxy: true,
+            ..NetworkConfig::default()
+        };
+        let r = resolve_proxy_with(
+            &cfg,
+            Some("http://10.0.0.1:8080".into()),
+            Some("10.0.0.1:8888".into()),
+        );
+        assert_eq!(r.path, ProxyPath::Off);
+        assert!(r.is_direct());
+        assert_eq!(r.origin, ORIGIN_DIRECT_NO_PROXY);
+        assert!(
+            effective_no_proxy(&cfg, &r).contains("未使用"),
+            "直连时排除表不起作用，应当说清楚"
+        );
+    }
+
+    /// 探测超时不能比真实请求短太多，否则会出现「探测失败、实际能通」的假阴性。
+    ///
+    /// 真实请求的总超时来自 `NetworkConfig::timeout_secs`（`build_client_with`
+    /// 用的就是它）；这里把它与探测的默认超时对齐，等于用编译期断言守住
+    /// `PROBE_TIMEOUT_SECS` 的注释里那条约定。
+    #[test]
+    fn probe_timeout_matches_real_request_timeout() {
+        assert_eq!(
+            PROBE_TIMEOUT_SECS,
+            NetworkConfig::default().timeout_secs,
+            "探测超时与真实请求超时不一致，会出现「探测说不可达、实际下载能成」的假阴性"
+        );
+    }
+
+    /// 诊断面板那一行结论文案：把「实际走的路径」与「生效的排除表」摆在一起。
+    ///
+    /// 断言的是**完整字符串**：这条文案是用户排查「软件说不可达」时最先看到
+    /// 的东西，它不该在后续重构里悄悄变样（比如少掉「no_proxy」这一段，
+    /// 用户就又失去「是不是我自己的绕过列表把域名放行了」这条线索了）。
+    #[test]
+    fn diag_line_shows_path_and_effective_no_proxy() {
+        let cfg = NetworkConfig {
+            enable_proxy: true,
+            proxy: "127.0.0.1:7890".into(),
+            ..NetworkConfig::default()
+        };
+        // 手动代理路径：不并入系统绕过表 → 排除表里只剩本机地址，可确定性断言
+        let r = resolve_proxy_with(&cfg, None, None);
+        assert_eq!(r.path, ProxyPath::Manual);
+        let line = describe_probe_path(&cfg, &r);
+        assert_eq!(
+            line,
+            "本次探测实际走：手动代理；no_proxy 排除表：localhost,127.0.0.1,::1,0.0.0.0"
+        );
+        // 命令里最终拼出来的一整行（`format!("{}；{}", describe(), line)`）
+        eprintln!("[diag] {}；{}", r.describe(), line);
+
+        // 直连时要说清「排除表没起作用」，而不是给一个空列表让人猜
+        let direct_cfg = NetworkConfig::default();
+        let direct = resolve_proxy_with(&direct_cfg, None, None);
+        let direct_line = describe_probe_path(&direct_cfg, &direct);
+        assert!(direct_line.contains("未使用排除表"), "{direct_line}");
+        eprintln!("[diag] {}；{}", direct.describe(), direct_line);
     }
 
     #[test]
@@ -754,7 +1106,8 @@ mod tests {
             proxy: "127.0.0.1:7890".into(),
             ..NetworkConfig::default()
         };
-        let np = build_no_proxy(&cfg);
+        // 手动代理路径：不并入系统绕过表，但本机地址仍必须永远直连
+        let np = build_no_proxy(&cfg, false);
         assert!(np.contains("127.0.0.1"));
         assert!(np.contains("localhost"));
     }

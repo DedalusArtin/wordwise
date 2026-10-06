@@ -883,7 +883,26 @@ const Settings = (() => {
         : `引擎约 ${st.engine_size_text || ''}，只需下载一次，所有语音包共用`;
     }
 
-    box.innerHTML = (st.voices || []).map((v) => {
+    // ---- 语音包清单：按语言分组（需求 9） ----
+    //
+    // 平铺一列在语音包变多之后就没法用了：用户真正要回答的问题是
+    // 「我想学的这门语言，语音包装了吗 / 有没有得装」——
+    // 分组 + 每组的「已装/总数」一眼就能回答，不用逐行读语言标签。
+    const voices = st.voices || [];
+    const byLang = new Map();
+    voices.forEach(v => {
+      const k = (v.lang || '').trim() || 'other';
+      if (!byLang.has(k)) byLang.set(k, []);
+      byLang.get(k).push(v);
+    });
+
+    const groups = [...byLang.entries()].map(([lang, list]) => {
+      // 已装的排前面：用户多半是来管理自己正在学的那门语言
+      const sorted = list.slice().sort((a, b) => (b.installed ? 1 : 0) - (a.installed ? 1 : 0));
+      return { lang, list: sorted, inst: list.filter(v => v.installed).length, total: list.length };
+    }).sort((a, b) => (b.inst - a.inst) || a.lang.localeCompare(b.lang));
+
+    const voiceRow = (v) => {
       // 随包预置的那份在安装目录里，删不掉（下次覆盖安装还会回来），
       // 所以不给删除按钮，只标出来源。
       const bundled = v.source === 'bundled';
@@ -893,7 +912,6 @@ const Settings = (() => {
         : `<button class="ghost-btn xs" data-tts-install="${U().esc(v.id)}"${engineOk ? '' : ' disabled'}>`
           + `下载 ${U().esc(v.size_text || '')}</button>`;
       const meta = [
-        U().langLabel(v.lang),
         v.accent ? String(v.accent).toUpperCase() : '',
         v.size_text || '',
         v.preset ? '预置' : '',
@@ -906,7 +924,30 @@ const Settings = (() => {
         <div class="tts-voice-main"><b>${U().esc(v.label)}</b><span class="muted">${U().esc(meta)}</span>${note}</div>
         <div class="tts-voice-act">${act}</div>
       </div>`;
-    }).join('') || '<p class="muted">没有可用的语音清单。</p>';
+    };
+
+    // 有清单里没覆盖到的**学习语言**，必须如实列出来 ——
+    // 用户找不到日语包时的第一反应是「软件漏了」，而不是「上游没有」。
+    const covered = new Set(groups.map(g => g.lang));
+    const missing = LANG_OPTIONS
+      .filter(([code]) => !covered.has(code))
+      .map(([, label]) => label);
+    const missingHtml = missing.length
+      ? '<div class="tts-missing"><b>暂不支持本地语音包：' + U().esc(missing.join('、')) + '</b>' +
+        '<span>这几门语言在离线引擎（Piper）的官方仓库里没有可用音色 —— 仅有的日/韩语音需要新版引擎，' +
+        '装上去也读不出声，所以宁可不出。朗读时会自动改用<b>在线语音</b>或<b>系统语音</b>，' +
+        '在设置里把「朗读引擎」设为「自动」即可。</span></div>'
+      : '';
+
+    box.innerHTML = (groups.map(g =>
+      '<div class="tts-lang-group">' +
+        '<div class="tts-lang-head">' +
+          `<span class="tts-lang-name">${U().esc(U().langLabel(g.lang))}</span>` +
+          `<span class="tts-lang-count">${g.inst}/${g.total}</span>` +
+        '</div>' +
+        '<div class="tts-lang-body">' + g.list.map(voiceRow).join('') + '</div>' +
+      '</div>').join('') + missingHtml)
+      || '<p class="muted">没有可用的语音清单。</p>';
 
     const hint = ttsEl('tts-hint');
     if (hint) {

@@ -14,6 +14,7 @@
 //! - `commands` Tauri 命令层
 //! - `seed`     内置示例词库
 //! - `tts`      本地语音合成（Piper 引擎托管 + 语音包按需下载）
+//! - `webview`  应用内网页浏览窗口（在线搜索点开即在此打开）
 //! - `timeutil` 系统时间工具
 
 pub mod commands;
@@ -23,6 +24,7 @@ pub mod graph;
 pub mod llm;
 pub mod localllm;
 pub mod models;
+pub mod morph;
 pub mod net;
 pub mod search;
 pub mod seed;
@@ -31,6 +33,7 @@ pub mod state;
 pub mod timeutil;
 pub mod translate;
 pub mod tts;
+pub mod webview;
 pub mod windows;
 
 /// 库入口：供 main.rs 调用（桌面端），并由 Android 的 JNI 层回调（移动端）。

@@ -155,6 +155,71 @@ const Speak = (() => {
   function setLocalReady(v) { localReady = !!v; }
   function isLocalReady() { return localReady; }
 
+  /* ---------------- 当前语音（「刚才这句是用什么读的」） ----------------
+
+     需求原文：「朗读时在界面旁显示当前用的是哪种语音（如 AI 或本地语音）」。
+
+     ★ 数据早就有了，只是没人接：后端 `SynthOut` 里就带着实际使用的
+       `voice` 字段（`tts/mod.rs` 的返回值），而 `playLocalTts` 原来只取
+       `res.audio`，把 `res.voice` 丢了 —— 界面上于是永远说不清
+       「这句是 Piper 合成的，还是 WebView 系统语音念的」。
+       两者音质差别明显，用户无从判断到底是哪条通道在生效。
+
+     三条通道各自上报：
+       dict   词典真人录音（音频 URL）
+       local  本地神经语音（后端 Piper）—— 就是用户说的「AI 语音」
+       system 系统语音（WebView speechSynthesis）—— 兜底
+  */
+  let lastVoice = null;             // { engine, voice, text, at }
+  const voiceSubs = [];
+
+  /** 通道 + 音色名 → 给用户看的一句话。 */
+  const VOICE_KIND = {
+    dict: '词典真人录音',
+    local: '本地 AI 语音',   // 后端 Piper 合成的神经语音
+    system: '系统语音',      // WebView speechSynthesis 兜底
+  };
+  function voiceKindLabel(engine) {
+    return VOICE_KIND[engine] || VOICE_KIND.system;
+  }
+  function voiceLabel(engine, voice) {
+    const k = voiceKindLabel(engine);
+    return voice ? `${k} · ${voice}` : k;
+  }
+
+  /**
+   * 上报「本次用了哪条通道、哪个音色」。
+   * @param {'dict'|'local'|'system'} engine
+   * @param {string} voice  音色名/模型 id（没有就传空串）
+   * @param {string} text   被朗读的文字
+   * @param {Element} [anchor] 触发朗读的按钮 —— 提示条会贴在它旁边
+   */
+  function notifyVoice(engine, voice, text, anchor) {
+    lastVoice = { engine: engine || 'system', voice: voice || '', text: text || '', at: Date.now() };
+    const label = voiceLabel(lastVoice.engine, lastVoice.voice);
+    // 界面提示：ui.js 提供实现。ui.js 在本文件之后加载，所以运行时才取。
+    try {
+      if (window.WW && window.WW.voiceTip) window.WW.voiceTip(lastVoice, label, anchor);
+    } catch (e) { /* 提示条画不出来不该影响发声 */ }
+    // 其它订阅者（设置页的「最近一次合成」用它）
+    for (const fn of voiceSubs) {
+      try { fn(lastVoice, label); } catch (e) { /* 单个订阅者出错不影响其它 */ }
+    }
+  }
+
+  /** 订阅「当前语音」变化；返回退订函数。 */
+  function onVoice(fn) {
+    if (typeof fn !== 'function') return () => {};
+    voiceSubs.push(fn);
+    // 立刻回灌一次当前值，订阅者不用等下一次朗读才知道现状
+    if (lastVoice) { try { fn(lastVoice, voiceLabel(lastVoice.engine, lastVoice.voice)); } catch (e) {} }
+    return () => {
+      const i = voiceSubs.indexOf(fn);
+      if (i >= 0) voiceSubs.splice(i, 1);
+    };
+  }
+  function currentVoice() { return lastVoice; }
+
   /**
    * 用后端本地引擎合成并播放。
    *
@@ -162,7 +227,7 @@ const Speak = (() => {
    * false = 需要调用方回退到系统语音。**不吞异常**是刻意的 —— 任何一步
    * 出问题都回退系统语音，绝不让用户点了没声音。
    */
-  function playLocalTts(text, lang, accent, rate, key) {
+  function playLocalTts(text, lang, accent, rate, key, anchor) {
     const API = (window.WordWiseAPI && window.WordWiseAPI.API) || null;
     if (!API || typeof API.ttsSpeak !== 'function') return Promise.resolve(false);
     if (!localReady) return Promise.resolve(false);
@@ -175,6 +240,9 @@ const Speak = (() => {
         if (!audioEl) audioEl = new Audio();
         audioEl.src = res.audio;
         speaking = true;
+        // ★ res.voice 是后端**实际用到的那条语音**（`SynthOut.voice`）。
+        //   原来这里把它丢掉了，界面于是没法回答「这句到底是谁读的」。
+        notifyVoice('local', res.voice || '', text, anchor);
         audioEl.onended = () => { speaking = false; };
         audioEl.onerror = () => { speaking = false; };
         const p = audioEl.play();
@@ -191,7 +259,8 @@ const Speak = (() => {
   /**
    * 朗读一段文字（单词或整句）。
    * @param {string} text
-   * @param {object} opts { audio, lang, accent, rate, pitch, key, force }
+   * @param {object} opts { audio, lang, accent, rate, pitch, key, force, anchor }
+   *   `anchor` 是触发朗读的元素，用于把「当前语音」提示条贴在它旁边。
    */
   function speak(word, opts = {}) {
     const text = (word || '').trim();
@@ -201,6 +270,7 @@ const Speak = (() => {
     const rate = typeof opts.rate === 'number' && opts.rate > 0 ? opts.rate : ratePref();
     const audioUrl = opts.audio || '';
     const key = opts.key || (text + '|' + accent + '|' + lang);
+    const anchor = opts.anchor || null;
 
     // 重复点击同一段 → 停止
     if (currentKey === key && (speaking || (audioEl && !audioEl.paused))) {
@@ -213,19 +283,20 @@ const Speak = (() => {
     lastKey = key;
 
     if (audioUrl) {
-      playUrl(audioUrl, key, { lang, accent, rate });
+      playUrl(audioUrl, key, { lang, accent, rate, anchor });
       return;
     }
 
     // 词典没给真人音频 → 按偏好选合成通道。
     // 「系统语音」是显式选择，直接走 WebView；其余（auto / local / online）
-    // 都先试本地引擎，失败再回退系统语音 —— 回退是无声的，用户不需要知道。
+    // 都先试本地引擎，失败再回退系统语音 —— 回退是无声的，用户不需要知道，
+    // 但「当前语音」提示条会如实显示最后**真正**发声道的那一条。
     if (enginePref() === 'system') {
-      playTts(text, lang, rate, key, { accent, pitch: opts.pitch });
+      playTts(text, lang, rate, key, { accent, pitch: opts.pitch, anchor });
       return;
     }
-    playLocalTts(text, lang, accent, rate, key).then((handled) => {
-      if (!handled) playTts(text, lang, rate, key, { accent, pitch: opts.pitch });
+    playLocalTts(text, lang, accent, rate, key, anchor).then((handled) => {
+      if (!handled) playTts(text, lang, rate, key, { accent, pitch: opts.pitch, anchor });
     });
   }
 
@@ -233,7 +304,7 @@ const Speak = (() => {
    * 播放音频 URL；失败自动降级到 TTS。
    * @param {string} url
    * @param {string} key
-   * @param {object} fallback { lang, accent, rate }
+   * @param {object} fallback { lang, accent, rate, anchor }
    */
   function playUrl(url, key, fallback = {}) {
     if (!url) return;
@@ -242,13 +313,15 @@ const Speak = (() => {
       fallback.lang || 'en',
       typeof fallback.rate === 'number' && fallback.rate > 0 ? fallback.rate : 0,
       key,
-      { accent: fallback.accent }
+      { accent: fallback.accent, anchor: fallback.anchor }
     );
     try {
       if (!audioEl) audioEl = new Audio();
       audioEl.src = url;
       speaking = true;
+      notifyVoice('dict', '', (key || '').split('|')[0] || '', fallback.anchor);
       audioEl.onended = () => { speaking = false; };
+      // 真人录音挂了（外链失效、被墙）→ 降级合成，提示条也会跟着改成合成通道
       audioEl.onerror = () => { speaking = false; fb(); };
       const p = audioEl.play();
       if (p && p.catch) p.catch(() => { speaking = false; fb(); });
@@ -264,7 +337,7 @@ const Speak = (() => {
    * @param {string} lang   语言代码（en / ja / zh…）或 BCP-47
    * @param {number} rate   语速，1 = 正常
    * @param {string} key    去重用 key
-   * @param {object} extra  { accent, pitch }
+   * @param {object} extra  { accent, pitch, anchor }
    */
   function playTts(text, lang, rate, key, extra = {}) {
     const synth = window.speechSynthesis;
@@ -281,13 +354,17 @@ const Speak = (() => {
       speaking = true;
       currentKey = key || currentKey;
 
+      // 系统语音这一路的音色是**按 tag + 打分**挑出来的，取一次就够，
+      // 顺便把它报给界面（用户能看出「原来是系统语音在念」）。
+      const v = pickVoice(tag);
+      notifyVoice('system', v ? v.name : '', content, extra.anchor);
+
       chunks.forEach((chunk, i) => {
         const u = new SpeechSynthesisUtterance(chunk);
         u.lang = tag;
         // rate 传 0 / 未传 → 用用户偏好（设置页的「语速」）
         u.rate = typeof rate === 'number' && rate > 0 ? rate : ratePref();
         if (typeof extra.pitch === 'number') u.pitch = extra.pitch;
-        const v = pickVoice(tag);
         if (v) u.voice = v;
         const isLast = i === chunks.length - 1;
         u.onend = () => { if (isLast) speaking = false; };
@@ -322,13 +399,13 @@ const Speak = (() => {
   function preview(text, lang) {
     return speak(text || 'Hello, this is how I read.', { lang: lang || 'en', key: 'preview', force: true });
   }
-
   function stop() {
     speaking = false;
     try {
       if (audioEl) { audioEl.pause(); audioEl.currentTime = 0; }
     } catch (e) { /* 忽略 */ }
     try { window.speechSynthesis && window.speechSynthesis.cancel(); } catch (e) { /* 忽略 */ }
+    try { if (window.WW && window.WW.voiceTipHide) window.WW.voiceTipHide(); } catch (e) { /* 忽略 */ }
   }
 
   /**
@@ -354,17 +431,34 @@ const Speak = (() => {
     };
   }
 
-  /** 生成音标旁的小喇叭按钮 HTML。 */
+  /**
+   * 生成音标旁的小喇叭按钮 HTML。
+   *
+   * 图标是内联 SVG 而不是 emoji：emoji 的字形宽度由平台字体决定，
+   * 同一个 🔊 在 Windows / Android 上的宽度不一样，一排发音按钮就会参差。
+   * SVG 的尺寸由 CSS（`svg.ico`）决定，与字体无关。
+   */
   function btnHtml(entry, accent, label) {
     const acc = accent || 'us';
-    return `<button class="speak-btn accent-${acc}" title="朗读${label || ''}" data-speak-accent="${acc}">🔊</button>`;
+    const ico = (window.WW && window.WW.icon) ? window.WW.icon('sound') : '';
+    return `<button class="speak-btn accent-${acc}" title="朗读${label || ''}" data-speak-accent="${acc}">${ico}</button>`;
   }
 
   /**
    * 事件委托：任何带 .speak-btn 的元素点击都会朗读。
    *
-   * 取词优先级：按钮自身 data-speak-word → 最近的 [data-entry-word] →
-   * 最近的 [data-speak-text]（整句朗读用）。
+   * ★ 取词与取音频都必须走**同一套三级回退**，这是「上方读不了、下方能读」
+   *   那类不对称 bug 的根因：
+   *
+   *   原来取词有三段回退（按钮自身 → 最近 [data-entry-word] → 最近
+   *   [data-speak-text]），取音频却**只读按钮自身的 `data-speak-audio`**，
+   *   从不看容器。而真人录音 URL 是挂在**容器**上的（背诵页的音标行、
+   *   反馈条、上一个词、已背列表的容器都带 `data-speak-audio`），按钮自己
+   *   身上没有 —— 于是同样一个词，从容器里渲染出来的按钮能放真人录音，
+   *   从别处渲染出来的按钮只能干走 TTS，听起来就是「有的地方能读、有的
+   *   地方读不出来」。
+   *
+   *   现在 audio / lang 也照 word 的三级回退读，两边口径完全一致。
    */
   function bindDelegate(root) {
     const el = root || document;
@@ -375,6 +469,9 @@ const Speak = (() => {
       if (!t || typeof t.closest !== 'function') return;
       const b = t.closest('.speak-btn');
       if (!b) return;
+      // 只掐掉「点按钮顺带触发外层可点区域」这类行为（如折叠面板的 summary、
+      // 整条可点的「上一个单词」）。这与 ui.js 里可点词的统一入口不冲突：
+      // 那边是另一种元素，且它在冒泡更外层，标记不同。
       e.stopPropagation();
       e.preventDefault();
 
@@ -386,10 +483,17 @@ const Speak = (() => {
         || '';
       if (!word) return;
       const accent = b.dataset.speakAccent || 'us';
-      const audio = b.dataset.speakAudio || '';
-      const lang = b.dataset.speakLang || (sentenceHost && sentenceHost.dataset.speakLang) || 'en';
+      // 音频 / 语言：与 word 完全相同的三级回退（按钮 → 词条容器 → 整句容器）
+      const audio = b.dataset.speakAudio
+        || (host && host.dataset.speakAudio)
+        || (sentenceHost && sentenceHost.dataset.speakAudio)
+        || '';
+      const lang = b.dataset.speakLang
+        || (host && host.dataset.speakLang)
+        || (sentenceHost && sentenceHost.dataset.speakLang)
+        || 'en';
       const rate = b.dataset.speakRate ? parseFloat(b.dataset.speakRate) : undefined;
-      speak(word, { accent, audio, lang, rate, force: true });
+      speak(word, { accent, audio, lang, rate, force: true, anchor: b });
     });
   }
 
@@ -406,6 +510,8 @@ const Speak = (() => {
     playUrl, playTts, voices, availableLang,
     voicePref, setVoicePref, ratePref, setRatePref, resetPrefs,
     enginePref, setEnginePref, setLocalReady, isLocalReady, playLocalTts,
+    // 「当前语音」：onVoice 订阅变化，currentVoice 直接读最新值
+    onVoice, currentVoice, voiceLabel, voiceKindLabel,
   };
 })();
 

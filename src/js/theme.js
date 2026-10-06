@@ -23,9 +23,9 @@ const Theme = (() => {
   const KEY = 'ww.theme';
 
   const MODES = [
-    { id: 'light', name: '浅色', icon: '\u2600' },
-    { id: 'dark', name: '深色', icon: '\u263E' },
-    { id: 'system', name: '跟随系统', icon: '\u25CE' },
+    { id: 'light', name: '浅色', icon: 'sun' },
+    { id: 'dark', name: '深色', icon: 'moon' },
+    { id: 'system', name: '跟随系统', icon: 'system' },
   ];
 
   /** 主题色。dot 只用于设置页里的色块，真正的取值在 app.css 里。 */
@@ -113,6 +113,22 @@ const Theme = (() => {
     set({ mode: resolvedMode(cur.mode) === 'dark' ? 'light' : 'dark' });
   }
 
+  /**
+   * 取一个内联 SVG 图标。
+   *
+   * ★ 图标统一由 ui.js 的 `icon()` 提供，这里**不再自己写字符**：
+   *   原来用的是 `\u2600`（☀）/ `\u263E`（☾）/ `\u25CE`（◎）三个 BMP 字符，
+   *   宽度由平台字体决定，与导航栏那排图标不是一个视觉重量。
+   *
+   * 为什么带兜底：theme.js 在 <head> 里加载（要赶在首屏绘制前写 data-mode），
+   * 而 ui.js 在 body 末尾。本文件只在 DOMContentLoaded 之后才渲染按钮，
+   * 那时 ui.js 已经执行完 —— 但兜底仍然留着：图标缺失只该少一个图形，
+   * 绝不该让主题按钮整个哑掉。
+   */
+  function ico(name) {
+    return (window.WW && window.WW.icon) ? window.WW.icon(name) : '';
+  }
+
   /** 把当前主题回显到设置页的按钮上。 */
   function syncUI() {
     const resolved = resolvedMode(cur.mode);
@@ -124,13 +140,14 @@ const Theme = (() => {
     });
     const quick = document.getElementById('btn-theme-quick');
     if (quick) {
-      quick.textContent = resolved === 'dark' ? '\u2600 浅色' : '\u263E 深色';
+      quick.innerHTML = ico(resolved === 'dark' ? 'sun' : 'moon')
+        + (resolved === 'dark' ? '浅色' : '深色');
       quick.title = '在浅色 / 深色之间切换（当前：' + (MODES.find((m) => m.id === cur.mode) || {}).name + '）';
     }
     // 侧边栏/标题栏上的那个小按钮也要跟着变
     const chip = document.getElementById('btn-theme-toggle');
     if (chip) {
-      chip.textContent = resolved === 'dark' ? '\u2600' : '\u263E';
+      chip.innerHTML = ico(resolved === 'dark' ? 'sun' : 'moon');
       chip.title = resolved === 'dark' ? '切换到浅色' : '切换到深色';
     }
   }
@@ -141,8 +158,8 @@ const Theme = (() => {
     if (modes && !modes.dataset.built) {
       modes.dataset.built = '1';
       modes.innerHTML = MODES.map((m) =>
-        `<button class="seg-btn${m.id === cur.mode ? ' active' : ''}" data-mode="${m.id}"
-           title="${m.name}">${m.icon} ${m.name}</button>`
+        `<button class="seg-btn ico-row${m.id === cur.mode ? ' active' : ''}" data-mode="${m.id}"
+           title="${m.name}">${ico(m.icon)} ${m.name}</button>`
       ).join('');
       modes.addEventListener('click', (e) => {
         const b = e.target.closest('.seg-btn');

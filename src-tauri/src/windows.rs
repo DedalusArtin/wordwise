@@ -62,7 +62,13 @@ fn build_invoke_handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync +
         commands::cmd_wiki,
         commands::cmd_dict_links,
         commands::cmd_open_url,
+        // 需求 11：在线搜索的结果在**应用内**浏览窗口打开（不再跳系统浏览器）。
+        // 桌面端建/复用 "webview" 窗口，移动端回退系统浏览器 —— 平台差异在
+        // `webview.rs` 内部消化，所以这里无条件注册，与上面四个窗口命令同理。
+        commands::cmd_open_in_app,
         commands::cmd_get_word,
+        // 需求 5：同族派生词（happy → happiness…）—— 本地词库确认，不联网
+        commands::cmd_word_family,
         commands::cmd_search_words,
         commands::cmd_recent_searches,
         // AI 讲解存档（讲解也是一种词库资料，可搜索、可并入词库）
@@ -125,6 +131,11 @@ fn build_invoke_handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync +
         commands::cmd_skip,
         commands::cmd_end_session,
         commands::cmd_word_state,
+        // 复习会话与学习目标（需求 14 / 15）—— 均为新增命令，追加在此
+        commands::cmd_start_review_session,
+        commands::cmd_study_goal,
+        commands::cmd_set_study_goal,
+        commands::cmd_extra_study,
         // 统计与计划
         commands::cmd_stats,
         commands::cmd_review_plan,

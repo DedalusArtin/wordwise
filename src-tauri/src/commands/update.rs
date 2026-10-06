@@ -47,6 +47,31 @@ const DOWNLOAD_MIRRORS: [&str; 3] = [
     "https://ghproxy.net/",
 ];
 
+/// 检查更新（GitHub API）的候选地址：直连优先，失败再依次试镜像。
+///
+/// 为什么要给「检查更新」也配镜像：安装包下载本来就有三条镜像兜底
+/// （见 [`download_urls`]），而检查更新原先只打 `api.github.com` —— 于是
+/// 出现一种很别扭的不对称：「检查更新」告诉你 GitHub 不可达，可它其实
+/// **下载得了**。用户拿到的结论就是「GitHub 不可达」，进而误判整个联网
+/// 功能都废了。这里复用与下载**同一批**镜像（同一个常量，不另立一份），
+/// 保证两边的可达性判断一致。
+fn check_urls(original: &str) -> Vec<String> {
+    let mut urls = vec![original.to_string()];
+    for m in DOWNLOAD_MIRRORS {
+        urls.push(format!("{m}{original}"));
+    }
+    urls
+}
+
+/// 结果里标注数据来源；走镜像时如实写出来，免得用户以为「直连也通了」。
+fn source_label(base: &str, via_mirror: bool) -> String {
+    if via_mirror {
+        format!("{base}·经国内镜像")
+    } else {
+        base.to_string()
+    }
+}
+
 /// 就绪的安装包放在数据目录下的这个子目录里。
 fn updates_dir(data_dir: &Path) -> PathBuf {
     data_dir.join("updates")
@@ -320,6 +345,34 @@ async fn fetch_release(
         .map_err(|e| format!("解析 GitHub 响应失败：{e}"))
 }
 
+/// 依次尝试「直连 → 各镜像」拉一个 GitHub API。
+///
+/// 返回值里的 `bool` 表示**是否走了镜像**，用于在结果里如实标注来源。
+///
+/// `NOT_FOUND` 是一个语义信号（仓库里没有这个资源），换镜像也改变不了它，
+/// 所以立刻上抛，不做无谓的重复请求。
+async fn fetch_release_any(
+    client: &reqwest::Client,
+    urls: &[String],
+    timeout_secs: u64,
+) -> Result<(serde_json::Value, bool), String> {
+    let mut last_err = String::from("未知原因");
+    for (i, url) in urls.iter().enumerate() {
+        match fetch_release(client, url, timeout_secs).await {
+            Ok(v) => return Ok((v, i > 0)),
+            Err(e) if e == "NOT_FOUND" => return Err(e),
+            Err(e) => last_err = e,
+        }
+    }
+    // ★ 这条尾巴很重要：检查更新失败**不等于**下载不可用。安装包下载走的是
+    //   另一条独立链路（资产地址 + 自己的镜像回退），用户不该因为这里红一次
+    //   就以为整个更新功能都废了。
+    Err(format!(
+        "{last_err}；已依次尝试直连与 {} 个镜像。注意：检查更新失败不代表下载不可用，安装包下载走的是另一条独立链路，通常仍可成功。",
+        urls.len().saturating_sub(1)
+    ))
+}
+
 /// 检查更新的实际实现（命令层只是它的壳，`cmd_download_update` 也要复用）。
 async fn check_inner(state: &AppState) -> Result<UpdateInfo, String> {
     let cfg = state.cfg();
@@ -330,17 +383,18 @@ async fn check_inner(state: &AppState) -> Result<UpdateInfo, String> {
     let latest_url = format!("https://api.github.com/repos/{REPO}/releases/latest");
     let list_url = format!("https://api.github.com/repos/{REPO}/releases");
 
-    match fetch_release(&client, &latest_url, timeout).await {
-        Ok(v) => Ok(build_info(
+    match fetch_release_any(&client, &check_urls(&latest_url), timeout).await {
+        Ok((v, via_mirror)) => Ok(build_info(
             &v,
             &current,
             &cfg,
-            "GitHub Releases（最新正式版）",
+            &source_label("GitHub Releases（最新正式版）", via_mirror),
         )),
         // 仓库只有预发布版本时 `/releases/latest` 会 404。
         // 退一步用列表接口取第一个非草稿，这样开发期也能测到更新链路。
         Err(e) if e == "NOT_FOUND" => {
-            let list = fetch_release(&client, &list_url, timeout).await?;
+            let (list, via_mirror) =
+                fetch_release_any(&client, &check_urls(&list_url), timeout).await?;
             let first = list
                 .as_array()
                 .and_then(|a| {
@@ -354,7 +408,7 @@ async fn check_inner(state: &AppState) -> Result<UpdateInfo, String> {
                 &first,
                 &current,
                 &cfg,
-                "GitHub Releases（最近一次发布）",
+                &source_label("GitHub Releases（最近一次发布）", via_mirror),
             ))
         }
         Err(e) => Err(e),
@@ -750,6 +804,27 @@ mod tests {
         // 镜像就是把原地址拼在域名后面
         assert!(u[1].starts_with(DOWNLOAD_MIRRORS[0]));
         assert!(u[1].ends_with("/releases/download/v1/x.exe"));
+    }
+
+    /// 检查更新必须和下载用**同一批**镜像，否则又会出现「检查说不可达、
+    /// 下载却能成」的不对称。
+    #[test]
+    fn check_urls_reuse_the_same_mirrors_as_download() {
+        let api = "https://api.github.com/repos/DedalusArtin/wordwise/releases/latest";
+        let u = check_urls(api);
+        assert_eq!(u[0], api, "直连永远排第一");
+        assert_eq!(u.len(), DOWNLOAD_MIRRORS.len() + 1);
+        for (i, m) in DOWNLOAD_MIRRORS.iter().enumerate() {
+            assert!(u[i + 1].starts_with(m));
+            // 镜像就是把整个原始 URL 拼在域名后面
+            assert_eq!(u[i + 1], format!("{m}{api}"));
+        }
+    }
+
+    #[test]
+    fn source_label_marks_mirror_usage() {
+        assert_eq!(source_label("GitHub Releases", false), "GitHub Releases");
+        assert!(source_label("GitHub Releases", true).contains("镜像"));
     }
 
     #[test]

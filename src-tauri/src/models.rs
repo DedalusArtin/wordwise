@@ -610,6 +610,38 @@ pub struct StudyOptions {
     pub batch_size: i64,
     /// 每日复习上限
     pub daily_limit: i64,
+    /// 选择题每题的选项个数（**含正确答案**），2~8，默认 4（需求 14）。
+    ///
+    /// 为什么放在后端而不是只让前端切：选项是 `build_card` 生成并发下来
+    /// 的，前端只负责渲染；后端不认这个值的话，改选项数就等于没改。
+    #[serde(default = "default_option_count")]
+    pub option_count: u32,
+
+    /* ---- 学习目标（需求 15） ---- */
+    /// 目标模式：`"off"` 不设目标 / `"days"` 按天数背完 / `"per_day"` 每天固定词量
+    #[serde(default = "default_goal_mode")]
+    pub goal_mode: String,
+    /// `goal_mode == "days"` 时的目标天数
+    #[serde(default = "default_goal_days")]
+    pub goal_days: u32,
+    /// `goal_mode == "per_day"` 时的每日词量
+    #[serde(default = "default_goal_per_day")]
+    pub goal_per_day: u32,
+    /// 目标针对哪本词库（空串 = 全部词库）
+    #[serde(default)]
+    pub goal_book_id: String,
+    /// 第一次设定目标那天的 `"YYYY-MM-DD"`，用于算「已经过去几天」。
+    ///
+    /// 存字符串而不是时间戳：目标天数、剩余天数都是**按自然日**算的，
+    /// 存时间戳反而要反复做时区归一，容易在午夜前后算错一天。
+    #[serde(default)]
+    pub goal_started_at: String,
+    /// 「今天多背一点」临时加的量（跨天自动失效）
+    #[serde(default)]
+    pub goal_extra_today: u32,
+    /// 上面那笔加量是**哪一天**加的；与今天不符就当作 0，避免昨天的加量延续到今天
+    #[serde(default)]
+    pub goal_extra_date: String,
 }
 
 impl Default for StudyOptions {
@@ -624,8 +656,74 @@ impl Default for StudyOptions {
             ai_explain: true,
             batch_size: 20,
             daily_limit: 120,
+            option_count: default_option_count(),
+            goal_mode: default_goal_mode(),
+            goal_days: default_goal_days(),
+            goal_per_day: default_goal_per_day(),
+            goal_book_id: String::new(),
+            goal_started_at: String::new(),
+            goal_extra_today: 0,
+            goal_extra_date: String::new(),
         }
     }
+}
+
+/// 选择题默认 4 个选项（最经典的「四选一」）。
+fn default_option_count() -> u32 {
+    4
+}
+
+fn default_goal_mode() -> String {
+    "off".to_string()
+}
+
+fn default_goal_days() -> u32 {
+    30
+}
+
+fn default_goal_per_day() -> u32 {
+    30
+}
+
+/// 学习目标视图（需求 15）：`cmd_study_goal` / `cmd_set_study_goal` 的返回体。
+///
+/// 字段名与前端约定死了，改动要同步前端，所以这里保持扁平、不做嵌套。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StudyGoal {
+    /// off / days / per_day
+    pub mode: String,
+    /// 目标天数（mode=per_day 时为 0）
+    pub days: u32,
+    /// 每天词量（mode=days 时为 0）
+    pub per_day: u32,
+    pub book_id: String,
+    pub book_name: String,
+    /// 目标范围内的词总量
+    pub total_words: u32,
+    /// 已学（有 study_state 记录）
+    pub learned: u32,
+    /// total_words - learned（不小于 0）
+    pub remaining: u32,
+    /// 今天应该完成多少
+    pub today_target: u32,
+    /// 今天已完成多少（按 review_log 今天的**去重词数**）
+    pub today_done: u32,
+    /// 还不满的差额（0 = 今天达标）
+    pub today_remaining: u32,
+    /// 按当前节奏预计完成日 "YYYY-MM-DD"（算不出时为空串）
+    pub eta_date: String,
+    /// 距目标完成日还剩几天（0 = 已到/已超）
+    pub days_left: u32,
+    /// 今天到期（含逾期）要复习的量
+    pub due_today: u32,
+    /// 未来 7 天预计复习总量
+    pub review_load_7d: u32,
+    /// "normal" | "high" —— 加量提示用
+    pub pressure: String,
+    /// 进度是否跟得上目标
+    pub on_track: bool,
+    /// 目标范围内的词是否已全部学过
+    pub finished: bool,
 }
 
 /// 词典源类型（需求 6：可配置 API，便于扩展小语种）。
@@ -813,6 +911,23 @@ pub const EXPLAIN_LANG_CONSTRAINT: &str = r#"【输出语言（最高优先级�
 2. 以下内容一律保持原文，**不要翻译**：被讲解的词本身、代码标识符、函数/变量/类名、命令行与参数、日志、文件路径、URL、配置键名、以及通常不翻译的专有名词缩写。
 3. 外语例句保留原句，其译文用 {LANG}。
 4. 不要输出任何关于「我用了哪种语言」的说明，也不要翻译 Markdown 的语法标记。"#;
+
+/// **联网资料**约束块（需求 5，运行时追加到 system prompt 末尾）。
+///
+/// 为什么必须有这一块：本地词库对小词、俚语、专业术语经常「查不到例句」，
+/// 需求要求这种时候用 AI 补上。但模型凭记忆编例句是常态 —— 编出来的句子
+/// 语法通顺、语义合理，用户无从分辨，这是最坏的一类错误（学到错的用法）。
+/// 所以联网检索到的**真实网页标题与摘要**会作为「唯一可信来源」贴进 user
+/// prompt，这里再从 system 层面禁止越出这份材料编造。
+///
+/// 注意它只约束「补充材料」，不改变原本的讲解结构要求 —— 资料为空时整块
+/// 不注入，行为与之前完全一致。
+pub const EXPLAIN_WEB_REF_CONSTRAINT: &str = r#"【联网资料的用法（本轮的例句与派生内容必须基于它）】
+1. user 消息里会给出「联网检索资料」。补充**例句、派生变形、固定搭配、常见用法**时，只能依据这些资料。
+2. 资料里没有的内容，**宁可留空并明说「本地与联网资料均未收录」**，也不要凭记忆编造例句或变形。
+3. 资料可能与词条无关（搜索引擎的噪声）。无关的直接忽略，不要为了用上它而牵强附会。
+4. 引用资料里的原句时保持原样；若资料是外文而你需要在正文里转述，用 {LANG} 转述。
+5. 资料里的网址只作来源，不要在正文里罗列 URL —— 来源清单由界面单独展示。"#;
 
 /// **输出后处理层**的翻译模板（需求 2）。
 ///
@@ -1323,5 +1438,51 @@ mod tests {
         assert_eq!(a.phonetic.uk, "/ˈæp.əl/");
         // 来源标记要累加，前端靠它显示「数据来自哪些源」
         assert!(a.source.contains("+") || a.source.is_empty());
+    }
+
+    /// 升级前存下的 study 配置里没有新字段，反序列化必须**补齐默认值**而不是失败。
+    ///
+    /// 这是 `StudyOptions` 每个新字段都挂 `#[serde(default = ...)]` 的理由：
+    /// 少了它，旧配置会因为「缺字段」整份回退成默认，用户的语言/词库设置被清空。
+    #[test]
+    fn old_study_config_deserializes_with_defaults() {
+        let old = r#"{"show_inflections":true,"show_examples":true,"show_related":false,
+            "show_mnemonic":true,"show_phonetic":true,"auto_popup_on_wrong":true,
+            "ai_explain":true,"batch_size":20,"daily_limit":120}"#;
+        let s: StudyOptions = serde_json::from_str(old).expect("旧配置必须能反序列化");
+        assert_eq!(s.option_count, 4, "选项个数默认 4");
+        assert_eq!(s.goal_mode, "off");
+        assert_eq!(s.goal_days, 30);
+        assert_eq!(s.goal_per_day, 30);
+        assert!(s.goal_book_id.is_empty());
+        assert!(s.goal_started_at.is_empty());
+        assert_eq!(s.goal_extra_today, 0);
+        assert!(s.goal_extra_date.is_empty());
+    }
+
+    /// 新字段本身也要能正常往返（保存 → 读取）。
+    #[test]
+    fn study_options_roundtrip_preserves_new_fields() {
+        let s = StudyOptions {
+            option_count: 6,
+            goal_mode: "days".into(),
+            goal_days: 45,
+            goal_per_day: 25,
+            goal_book_id: "kaoyan-core".into(),
+            goal_started_at: "2026-10-06".into(),
+            goal_extra_today: 10,
+            goal_extra_date: "2026-10-06".into(),
+            ..Default::default()
+        };
+        let j = serde_json::to_string(&s).unwrap();
+        let back: StudyOptions = serde_json::from_str(&j).unwrap();
+        assert_eq!(back.option_count, 6);
+        assert_eq!(back.goal_mode, "days");
+        assert_eq!(back.goal_days, 45);
+        assert_eq!(back.goal_per_day, 25);
+        assert_eq!(back.goal_book_id, "kaoyan-core");
+        assert_eq!(back.goal_started_at, "2026-10-06");
+        assert_eq!(back.goal_extra_today, 10);
+        assert_eq!(back.goal_extra_date, "2026-10-06");
     }
 }
