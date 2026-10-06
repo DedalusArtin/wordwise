@@ -68,8 +68,10 @@ pub struct VoiceSpec {
     pub bytes: u64,
     /// HuggingFace 上的目录（回退源用）
     pub hf_dir: &'static str,
-    /// 是否随安装包预置（构建时把文件塞进 resources，首次启动复制过来）
+    /// 是否随安装包预置（构建时把文件塞进 vendor/，首次使用即生效）
     pub preset: bool,
+    /// 已知短板的提示语（空串 = 无）。显示在设置页语音名下面。
+    pub note: &'static str,
 }
 
 /// 精选语音清单。
@@ -88,6 +90,7 @@ pub const VOICES: &[VoiceSpec] = &[
         bytes: 63_201_294,
         hf_dir: "en/en_US/amy/medium",
         preset: true, // 英文默认语音，随安装包预置
+        note: "",
     },
     VoiceSpec {
         id: "en_GB-alba-medium",
@@ -99,6 +102,7 @@ pub const VOICES: &[VoiceSpec] = &[
         bytes: 63_201_294,
         hf_dir: "en/en_GB/alba/medium",
         preset: false,
+        note: "",
     },
     VoiceSpec {
         id: "en_US-ryan-high",
@@ -110,6 +114,7 @@ pub const VOICES: &[VoiceSpec] = &[
         bytes: 120_786_792,
         hf_dir: "en/en_US/ryan/high",
         preset: false,
+        note: "体积最大（115 MB），音质最好",
     },
     VoiceSpec {
         id: "zh_CN-huayan-medium",
@@ -121,10 +126,11 @@ pub const VOICES: &[VoiceSpec] = &[
         bytes: 63_201_294,
         hf_dir: "zh/zh_CN/huayan/medium",
         preset: false,
+        note: "",
     },
     VoiceSpec {
         id: "zh_CN-huayan-x_low",
-        label: "华言 · 中文女声（小体积 20MB）",
+        label: "华言 · 中文女声（小体积）",
         lang: "zh",
         accent: "",
         gender: "female",
@@ -132,6 +138,11 @@ pub const VOICES: &[VoiceSpec] = &[
         bytes: 20_628_813,
         hf_dir: "zh/zh_CN/huayan/x_low",
         preset: false,
+        // 实测：合成「你好，这是朗读效果」会打印
+        // `Missing 3 phoneme(s) from phoneme/id map!` —— 且换成中英文标点、
+        // 去标点都同样缺失，说明是**小模型音素表本身不全**，不是文本的问题。
+        // 部分汉字会被静默跳过，读音不准。如实告诉用户，别让人以为捡了便宜。
+        note: "音素表较小，个别汉字可能读不出（追求准确请选上一档）",
     },
 ];
 
@@ -446,7 +457,12 @@ pub fn cache_key(voice: &str, text: &str, rate: f32) -> String {
 /// 调用 piper 合成一段语音，返回 WAV 字节。
 ///
 /// **阻塞**：piper 是外部进程，调用方要放进 `spawn_blocking`。
-/// 单次调用在 medium 模型上约 100~400ms，首次会多花一次模型加载时间。
+/// 实测（medium 模型）：单个词约 30~60ms，首次多花一次模型加载（约 0.2s）。
+///
+/// 关于 `--output_file -`：实测 piper 会把 WAV **干净地**写进 stdout
+/// （首 12 字节就是 `RIFF....WAVE`），所有日志都走 stderr —— 所以直接读
+/// stdout 是安全的，不需要临时文件。如果哪天日志混进来了，读取处会因为
+/// 头部不是 RIFF 而报错，而不是悄悄播出一段噪音（`wav_sample_rate` 也会返回 0）。
 pub fn synth_blocking(exe: &Path, model: &Path, text: &str, rate: f32) -> Result<Vec<u8>> {
     use std::io::Write;
     use std::process::{Command, Stdio};
@@ -537,6 +553,24 @@ mod tests {
         assert_eq!(n, 1, "预置语音只能有一条（英文默认），否则安装包会失控地变大");
         let p = VOICES.iter().find(|v| v.preset).unwrap();
         assert_eq!(p.lang, "en", "预置的应该是英文语音");
+    }
+
+    /// 小体积语音有实测到的短板，必须如实标注 —— 否则用户为了省 40MB 选了它，
+    /// 遇到读不出的字只会以为是程序坏了。
+    #[test]
+    fn small_models_carry_an_honest_note() {
+        let small = spec("zh_CN-huayan-x_low").unwrap();
+        assert!(!small.note.is_empty(), "x_low 实测有音素缺失，必须给出提示");
+        assert!(small.note.contains("音素"), "提示要说清是音素表的问题，而不是笼统地贬低");
+        // 中等质量及以上不该出现「读不准」措辞
+        for v in VOICES.iter().filter(|v| v.quality != "x_low") {
+            assert!(
+                !v.note.contains("读不"),
+                "{} 不该被标成读不准：{}",
+                v.id,
+                v.note
+            );
+        }
     }
 
     #[test]

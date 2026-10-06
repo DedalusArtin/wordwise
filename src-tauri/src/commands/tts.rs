@@ -70,6 +70,7 @@ pub fn cmd_tts_status(state: State<'_, Arc<AppState>>) -> Result<serde_json::Val
                 "bytes": v.bytes,
                 "size_text": localllm::human_bytes(v.bytes),
                 "preset": v.preset,
+                "note": v.note,
                 "installed": src != "none",
                 // downloaded / bundled / none —— 界面据此显示「已下载」还是「已预置」
                 "source": src,

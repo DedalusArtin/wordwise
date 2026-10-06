@@ -1313,10 +1313,10 @@ const Mock = (() => {
           models_dir: '(调试模式)',
           installed: [],
           voices: [
-            { id: 'en_US-amy-medium', label: 'Amy · 美式女声', lang: 'en', accent: 'us', gender: 'female', quality: 'medium', bytes: 63201294, size_text: '60 MB', preset: true, installed: false },
-            { id: 'en_GB-alba-medium', label: 'Alba · 英式女声', lang: 'en', accent: 'gb', gender: 'female', quality: 'medium', bytes: 63201294, size_text: '60 MB', preset: false, installed: false },
-            { id: 'zh_CN-huayan-medium', label: '华言 · 中文女声', lang: 'zh', accent: '', gender: 'female', quality: 'medium', bytes: 63201294, size_text: '60 MB', preset: false, installed: false },
-            { id: 'zh_CN-huayan-x_low', label: '华言 · 中文女声（小体积 20MB）', lang: 'zh', accent: '', gender: 'female', quality: 'x_low', bytes: 20628813, size_text: '20 MB', preset: false, installed: false },
+            { id: 'en_US-amy-medium', label: 'Amy · 美式女声', lang: 'en', accent: 'us', gender: 'female', quality: 'medium', bytes: 63201294, size_text: '60 MB', preset: true, note: '', installed: false },
+            { id: 'en_GB-alba-medium', label: 'Alba · 英式女声', lang: 'en', accent: 'gb', gender: 'female', quality: 'medium', bytes: 63201294, size_text: '60 MB', preset: false, note: '', installed: false },
+            { id: 'zh_CN-huayan-medium', label: '华言 · 中文女声', lang: 'zh', accent: '', gender: 'female', quality: 'medium', bytes: 63201294, size_text: '60 MB', preset: false, note: '', installed: false },
+            { id: 'zh_CN-huayan-x_low', label: '华言 · 中文女声（小体积）', lang: 'zh', accent: '', gender: 'female', quality: 'x_low', bytes: 20628813, size_text: '20 MB', preset: false, note: '音素表较小，个别汉字可能读不出（追求准确请选上一档）', installed: false },
           ],
           config: t,
         };

@@ -877,8 +877,12 @@ const Settings = (() => {
         v.size_text || '',
         v.preset ? '预置' : '',
       ].filter(Boolean).join(' · ');
+      // 小体积模型有已知短板（音素表不全），如实写在名字下面，别让人以为捡了便宜
+      const note = v.note
+        ? `<span class="tts-note">${U().esc(v.note)}</span>`
+        : '';
       return `<div class="tts-voice-row">
-        <div class="tts-voice-main"><b>${U().esc(v.label)}</b><span class="muted">${U().esc(meta)}</span></div>
+        <div class="tts-voice-main"><b>${U().esc(v.label)}</b><span class="muted">${U().esc(meta)}</span>${note}</div>
         <div class="tts-voice-act">${act}</div>
       </div>`;
     }).join('') || '<p class="muted">没有可用的语音清单。</p>';
