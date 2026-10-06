@@ -126,26 +126,33 @@ const Detail = (() => {
     return 'def';
   }
 
+  /**
+   * 详情卡的「释义」面板。
+   *
+   * 义项渲染**复用** `U().senseGroup` 与 `U().splitSensesByScript`，不在这里
+   * 另写一份：查词结果与详情卡显示的是同一个词条，两边一旦各写一套，
+   * 表现就是「结果页中文在前英文在后，详情卡却中英混排」。用户按哪个页
+   * 面记住的排版，另一个页面就反过来打脸。
+   */
   function renderDefs(entry, study) {
     if (!entry.senses || !entry.senses.length) {
       return '<div class="muted">暂无释义。可点击「AI 讲解」让本地模型生成完整词条。</div>';
     }
     const showEx = study.show_examples !== false;
     const showMn = study.show_mnemonic !== false;
+    const o = { showExamples: showEx };
+
+    // 与 renderEntry 同一套分组：母语组在前，原文组在后；只有一组时不加小标题
+    const [local, native] = U().splitSensesByScript(entry.senses);
     let html = '';
-    for (const s of entry.senses) {
-      html += '<div class="sense">';
-      if (s.pos) html += `<div class="sense-pos">${U().esc(s.pos)}</div>`;
-      html += `<div class="sense-def">${U().esc(s.definition)}`;
-      if (showEx && s.examples && s.examples.length) {
-        for (const ex of s.examples.slice(0, 3)) {
-          html += `<div class="sense-ex">${U().esc(ex.text)}`;
-          if (ex.translation) html += `<div class="ex-zh">${U().esc(ex.translation)}</div>`;
-          html += '</div>';
-        }
-      }
-      html += '</div></div>';
+    if (local.length && native.length) {
+      const title = U().langLabel(entry.lang || '') === '中文'
+        ? '参考释义' : `${U().langLabel(entry.lang || '')}释义`;
+      html += U().senseGroup(null, local, o) + U().senseGroup(title, native, o);
+    } else {
+      html += U().senseGroup(null, local.length ? local : native, o);
     }
+
     if (showMn && entry.mnemonic) {
       html += `<div class="we-section"><div class="we-section-title">记忆法</div>
         <div class="mnemonic-box">${U().esc(entry.mnemonic)}</div></div>`;
@@ -1120,7 +1127,11 @@ const Lookup = (() => {
     // 查询后由 loadPairs 填充 —— 与主词条并行拉取，绝不拖慢主结果的出现。
     const pairsBox = '<div id="lk-pairs" class="lk-pairs hidden"></div>';
 
+    // 结果区采用「分块卡片 + 标签切换」排布（`tabs: true`）。
+    // 「对应词」不进标签：它是异步补齐的另一个容器（#lk-pairs），
+    // 硬塞进标签面板会让「标签已经画好、内容还没回来」变成空面板。
     box.innerHTML = langNote + degradeNote + transBox + U().renderEntry(res.entry, {
+      tabs: true,
       showInflections: study.show_inflections !== false,
       showExamples: study.show_examples !== false,
       showRelated: study.show_related === true,
@@ -1132,6 +1143,25 @@ const Lookup = (() => {
       <button class="ghost-btn sm" id="lk-add">加入词库</button>
       <button class="ghost-btn sm" id="lk-detail">查看详情卡</button>
     </div>`;
+
+    // 标签切换：一次只显示一块。
+    //
+    // 用委托而不是逐个绑：标签栏会被下一次查询整段替换，逐个绑必然泄漏
+    // 且漏绑（新标签点不动）——这和朗读按钮那条坑是同一个道理。
+    const tabsBar = box.querySelector('.entry-tabs');
+    if (tabsBar) {
+      tabsBar.addEventListener('click', (e) => {
+        const btn = e.target.closest('.entry-tab');
+        if (!btn || !btn.dataset.block) return;
+        const id = btn.dataset.block;
+        tabsBar.querySelectorAll('.entry-tab').forEach(b => {
+          b.classList.toggle('active', b.dataset.block === id);
+        });
+        box.querySelectorAll('.entry-body .entry-pane').forEach(p => {
+          p.classList.toggle('active', p.dataset.pane === id);
+        });
+      });
+    }
 
     box.querySelectorAll('.rel-chip').forEach(c => {
       c.addEventListener('click', () => query(c.dataset.word));

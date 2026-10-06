@@ -130,12 +130,20 @@ function loadingHtml(text = '加载中…') {
 
 /**
  * 渲染词条。
+ *
+ * 两种排布，共用同一份头部与同一份义项渲染：
+ *  - 默认（`tabs: false`）：头部 + 各块**纵向堆叠**。对应词卡片用它 ——
+ *    那里的词头已经画在卡片标题上了，再套一排标签只是让用户多点一次。
+ *  - `tabs: true`：头部 + **分块卡片 + 底部标签切换**（查词结果页用它）。
+ *    参照有道词典：大词头，音标紧随其下，标签栏压在头部之下、内容之上，
+ *    一次只呈现一块 —— 长词条就不会被撑成一条读不完的竖条。
+ *
  * @param {object} entry  WordEntry
- * @param {object} opts   { compact, showInflections, showExamples, showRelated, showMnemonic, showPhonetic, hideExtra }
+ * @param {object} opts   { showInflections, showExamples, showRelated, showMnemonic,
+ *                          showPhonetic, compactHead, tabs }
  */
 function renderEntry(entry, opts = {}) {
   const o = {
-    compact: false,
     showInflections: true,
     showExamples: true,
     showRelated: false,
@@ -144,24 +152,24 @@ function renderEntry(entry, opts = {}) {
     // 头部只画音标与来源标签、不重复画大词头（双向词条的对应卡片用它，
     // 因为词头已经画在卡片标题上了，再来一遍就是加倍冗余）
     compactHead: false,
+    // 分块 + 底部标签切换（见函数头说明）
+    tabs: false,
     ...opts,
   };
   if (!entry) return '<div class="empty-state"><p>无内容</p></div>';
 
-  const parts = [];
-  parts.push(`<div class="word-entry" data-entry-word="${esc(entry.word)}">`);
-
-  // 头部：词 + 音标 + 来源标签
-  parts.push('<div class="we-head">');
+  /* ---------- 头部：大词头 + 音标成对 + 来源标签 ---------- */
+  const head = [];
+  head.push('<div class="we-head">');
   if (!o.compactHead) {
-    parts.push(`<div class="we-word">${esc(entry.word)}</div>`);
+    head.push(`<div class="we-word">${esc(entry.word)}</div>`);
   }
 
   if (o.showPhonetic) {
     // 统一走 phoneticHtml：语言标注、斜杠规则、IPA 字体都只有一份实现。
     // 词条一个音标都没有时，至少留一个纯发音按钮，别整块消失。
     const html = phoneticHtml(entry, { speak: true });
-    parts.push(`<div class="we-phon">${html || speakBtn(entry, 'us', '发音')}</div>`);
+    head.push(`<div class="we-phon">${html || speakBtn(entry, 'us', '发音')}</div>`);
   }
 
   const srcs = (entry.source || '').split('+').filter(Boolean);
@@ -169,8 +177,16 @@ function renderEntry(entry, opts = {}) {
   if (entry.lang && entry.lang !== 'en') {
     tags.unshift(`<span class="tag blue">${esc(langLabel(entry.lang))}</span>`);
   }
-  if (tags.length) parts.push(`<div class="we-src">${tags.join('')}</div>`);
-  parts.push('</div>');
+  if (tags.length) head.push(`<div class="we-src">${tags.join('')}</div>`);
+  head.push('</div>');
+
+  /* ---------- 正文：先攒成「块」，再决定怎么摆 ----------
+     攒成块而不是边写边拼，是因为堆叠与标签两种排布对同一份内容有不同的
+     外壳需求。分两趟走，义项渲染就只有一份实现，版式不会分叉。 */
+  const blocks = [];
+  const addBlock = (id, label, inner) => {
+    if (inner) blocks.push({ id, label, inner });
+  };
 
   // 释义：按「这段释文本身是哪种语言写的」分组。
   //
@@ -183,56 +199,78 @@ function renderEntry(entry, opts = {}) {
   const [localSenses, nativeSenses] = splitSensesByScript(senses);
 
   if (senses.length) {
+    const inner = [];
     if (localSenses.length && nativeSenses.length) {
-      parts.push(senseGroup('释义', localSenses, o));
+      // 两组都有才需要小标题区分；只有一组时「释义」这个标题由块本身带着，
+      // 再来一遍就是重复（有道也是只在多来源时才标区分）。
+      inner.push(senseGroup(null, localSenses, o));
       // 原文组的小标题跟着词条语言走：「乌鸦」的原文组本身就是中文，
       // 标题写成「中文释义」既奇怪又和上一块重复
-      const title = langLabel(entry.lang || '') === '中文' ? '参考释义' : `${langLabel(entry.lang || '')}释义`;
-      parts.push(senseGroup(title, nativeSenses, o));
+      const title = langLabel(entry.lang || '') === '中文'
+        ? '参考释义' : `${langLabel(entry.lang || '')}释义`;
+      inner.push(senseGroup(title, nativeSenses, o));
     } else if (localSenses.length) {
-      parts.push(senseGroup('释义', localSenses, o));
+      inner.push(senseGroup(null, localSenses, o));
     } else {
-      parts.push(senseGroup('释义', nativeSenses, o));
+      inner.push(senseGroup(null, nativeSenses, o));
     }
+    addBlock('def', '释义', inner.join(''));
   } else {
-    parts.push('<div class="we-section"><div class="muted">暂无释义，可点击「AI 讲解」让本地模型生成。</div></div>');
+    addBlock('def', '释义', '<div class="muted">暂无释义，可点击「AI 讲解」让本地模型生成。</div>');
   }
 
   // 变形
   if (o.showInflections && entry.inflections && entry.inflections.length) {
-    parts.push('<div class="we-section">');
-    parts.push('<div class="we-section-title">单词变形</div>');
-    parts.push('<div class="infl-grid">');
+    const inner = ['<div class="infl-grid">'];
     for (const i of entry.inflections) {
-      parts.push(`<div class="infl-item"><span class="infl-label">${esc(i.label || '形式')}</span><span class="infl-form clickable" data-word="${esc(i.form)}" title="点击查询 ${esc(i.form)}">${esc(i.form)}</span></div>`);
+      inner.push(`<div class="infl-item"><span class="infl-label">${esc(i.label || '形式')}</span><span class="infl-form clickable" data-word="${esc(i.form)}" title="点击查询 ${esc(i.form)}">${esc(i.form)}</span></div>`);
     }
-    parts.push('</div></div>');
+    inner.push('</div>');
+    addBlock('infl', '变形', inner.join(''));
   }
 
   // 记忆法
   if (o.showMnemonic && entry.mnemonic) {
-    parts.push('<div class="we-section">');
-    parts.push('<div class="we-section-title">记忆法</div>');
-    parts.push(`<div class="mnemonic-box">${esc(entry.mnemonic)}</div>`);
-    parts.push('</div>');
+    addBlock('mnemonic', '记忆法', `<div class="mnemonic-box">${esc(entry.mnemonic)}</div>`);
   }
 
   // 相关词
   if (o.showRelated && entry.related && entry.related.length) {
     const rels = splitRelated(entry.related);
     if (rels.length) {
-      parts.push('<div class="we-section">');
-      parts.push('<div class="we-section-title">相关词</div>');
-      parts.push('<div class="rel-list">');
-      for (const r of rels) {
-        parts.push(`<span class="rel-chip" data-word="${esc(r)}">${esc(r)}</span>`);
-      }
-      parts.push('</div></div>');
+      addBlock('related', '相关词',
+        '<div class="rel-list">' + rels
+          .map(r => `<span class="rel-chip" data-word="${esc(r)}">${esc(r)}</span>`)
+          .join('') + '</div>');
     }
   }
 
-  parts.push('</div>');
-  return parts.join('');
+  /* ---------- 组装 ---------- */
+  const body = o.tabs
+    ? tabbedBlocks(blocks)
+    : blocks.map(b => `<div class="we-section"><div class="we-section-title">${esc(b.label)}</div>${b.inner}</div>`).join('');
+
+  return `<div class="word-entry${o.tabs ? ' tabbed' : ''}" data-entry-word="${esc(entry.word)}">`
+    + head.join('') + body + '</div>';
+}
+
+/**
+ * 分块卡片 + 底部标签切换。
+ *
+ * 标签栏夹在头部与内容之间（头部之下、正文之上）—— 用户要的是「先把词头
+ * 看全，再按需切到想看的那一块」。面板用 `display:none` 切换而不是重渲染，
+ * 这样切标签不会丢掉已经绑好的发音按钮委托，也不会闪。
+ *
+ * 第一块默认选中：查词的人十有八九是来看释义的，多一次点击就是白费。
+ */
+function tabbedBlocks(blocks) {
+  if (!blocks.length) return '';
+  const tabs = blocks.map((b, i) => `<button class="entry-tab${i === 0 ? ' active' : ''}"`
+    + ` data-block="${esc(b.id)}" type="button" role="tab">${esc(b.label)}</button>`).join('');
+  const panes = blocks.map((b, i) => `<div class="entry-pane${i === 0 ? ' active' : ''}"`
+    + ` data-pane="${esc(b.id)}">${b.inner}</div>`).join('');
+  return `<div class="entry-tabs" role="tablist">${tabs}</div>`
+    + `<div class="entry-body">${panes}</div>`;
 }
 
 /** 一段释义里有没有汉字 —— 用来区分「母语释义」与「原文释义」。 */
@@ -254,10 +292,18 @@ function splitSensesByScript(senses) {
   return [local, native];
 }
 
-/** 画一组义项（`renderEntry` 与 `renderPairs` 共用，保证版式一致）。 */
+/**
+ * 画一组义项。
+ *
+ * 返回的是**块内容**，外层的卡片/区块由 `renderEntry` 决定 —— 堆叠排布与
+ * 标签排布共用这一份实现，才不会出现「同一个词在两处长得不一样」。
+ *
+ * `title` 传空时不出小标题：只有一个来源的释义时，「释义」这个标题由块自己
+ * 带着（标签模式下就是标签本身），再来一遍是重复。
+ */
 function senseGroup(title, senses, opts = {}) {
-  const parts = ['<div class="we-section">'];
-  parts.push(`<div class="we-section-title">${esc(title)}</div>`);
+  const parts = ['<div class="sense-group">'];
+  if (title) parts.push(`<div class="we-section-title">${esc(title)}</div>`);
   for (const s of senses) {
     parts.push('<div class="sense">');
     if (s.pos) parts.push(`<div class="sense-pos">${esc(s.pos)}</div>`);
@@ -299,6 +345,10 @@ function renderPairs(pairs, opts = {}) {
     parts.push('<div class="pair-card">');
     parts.push('<div class="pair-card-head">');
     parts.push(`<span class="pair-word clickable" data-word="${esc(p.word)}">${esc(p.word)}</span>`);
+    // 词头旁直接给一个 🔊：查到一个生词，第一件想做的事就是听它怎么读。
+    // 发音按钮不需要额外绑事件 —— 结果区整块挂了委托（U().speakBind(box)），
+    // 按钮自带 data-speak-* 就能取到词。
+    parts.push(speakBtn(p.entry, 'us', '发音'));
     parts.push(`<span class="tag blue">${esc(langLabel(p.lang))}</span>`);
     parts.push(p.via === 'translation'
       ? '<span class="tag ok">主译</span>'

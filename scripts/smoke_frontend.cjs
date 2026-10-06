@@ -1808,6 +1808,142 @@ const cases = [
     return '';
   }],
 
+  // ---- 分块卡片（查词结果页：大词头 + 音标 + 标签切换）----
+  //
+  // 为什么要这组检查：`renderEntry` 现在有两种排布（堆叠 / 标签），共用同一份
+  // 义项渲染。分叉最容易出现的问题是「标签与面板对不上」——点了标签切到空
+  // 面板，或者标签栏画出来了但内容还是老样子。这组用例把两者的对应关系钉死。
+  ['分块卡片：标签与面板一一对应（点了不能切到空面板）', () => {
+    const html = WW.renderEntry({
+      word: 'apple', lang: 'en',
+      senses: [{ pos: 'n.', definition: '苹果', examples: [] }],
+      inflections: [{ label: '复数', form: 'apples' }],
+      mnemonic: 'ap-ple',
+      phonetic: { uk: '/ˈæpl/', us: '/ˈæpl/' },
+    }, { tabs: true, showRelated: true, showMnemonic: true });
+    if (!html.includes('class="entry-tabs"')) throw new Error('没画出标签栏');
+    if (!html.includes('class="entry-body"')) throw new Error('没画出面板容器');
+    const tabIds = [...html.matchAll(/data-block="([^"]+)"/g)].map(m => m[1]);
+    const paneIds = [...html.matchAll(/data-pane="([^"]+)"/g)].map(m => m[1]);
+    if (!tabIds.length) throw new Error('一个标签都没画出来');
+    if (tabIds.join(',') !== paneIds.join(',')) {
+      throw new Error(`标签与面板顺序/数量对不上：tabs=${tabIds} panes=${paneIds}`);
+    }
+    return tabIds.join('/');
+  }],
+  ['分块卡片：第一块默认选中（查词的人十有八九是看释义）', () => {
+    const html = WW.renderEntry({
+      word: 'apple', lang: 'en',
+      senses: [{ pos: 'n.', definition: '苹果', examples: [] }],
+      inflections: [{ label: '复数', form: 'apples' }],
+      phonetic: {},
+    }, { tabs: true });
+    // 第一个标签与第一块面板都要带 active；且只能有一个
+    const activeTabs = [...html.matchAll(/class="entry-tab[^"]*active[^"]*"\s+data-block="([^"]+)"/g)]
+      .map(m => m[1]);
+    const activePanes = [...html.matchAll(/class="entry-pane[^"]*active[^"]*"\s+data-pane="([^"]+)"/g)]
+      .map(m => m[1]);
+    if (activeTabs.length !== 1) throw new Error('被选中的标签必须恰好一个，实际 ' + activeTabs.length);
+    if (activePanes.length !== 1) throw new Error('被展开的面板必须恰好一个，实际 ' + activePanes.length);
+    if (activeTabs[0] !== 'def') throw new Error('默认应当停在「释义」，实际 ' + activeTabs[0]);
+    if (activeTabs[0] !== activePanes[0]) throw new Error('标签与面板选中项不一致');
+    return activeTabs[0];
+  }],
+  ['分块卡片：标签栏排在头部之下、正文之上（先看清词头再切）', () => {
+    const html = WW.renderEntry({
+      word: 'apple', lang: 'en',
+      senses: [{ pos: 'n.', definition: '苹果', examples: [] }],
+      phonetic: { uk: '/ˈæpl/' },
+    }, { tabs: true });
+    const iWord = html.indexOf('class="we-word"');
+    const iTabs = html.indexOf('class="entry-tabs"');
+    const iPane = html.indexOf('class="entry-pane');
+    if (iWord < 0) throw new Error('缺大词头');
+    if (!(iWord < iTabs && iTabs < iPane)) {
+      throw new Error(`顺序错了：词头 ${iWord} / 标签 ${iTabs} / 面板 ${iPane}`);
+    }
+    return '';
+  }],
+  ['分块卡片：没有释义时也要给出一块（不画空标签栏）', () => {
+    const html = WW.renderEntry({ word: 'zzz', lang: 'en', senses: [], phonetic: {} },
+      { tabs: true });
+    const tabs = [...html.matchAll(/data-block="([^"]+)"/g)].map(m => m[1]);
+    if (!tabs.includes('def')) throw new Error('释义块不能因为没有释义就整体消失');
+    if (!html.includes('AI 讲解')) throw new Error('空释义应当给出「让模型生成」的出口');
+    return tabs.join('/');
+  }],
+  ['分块卡片：tabbed 容器带 .tabbed 标记（CSS 靠它放大词头）', () => {
+    const on = WW.renderEntry({ word: 'a', lang: 'en', senses: [], phonetic: {} }, { tabs: true });
+    const off = WW.renderEntry({ word: 'a', lang: 'en', senses: [], phonetic: {} });
+    if (!on.includes('class="word-entry tabbed"')) throw new Error('标签排布没打 .tabbed 标记');
+    if (off.includes('tabbed')) throw new Error('堆叠排布不该带 .tabbed');
+    return '';
+  }],
+  ['分块卡片：堆叠排布不受影响（对应词卡片仍纵向堆在一起）', () => {
+    const html = WW.renderEntry({
+      word: 'apple', lang: 'en',
+      senses: [{ pos: 'n.', definition: '苹果', examples: [] }],
+      inflections: [{ label: '复数', form: 'apples' }],
+      phonetic: {},
+    });
+    if (html.includes('entry-tabs')) throw new Error('默认排布不该冒出标签栏');
+    if (html.includes('entry-pane')) throw new Error('默认排布不该冒出标签面板');
+    // 两块都要在（堆叠的定义就是「都看得见」）
+    if (!(html.includes('苹果') && html.includes('apples'))) {
+      throw new Error('堆叠排布把内容弄丢了');
+    }
+    return '';
+  }],
+  ['分块卡片：切标签用委托，且读的属性名与渲染写出的一致（下一次查询后仍可点）', () => {
+    const src = fs.readFileSync(path.join(ROOT, 'src/js/lookup.js'), 'utf8');
+    const ui = fs.readFileSync(path.join(ROOT, 'src/js/ui.js'), 'utf8');
+    // 逐个 addEventListener 绑在当时的 .entry-tab 上，下一次查询整段 innerHTML
+    // 被替换后就会漏绑 —— 必须挂在 .entry-tabs 上做委托。
+    if (!/querySelector\(\s*['"]\.entry-tabs['"]\s*\)[\s\S]{0,160}?addEventListener\(\s*['"]click/
+      .test(src)) {
+      throw new Error('标签切换没有挂在 .entry-tabs 上做委托：' +
+        (src.includes('entry-tabs') ? '找到了容器但委托写法变了' : '连容器都没找到'));
+    }
+    // 真正的耦合点：渲染写 data-block / data-pane，切换读 dataset.block /
+    // dataset.pane。两边只要有一边改名，界面就是「点了没反应」——只查一侧查不出来。
+    for (const [attr, prop] of [['data-block', 'dataset.block'], ['data-pane', 'dataset.pane']]) {
+      if (!ui.includes(attr)) throw new Error(`ui.js 没有写出 ${attr}`);
+      if (!src.includes(prop)) throw new Error(`lookup.js 没有读 ${prop}（找不到就切不动）`);
+    }
+    return '';
+  }],
+  ['分块卡片：详情卡的释义不再另写一套渲染（两处排版不能分叉）', () => {
+    const src = fs.readFileSync(path.join(ROOT, 'src/js/lookup.js'), 'utf8');
+    const at = src.indexOf('function renderDefs(');
+    if (at < 0) throw new Error('没找到 renderDefs');
+    // 函数体要裁到**下一个顶层函数**，不能靠固定字符窗口（见 study.js 那条用例的教训）
+    const rest = src.slice(at);
+    const stop = rest.search(/\n  (?:async )?function \w/);
+    const body = stop > 0 ? rest.slice(0, stop) : rest;
+    if (!body.includes('senseGroup')) throw new Error('详情卡释义没复用 senseGroup，会和结果页分叉');
+    if (!body.includes('splitSensesByScript')) throw new Error('详情卡释义没做中/英分组');
+    // 混排的判据：自己再手搓一遍 sense 的 DOM
+    if (body.includes('sense-pos')) throw new Error('详情卡释义还在自己拼 sense DOM（改了结果页它不会跟着变）');
+    return (body.match(/senseGroup/g) || []).length + ' 处调用';
+  }],
+  ['分块卡片：查词结果与详情卡的标签视觉同源（只改一处会分叉）', () => {
+    const css = fs.readFileSync(path.join(ROOT, 'src/css/app.css'), 'utf8');
+    const rule = (sel) => {
+      const m = new RegExp('\\' + sel + '\\s*\\{([^}]*)\\}').exec(css);
+      return m ? m[1].replace(/\s+/g, ' ') : null;
+    };
+    const a = rule('.entry-tab.active');
+    const b = rule('.dc-tab.active');
+    if (!a || !b) throw new Error('两张标签的选中态样式缺了一个');
+    for (const prop of ['color', 'border-bottom-color', 'font-weight']) {
+      if (!a.includes(prop) || !b.includes(prop)) throw new Error(`选中态缺 ${prop}：两处都要有`);
+    }
+    if (a.replace(/var\(--blue\)/g, 'X') !== b.replace(/var\(--blue\)/g, 'X')) {
+      throw new Error(`两处选中态不一致：\n  entry: ${a}\n  dc:    ${b}`);
+    }
+    return '';
+  }],
+
   // ---- 界面语言（ui_lang）----
   ['界面语言：中文模式原样返回，零改动', () => {
     sandbox.I18n.setLang('zh-CN', { persist: false });

@@ -851,6 +851,86 @@ code {
   color: var(--amber-text);
 }
 
+/* ============================================================
+   词条：分块卡片 + 底部标签切换（查词结果页 / 对应词卡片）
+   ============================================================ */
+/*
+  参照有道词典的查词结果：先把词头看全（大词头，音标紧随其下），
+  再用一排标签把「释义 / 变形 / 记忆法 / 相关词」分开，一次只呈现一块。
+  长词条因此不会变成一条读不完的竖条。
+
+  堆叠排布（`.word-entry` 不带 `.tabbed`，对应词卡片走这条）与标签排布
+  共用下面这套卡片样式 —— 两种排布只差「有没有标签栏、块是否隐藏」，
+  视觉语言保持一致，不会出现「同一个词在两处长得不一样」。
+*/
+
+/* 头部：把词头与音标从正文里抬出来 */
+.word-entry.tabbed .we-head {
+  padding: 2px 0 14px;
+  border-bottom: 1px solid var(--border-2);
+  margin-bottom: 12px;
+}
+/* 层级靠**字号差**拉开，不靠颜色差：词头最大，音标明显小一档 */
+.word-entry.tabbed .we-word {
+  font-size: 32px;
+  line-height: 1.15;
+  letter-spacing: -.7px;
+}
+.word-entry.tabbed .we-phon {
+  margin-top: 7px;
+  font-size: 13px;
+}
+
+/* 标签栏：夹在头部与内容之间 */
+.entry-tabs {
+  display: flex;
+  gap: 2px;
+  border-bottom: 1px solid var(--border-2);
+  margin-bottom: 14px;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.entry-tabs::-webkit-scrollbar { display: none; }
+.entry-tab {
+  padding: 8px 14px;
+  font-size: 13px;
+  color: var(--text-3);
+  border-bottom: 2px solid transparent;
+  /* 让下划线压住容器那条 1px 边框，读起来才是「当前页签」而不是「多了一条线」 */
+  margin-bottom: -1px;
+  white-space: nowrap;
+  transition: color .15s, border-color .15s;
+}
+.entry-tab:hover { color: var(--text); }
+.entry-tab.active { color: var(--blue); border-bottom-color: var(--blue); font-weight: 600; }
+
+/*
+  面板用 display 切换，而不是每次重渲染：
+  重渲染会把朗读按钮的委托与刚绑好的事件一起丢掉，且会闪。
+*/
+.entry-body { min-height: 56px; }
+.entry-pane { display: none; }
+.entry-pane.active {
+  display: block;
+  /* 每一块自己是一张卡片 —— 「分块」得看得出来是分块的 */
+  background: var(--panel);
+  border: 1px solid var(--border-2);
+  border-radius: var(--radius-sm);
+  padding: 14px 16px;
+  animation: fadeIn .18s;
+}
+/* 同一块里来自不同词典源的释义：虚线分隔，比换卡片轻 */
+.sense-group + .sense-group {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px dashed var(--border-2);
+}
+.sense-group .we-section-title { margin-bottom: 6px; }
+/* 块内最后一个义项不留尾距，否则卡片下沿会显得空 */
+.entry-pane .sense:last-child { padding-bottom: 0; }
+.entry-pane .infl-grid:last-child,
+.entry-pane .rel-list:last-child { margin-bottom: 0; }
+
 /* ---------------- AI 面板 ---------------- */
 .ai-panel { display: flex; flex-direction: column; min-height: 420px; }
 .ai-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
@@ -1222,6 +1302,8 @@ h4.md-h, h5.md-h { font-size: 13.5px; font-weight: 600; color: var(--text); }
   font-size: 13px;
   color: var(--text-3);
   border-bottom: 2px solid transparent;
+  /* 与 .entry-tab 同一套：让下划线压住容器那条 1px 边框 */
+  margin-bottom: -1px;
   transition: all .15s;
   white-space: nowrap;
 }
@@ -1827,8 +1909,16 @@ body.col-resizing * { cursor: col-resize !important; }
   letter-spacing: -.2px;
   line-height: 1.3;
 }
-.pair-word.clickable { cursor: pointer; border-bottom: 1px dashed var(--border); }
-.pair-word.clickable:hover { color: var(--blue); border-bottom-color: var(--blue); }
+/*
+  对应词的词头用**蓝色**（有道那套）：它是个链接，不是标题。
+  默认黑字 + 白色虚下划线，读起来像正文的一部分，用户不会想到去点。
+*/
+.pair-word.clickable {
+  cursor: pointer;
+  color: var(--blue);
+  border-bottom: 1px dashed var(--blue-soft);
+}
+.pair-word.clickable:hover { color: var(--blue-dark); border-bottom-color: var(--blue); }
 .pair-card .word-entry { padding: 0; }
 .pair-card .we-head { padding-bottom: 0; border-bottom: none; margin-bottom: 0; }
 .pair-card .we-section:last-child { margin-bottom: 0; }
