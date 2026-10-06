@@ -24,7 +24,7 @@ const ROOT = path.resolve(__dirname, '..');
 // 必须与 src/index.html 里的 <script> 顺序一致：前端没有模块系统，
 // 靠加载顺序决定谁先挂到 window 上。顺序错了，冒烟测试会报「undefined.bind」。
 const ORDER = ['api.js', 'demo.js', 'dir.js', 'speak.js', 'ui.js', 'study.js', 'lookup.js',
-               'translate.js', 'graph.js', 'library.js', 'maint.js', 'settings.js',
+               'translate.js', 'graph.js', 'library.js', 'maint.js', 'update.js', 'settings.js',
                'sidebar.js', 'app.js'];
 
 /** 假 style：支持 setProperty / removeProperty（分栏比例就走这两个）。 */

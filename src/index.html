@@ -58,7 +58,9 @@
     <div class="nav-logo">
       <span class="logo-mark">W</span>
       <div class="logo-text">
-        <strong>WordWise</strong>
+        <!-- 版本号由 App.init() 用 cmd_app_info 的 version 填进来，
+             格式统一 v0.41.0；这里只放占位，绝不留版本字面量。 -->
+        <strong>WordWise <span class="ver-chip" data-app-ver title="当前版本">v—</span></strong>
         <small>本地大模型背单词</small>
       </div>
     </div>
@@ -91,6 +93,12 @@
       </a>
       <a class="nav-item" data-page="settings">
         <span class="ni-icon">&#9881;</span><span>设置</span>
+        <!-- 右侧尾巴：小红点（有新版本）+ 版本号。包一层是为了在
+             「有红点」和「没红点」两种状态下都能正确右对齐。 -->
+        <span class="nav-tail">
+          <span class="nav-dot hidden" id="nav-update-dot" title="有新版本可用"></span>
+          <span class="nav-ver" data-app-ver title="当前版本">v—</span>
+        </span>
       </a>
     </nav>
 
@@ -698,7 +706,7 @@
     <section class="page" id="page-settings">
       <header class="page-head">
         <div>
-          <h1>设置</h1>
+          <h1>设置 <span class="ver-chip" data-app-ver title="当前版本">v—</span></h1>
           <p class="sub">记忆辅助内容、本地模型、词典源与语言</p>
         </div>
         <button class="primary-btn" id="btn-save-settings">保存设置</button>
@@ -1038,6 +1046,31 @@
             <label class="switch" style="align-self:end"><span>侧边栏始终置顶</span><input type="checkbox" id="set-sb-top" /></label>
           </div>
         </div>
+
+        <!-- 关于与更新：版本号 + 在线更新（检测 / 下载 / 安装） -->
+        <div class="panel span-2" id="panel-update">
+          <div class="panel-head-row">
+            <h3 class="panel-title">关于与更新</h3>
+            <div class="btn-row">
+              <button class="primary-btn sm" id="btn-update-check">检查更新</button>
+              <button class="ghost-btn sm" id="btn-update-release">打开发布页</button>
+            </div>
+          </div>
+          <p class="muted">
+            WordWise <b data-app-ver>v—</b> · 更新包直接从 GitHub Releases 下载并做完整性校验，
+            走的是你在上面「网络与代理」里配置的那条链路（默认直连）。
+          </p>
+          <label class="switch">
+            <span>启动时自动检查更新（静默，不弹窗，失败不打扰）</span>
+            <input type="checkbox" id="set-check-update" />
+          </label>
+          <div id="update-status" class="update-status"></div>
+          <div class="llm-progress hidden" id="update-progress">
+            <div class="llm-progress-bar"><div class="llm-progress-fill" id="update-progress-fill"></div></div>
+            <div class="llm-progress-text" id="update-progress-text"></div>
+          </div>
+          <div id="update-result" class="update-result"></div>
+        </div>
       </div>
     </section>
 
@@ -1157,6 +1190,7 @@
 <script src="js/graph.js"></script>
 <script src="js/library.js"></script>
 <script src="js/maint.js"></script>
+<script src="js/update.js"></script>
 <script src="js/settings.js"></script>
 <script src="js/sidebar.js"></script>
 <script src="js/app.js"></script>

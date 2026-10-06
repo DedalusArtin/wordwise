@@ -13,6 +13,7 @@ pub mod maint;
 pub mod plan;
 pub mod storage;
 pub mod translate;
+pub mod update;
 
 use crate::db;
 use crate::dict;

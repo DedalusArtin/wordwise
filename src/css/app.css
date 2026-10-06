@@ -2263,3 +2263,87 @@ body.col-resizing * { cursor: col-resize !important; }
 .lang-chip.hidden { display: none; }
 #study-def-lang-hint { font-size: 12px; color: var(--text-3); line-height: 1.7; margin-top: 6px; }
 .seg-btn[disabled] { opacity: .38; cursor: not-allowed; }
+
+/* ============================================================
+   版本号 + 在线更新（「关于与更新」面板）
+   ============================================================ */
+
+/* 版本号小胶囊。侧边栏 logo 旁与设置页标题旁共用。
+   字号偏小、数字用 tabular-nums：版本号变化时宽度不抖。 */
+.ver-chip {
+  display: inline-block;
+  margin-left: 5px;
+  padding: 1px 6px;
+  font-size: 10px;
+  font-weight: 600;
+  font-style: normal;
+  letter-spacing: .2px;
+  color: var(--text-3);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  vertical-align: middle;
+  font-variant-numeric: tabular-nums;
+  transition: color .2s, background .2s, border-color .2s;
+}
+/* 有新版本可用时变蓝：不打扰，但一眼能看出「这里有事」 */
+.ver-chip.blue { color: var(--blue-dark); background: var(--blue-soft); border-color: transparent; }
+h1 .ver-chip { font-size: 11px; padding: 2px 8px; vertical-align: 4px; }
+
+/* 「设置」导航项右侧：小红点 + 版本号 */
+.nav-tail { margin-left: auto; display: inline-flex; align-items: center; gap: 6px; }
+.nav-ver { font-size: 10.5px; color: var(--text-3); font-variant-numeric: tabular-nums; }
+.nav-item.active .nav-ver { color: var(--blue-dark); opacity: .7; }
+.nav-dot {
+  width: 7px; height: 7px; border-radius: 50%;
+  background: var(--red);
+  box-shadow: 0 0 0 2px var(--red-soft);
+}
+
+.update-status { margin-top: 12px; }
+.update-status:empty { display: none; }
+.update-result { margin-top: 12px; }
+.update-result:empty { display: none; }
+
+.up-block {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 12px 14px;
+  background: var(--bg);
+  display: flex; flex-direction: column; gap: 6px;
+}
+.up-block.new { background: var(--blue-soft); border-color: transparent; }
+.up-block.ok { background: var(--green-soft); border-color: transparent; }
+.up-block.err { background: var(--red-soft); border-color: transparent; }
+.up-block b { font-size: 13.5px; }
+.up-block p { font-size: 12.5px; color: var(--text-2); line-height: 1.7; }
+.up-block p.muted, .up-block .muted { color: var(--text-3); font-size: 12px; }
+
+.up-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.up-asset {
+  display: flex; align-items: center; gap: 8px;
+  font-size: 12.5px; color: var(--text-2);
+  font-family: var(--mono);
+  word-break: break-all;
+}
+.up-asset .ua-name { flex: 1; min-width: 0; }
+.up-meta { margin-top: 6px; font-size: 11.5px; }
+
+.up-notes { margin-top: 4px; }
+.up-notes > summary {
+  cursor: pointer; font-size: 12.5px; color: var(--blue-dark);
+  padding: 4px 0; user-select: none;
+}
+.up-md {
+  margin-top: 6px; padding: 10px 12px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font-size: 12.5px; line-height: 1.75;
+  color: var(--text-2);
+  max-height: 260px; overflow: auto;
+}
+.up-md > :first-child { margin-top: 0; }
+.up-md h1, .up-md h2, .up-md h3 { font-size: 13.5px; margin: 10px 0 6px; color: var(--text); }
+.up-md ul, .up-md ol { padding-left: 18px; margin: 6px 0; }
+.up-md code { font-size: 11.5px; }

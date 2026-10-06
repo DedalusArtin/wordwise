@@ -19,7 +19,13 @@ const Pages = (() => {
     leech: () => window.Leech.load(),
     plan: () => window.Plan.load(),
     stats: () => window.Stats.load(),
-    settings: () => { window.Settings.load(); window.Maint.load(); },
+    settings: () => {
+      window.Settings.load();
+      window.Maint.load();
+      // 版本号 + 在线更新面板。版本号在 applyVersion 里统一填，
+      // 打开设置页时再填一次是为了兜住「启动时那次请求失败」的情况。
+      window.Update?.load?.();
+    },
   };
 
   function go(name) {
@@ -144,6 +150,10 @@ const App = (() => {
     } catch (e) {
       console.warn('获取应用信息失败', e);
     }
+    // ★ 版本号只有这一个来源（后端 CARGO_PKG_VERSION）。页面上所有
+    //   [data-app-ver] 节点都在这里被一次性填好，前端不留版本字面量。
+    //   侧边栏窗口走的是同一个 index.html，所以也会执行到这一行。
+    window.Update?.applyVersion?.(info && info.version);
 
     if (isSidebarView()) {
       setupSidebarView();
@@ -254,6 +264,9 @@ const App = (() => {
 
     // 检测本地模型
     checkLlm();
+
+    // 静默检查更新：后台跑，不阻塞首屏（失败只写进设置页，不弹窗）
+    window.Update?.checkOnStart?.();
 
     // 首屏
     Pages.go('study');

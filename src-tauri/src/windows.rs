@@ -156,6 +156,14 @@ fn build_invoke_handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync +
         // 数据
         commands::cmd_export,
         commands::cmd_import,
+        // 在线更新（版本检测 / 下载安装包 / 启动安装程序）
+        commands::update::cmd_check_update,
+        commands::update::cmd_download_update,
+        commands::update::cmd_update_cancel,
+        commands::update::cmd_run_update,
+        commands::update::cmd_open_update_dir,
+        commands::update::cmd_update_prefs,
+        commands::update::cmd_set_update_prefs,
         // 窗口
         sidebar_show,
         sidebar_hide,

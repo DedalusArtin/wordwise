@@ -56,6 +56,13 @@ chrono = { version = "0.4", features = ["serde"] }
 # 解压 llama.cpp 引擎包（本地大模型一键部署）
 zip = { version = "2", default-features = false, features = ["deflate"] }
 
+# 在线更新安装包的完整性校验（sha256）
+#
+# 为什么不省掉它：下载中断留下的残缺文件在 Windows 上照样能双击，
+# 然后报一个和「下载失败」毫无关系的错误。下完立刻自己算一遍摘要，
+# 才能把问题拦在启动安装程序之前。
+sha2 = "0.10"
+
 # 工具库
 anyhow = "1"
 thiserror = "2"

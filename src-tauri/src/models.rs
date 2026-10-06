@@ -977,6 +977,17 @@ pub struct AppConfig {
     /// 关掉它也不等于「不能用」：左下角状态条上随时可以一键启停。
     #[serde(default)]
     pub auto_start_local_llm: bool,
+    /// 启动 WordWise 时**静默检查**有没有新版本（默认开）。
+    ///
+    /// 为什么默认开：检查只发一个几百字节的 HTTPS GET，失败也不打扰用户，
+    /// 却能避免「装了半年不知道已经更新到 0.5」。要完全断网使用的用户可以关掉。
+    #[serde(default = "default_true")]
+    pub check_update_on_start: bool,
+    /// 「跳过此版本」：带上 `v` 与否都能匹配（比较时统一剥前缀）。
+    ///
+    /// 空串表示不跳过任何版本 —— 这也正是「取消跳过」的写法。
+    #[serde(default)]
+    pub skip_update_version: String,
 }
 
 impl Default for AppConfig {
@@ -1002,6 +1013,9 @@ impl Default for AppConfig {
             dict_sources: crate::dict::builtin::default_sources(),
             // 默认不自动启动，见字段注释
             auto_start_local_llm: false,
+            // 默认检查更新：单次请求很小，且任何失败都只降级成一行文案
+            check_update_on_start: true,
+            skip_update_version: String::new(),
         }
     }
 }

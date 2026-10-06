@@ -341,6 +341,21 @@ const API = {
   exportData: (path) => invoke('cmd_export', { path: path || null }),
   importData: (path) => invoke('cmd_import', { path }),
 
+  // 在线更新（版本检测 / 下载安装包 / 启动安装程序）
+  checkUpdate: () => invoke('cmd_check_update'),
+  downloadUpdate: () => invoke('cmd_download_update'),
+  updateCancel: () => invoke('cmd_update_cancel'),
+  runUpdate: (path) => invoke('cmd_run_update', { path }),
+  openUpdateDir: () => invoke('cmd_open_update_dir'),
+  updatePrefs: () => invoke('cmd_update_prefs'),
+  // 只传要改的那个：两个都传 null 等于什么都不改（后端用 Option 区分）
+  setUpdatePrefs: (opts) => invoke('cmd_set_update_prefs', {
+    checkOnStart: (opts && opts.checkOnStart != null) ? !!opts.checkOnStart : null,
+    skipVersion: (opts && opts.skipVersion != null) ? String(opts.skipVersion) : null,
+  }),
+  // 更新包下载进度也是后端主动推的事件（与本地模型部署分开，互不覆盖）
+  onUpdateProgress: (fn) => listen('update://progress', fn),
+
   // 窗口
   sidebarShow: () => invoke('sidebar_show'),
   sidebarHide: () => invoke('sidebar_hide'),
@@ -373,6 +388,8 @@ const Mock = (() => {
       srs: { base_intervals: [1,2,4,7,15,30,90,180] },
       dict_sources: [],
       auto_start_local_llm: false,
+      check_update_on_start: true,
+      skip_update_version: '',
     },
     transHistory: [],
   };
@@ -1210,9 +1227,61 @@ const Mock = (() => {
           };
         }
 
-        default:
-          if (cmd.startsWith('sidebar_') || cmd === 'main_show') return true;
-          return null;
+      // 在线更新（调试模式：假装已经有一个新版本，方便看「有更新」的样子）
+      case 'cmd_check_update':
+        return {
+          current: '0.41.0', repo: 'DedalusArtin/wordwise',
+          latest: '0.42.0', tag: 'v0.42.0', has_update: true, prerelease: false,
+          name: 'WordWise v0.42.0',
+          notes: '## 调试模式\n\n- 这是一条示例更新说明\n- 真实数据来自 GitHub Releases',
+          published_at: new Date().toISOString().slice(0, 10),
+          page_url: 'https://github.com/DedalusArtin/wordwise/releases',
+          asset: {
+            name: 'WordWise-Setup-0.42.0.exe', url: 'https://example.com/WordWise-Setup-0.42.0.exe',
+            size: 19000000, size_text: '18 MB', kind: 'installer', installable: true, digest: '',
+          },
+          assets: [{
+            name: 'WordWise-Setup-0.42.0.exe', url: 'https://example.com/WordWise-Setup-0.42.0.exe',
+            size: 19000000, size_text: '18 MB', kind: 'installer', installable: true, digest: '',
+          }, {
+            name: 'WordWise-0.42.0-portable.zip', url: 'https://example.com/WordWise-0.42.0-portable.zip',
+            size: 37000000, size_text: '35 MB', kind: 'portable', installable: false, digest: '',
+          }],
+          checked_at: Math.floor(Date.now() / 1000),
+          skipped: (store.config.skip_update_version || '') === '0.42.0',
+          note: null,
+          source: '调试模式（假数据，不联网）',
+        };
+      case 'cmd_download_update':
+        return {
+          ok: true, already: false,
+          path: '(调试模式)\\data\\updates\\WordWise-Setup-0.42.0.exe',
+          size: 19000000, size_text: '18 MB', sha256: 'deadbeefdeadbeef', version: '0.42.0',
+          message: '调试模式：假装下载完成',
+        };
+      case 'cmd_update_cancel':
+        return null;
+      case 'cmd_run_update':
+        return { ok: true, path: args.path, message: '调试模式：不会真的启动安装程序' };
+      case 'cmd_open_update_dir':
+        return { ok: true, path: '(调试模式)\\data\\updates' };
+      case 'cmd_update_prefs':
+        return {
+          check_on_start: store.config.check_update_on_start !== false,
+          skip_version: store.config.skip_update_version || '',
+        };
+      case 'cmd_set_update_prefs':
+        if (args.checkOnStart != null) store.config.check_update_on_start = !!args.checkOnStart;
+        if (args.skipVersion != null) store.config.skip_update_version = String(args.skipVersion);
+        return {
+          ok: true,
+          check_on_start: store.config.check_update_on_start !== false,
+          skip_version: store.config.skip_update_version || '',
+          message: '已保存（调试模式）',
+        };
+      default:
+        if (cmd.startsWith('sidebar_') || cmd === 'main_show') return true;
+        return null;
       }
     },
 
