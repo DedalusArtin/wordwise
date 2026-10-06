@@ -7,6 +7,7 @@
 //! 事件：`tts://progress`（下载/解压）、`tts://done`（合成完成，供界面
 //! 显示耗时与是否命中缓存）。
 
+use crate::commands::localllm::app_dir;
 use crate::localllm::{self, Progress};
 use crate::models::TtsConfig;
 use crate::state::AppState;
@@ -43,13 +44,22 @@ fn models_dir(state: &AppState) -> std::path::PathBuf {
 #[tauri::command]
 pub fn cmd_tts_status(state: State<'_, Arc<AppState>>) -> Result<serde_json::Value, String> {
     let dir = models_dir(&state);
+    let exedir = app_dir();
     let cfg = state.cfg();
 
-    let installed = tts::installed_voices(&dir);
+    // 「可用」= 用户下载的 ∪ 随安装包预置的。两者都直接原地读取，
+    // 预置的那份不会复制过来，省掉首次启动 60 MB 的搬运。
+    let installed = tts::available_voices(&exedir, &dir);
+    let engine = tts::resolve_engine(&exedir, &dir);
+    let engine_bundled = engine
+        .as_ref()
+        .map(|p| p.starts_with(tts::bundled_engine_dir(&exedir)))
+        .unwrap_or(false);
+
     let voices: Vec<serde_json::Value> = tts::VOICES
         .iter()
         .map(|v| {
-            let is_in = installed.iter().any(|i| i == v.id);
+            let src = tts::voice_source(&exedir, &dir, v.id);
             serde_json::json!({
                 "id": v.id,
                 "label": v.label,
@@ -60,16 +70,19 @@ pub fn cmd_tts_status(state: State<'_, Arc<AppState>>) -> Result<serde_json::Val
                 "bytes": v.bytes,
                 "size_text": localllm::human_bytes(v.bytes),
                 "preset": v.preset,
-                "installed": is_in,
+                "installed": src != "none",
+                // downloaded / bundled / none —— 界面据此显示「已下载」还是「已预置」
+                "source": src,
             })
         })
         .collect();
 
     Ok(serde_json::json!({
-        "engine_ready": tts::engine_ready(&dir),
+        "engine_ready": engine.is_some(),
+        "engine_bundled": engine_bundled,
         "engine_bytes": tts::ENGINE_BYTES,
         "engine_size_text": localllm::human_bytes(tts::ENGINE_BYTES),
-        "engine_path": tts::piper_exe(&dir).display().to_string(),
+        "engine_path": engine.map(|p| p.display().to_string()).unwrap_or_default(),
         "voices_dir": tts::voices_dir(&dir).display().to_string(),
         "models_dir": dir.display().to_string(),
         "installed": installed,
@@ -85,11 +98,17 @@ pub async fn cmd_tts_install_engine(
     app: AppHandle,
 ) -> Result<serde_json::Value, String> {
     let dir = models_dir(&state);
-    if tts::engine_ready(&dir) {
+    let exedir = app_dir();
+    if let Some(e) = tts::resolve_engine(&exedir, &dir) {
+        let bundled = e.starts_with(tts::bundled_engine_dir(&exedir));
         return Ok(serde_json::json!({
             "ok": true,
             "already": true,
-            "message": "语音引擎已就绪，无需重复下载",
+            "message": if bundled {
+                "语音引擎已随程序安装，无需下载"
+            } else {
+                "语音引擎已就绪，无需重复下载"
+            },
         }));
     }
 
@@ -122,7 +141,7 @@ pub async fn cmd_tts_install_engine(
     let n = tts::unpack_engine(&zip_path, &root).map_err(err)?;
     let _ = std::fs::remove_file(&zip_path);
 
-    if !tts::engine_ready(&dir) {
+    if tts::resolve_engine(&app_dir(), &dir).is_none() {
         return Err(format!(
             "解压完成（{n} 个文件）但没找到 piper.exe，引擎包结构可能变了"
         ));
@@ -198,22 +217,33 @@ pub async fn cmd_tts_install_voice(
     }))
 }
 
-/// 删除一条已安装的语音包。
+/// 删除一条已下载的语音包。
+///
+/// 随安装包预置的那份**删不掉**：它在程序目录里，删了下次覆盖安装又回来，
+/// 而且通常没有写权限。这种情况如实说明，而不是报一个看不懂的错误。
 #[tauri::command]
 pub fn cmd_tts_remove_voice(
     state: State<'_, Arc<AppState>>,
     voice_id: String,
 ) -> Result<serde_json::Value, String> {
     let dir = models_dir(&state);
-    let vdir = tts::voice_dir(&dir, &voice_id);
     // 只允许删清单里认识的 id，避免任意路径删除
     if tts::spec(&voice_id).is_none() {
         return Err(format!("未知的语音：{voice_id}"));
     }
-    if vdir.is_dir() {
-        std::fs::remove_dir_all(&vdir).map_err(err)?;
+    if !tts::is_downloaded_voice(&dir, &voice_id) {
+        return Ok(serde_json::json!({
+            "ok": true,
+            "removed": false,
+            "message": "这条语音是随程序预置的，不需要也无法删除",
+        }));
     }
-    Ok(serde_json::json!({ "ok": true, "message": "已删除" }))
+    std::fs::remove_dir_all(tts::voice_dir(&dir, &voice_id)).map_err(err)?;
+    Ok(serde_json::json!({
+        "ok": true,
+        "removed": true,
+        "message": "已删除（预置的语音仍然可用）",
+    }))
 }
 
 /// 取消进行中的下载。
@@ -284,14 +314,15 @@ pub async fn cmd_tts_speak(
     }
 
     let dir = models_dir(&state);
-    if !tts::engine_ready(&dir) {
+    let exedir = app_dir();
+    let Some(exe) = tts::resolve_engine(&exedir, &dir) else {
         return Err("语音引擎未安装".to_string());
-    }
+    };
 
     let cfg = state.cfg();
-    let installed = tts::installed_voices(&dir);
+    let installed = tts::available_voices(&exedir, &dir);
     if installed.is_empty() {
-        return Err("还没有安装任何语音包".to_string());
+        return Err("还没有可用的语音包".to_string());
     }
 
     // 选定语音：用户指定 > 按语言自动挑 > 第一条已装的
@@ -328,8 +359,8 @@ pub async fn cmd_tts_speak(
         }
     }
 
-    let exe = tts::piper_exe(&dir);
-    let model = tts::voice_onnx(&dir, &chosen);
+    let (model, _json) = tts::resolve_voice(&exedir, &dir, &chosen)
+        .ok_or_else(|| format!("语音包 {chosen} 不完整"))?;
     let text2 = text.clone();
     let wav = tokio::task::spawn_blocking(move || tts::synth_blocking(&exe, &model, &text2, rate))
         .await

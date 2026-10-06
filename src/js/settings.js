@@ -856,12 +856,19 @@ const Settings = (() => {
     const engRow = ttsEl('tts-engine-row');
     if (engRow) engRow.classList.toggle('hidden', engineOk);
     const engHint = ttsEl('tts-engine-hint');
-    if (engHint) engHint.textContent = `引擎约 ${st.engine_size_text || ''}，只需下载一次，所有语音包共用`;
+    if (engHint) {
+      engHint.textContent = st.engine_bundled
+        ? '语音引擎已随程序预置，无需下载'
+        : `引擎约 ${st.engine_size_text || ''}，只需下载一次，所有语音包共用`;
+    }
 
     box.innerHTML = (st.voices || []).map((v) => {
+      // 随包预置的那份在安装目录里，删不掉（下次覆盖安装还会回来），
+      // 所以不给删除按钮，只标出来源。
+      const bundled = v.source === 'bundled';
       const act = v.installed
-        ? `<span class="tag ok">已安装</span>`
-          + `<button class="ghost-btn xs" data-tts-remove="${U().esc(v.id)}">删除</button>`
+        ? `<span class="tag ok">${bundled ? '随包预置' : '已下载'}</span>`
+          + (bundled ? '' : `<button class="ghost-btn xs" data-tts-remove="${U().esc(v.id)}">删除</button>`)
         : `<button class="ghost-btn xs" data-tts-install="${U().esc(v.id)}"${engineOk ? '' : ' disabled'}>`
           + `下载 ${U().esc(v.size_text || '')}</button>`;
       const meta = [

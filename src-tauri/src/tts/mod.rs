@@ -246,6 +246,106 @@ pub fn voice_files(s: &VoiceSpec) -> Vec<(String, String)> {
     ]
 }
 
+/* ============================================================
+   随包资源（vendor/）
+   ============================================================
+
+   沿用 llama.cpp 引擎那套约定：随安装包分发的资源放 exe 同级的
+   `vendor/` 下，`/vendor/` 已被 gitignore —— 二进制不进仓库，构建时
+   由脚本下载，build 脚本检测到就复制进发行包。
+
+   ```
+   vendor/piper/piper.exe               语音引擎
+   vendor/tts-voices/<id>/<id>.onnx     预置语音（当前只有英文）
+   ```
+
+   查找顺序是「下载的优先，随包的兜底」。反过来不行：用户在设置页
+   新下载一条语音，不该被安装包里的旧版本盖住。
+
+   随包资源**不复制**到模型目录 —— 直接原地读取。程序装在 Program Files
+   也不影响（我们只读），省掉首次启动复制 60 MB 的开销。
+*/
+
+/// 随包引擎目录。
+pub fn bundled_engine_dir(app_dir: &Path) -> PathBuf {
+    app_dir.join("vendor").join("piper")
+}
+
+/// 随包语音根目录。
+pub fn bundled_voices_dir(app_dir: &Path) -> PathBuf {
+    app_dir.join("vendor").join("tts-voices")
+}
+
+/// 解析可用的 `piper.exe`：先看模型目录（用户下载的），再看随包的。
+pub fn resolve_engine(app_dir: &Path, models_dir: &Path) -> Option<PathBuf> {
+    let downloaded = piper_exe(models_dir);
+    if downloaded.is_file() {
+        return Some(downloaded);
+    }
+    let bundled = bundled_engine_dir(app_dir).join("piper.exe");
+    if bundled.is_file() {
+        return Some(bundled);
+    }
+    None
+}
+
+/// 解析某条语音的 `(onnx, json)`：同样是下载优先、随包兜底。
+pub fn resolve_voice(app_dir: &Path, models_dir: &Path, id: &str) -> Option<(PathBuf, PathBuf)> {
+    let (o, j) = (voice_onnx(models_dir, id), voice_json(models_dir, id));
+    if o.is_file() && j.is_file() {
+        return Some((o, j));
+    }
+    let b = bundled_voices_dir(app_dir).join(id);
+    let (o2, j2) = (b.join(format!("{id}.onnx")), b.join(format!("{id}.onnx.json")));
+    if o2.is_file() && j2.is_file() {
+        return Some((o2, j2));
+    }
+    None
+}
+
+/// 当前**可用**（不管来自下载还是随包）的语音 id 列表。
+pub fn available_voices(app_dir: &Path, models_dir: &Path) -> Vec<String> {
+    let mut out = installed_voices(models_dir);
+    let bundled = bundled_voices_dir(app_dir);
+    if let Ok(rd) = std::fs::read_dir(&bundled) {
+        for e in rd.flatten() {
+            if !e.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                continue;
+            }
+            let id = e.file_name().to_string_lossy().to_string();
+            if out.contains(&id) {
+                continue;
+            }
+            let b = bundled.join(&id);
+            if b.join(format!("{id}.onnx")).is_file() && b.join(format!("{id}.onnx.json")).is_file()
+            {
+                out.push(id);
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
+/// 这条语音从哪来：`downloaded` / `bundled` / `none`（界面据此显示标签）。
+pub fn voice_source(app_dir: &Path, models_dir: &Path, id: &str) -> &'static str {
+    if voice_onnx(models_dir, id).is_file() && voice_json(models_dir, id).is_file() {
+        return "downloaded";
+    }
+    let b = bundled_voices_dir(app_dir).join(id);
+    if b.join(format!("{id}.onnx")).is_file() && b.join(format!("{id}.onnx.json")).is_file() {
+        return "bundled";
+    }
+    "none"
+}
+
+/// 删除语音时，随包的那份**不能删**（它在安装目录里，删了下次更新又回来；
+/// 而且用户可能只是想「不要它」，那应该在设置里禁用而不是删文件）。
+/// 这个函数回答「删除操作删的到底是哪一份」。
+pub fn is_downloaded_voice(models_dir: &Path, id: &str) -> bool {
+    voice_onnx(models_dir, id).is_file() && voice_json(models_dir, id).is_file()
+}
+
 /// 某个文件的候选下载地址（自建 Release 优先，HF 回退）。
 pub fn file_urls(file: &str, hf_path: &str) -> Vec<String> {
     let mut v = Vec::new();

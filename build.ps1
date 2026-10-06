@@ -329,6 +329,44 @@ if (Test-Path $engineExe) {
     Write-Dim "「一键部署」将回退到联网下载（gh-proxy 限速，约 14 分钟）"
 }
 
+# ---- 随包分发 Piper 语音引擎与预置语音（本地神经朗读用）----
+#
+# 同样是被限速逼的：实测 gh-proxy 拉 piper 引擎包只有约 21 KB/s，22MB 要下
+# 十几分钟。语音包本身走 hf-mirror 很快（实测 2.7 MB/s，20MB 约 8 秒），
+# 但引擎这一步卡住就等于整个功能不可用 —— 所以引擎必须随包。
+#
+# 英文默认语音一并随包（开箱即用），其他语种按需下载。
+# 用 scripts\fetch_tts_vendor.py 准备 vendor\piper 与 vendor\tts-voices。
+$piperSrc = Join-Path $Root "vendor\piper"
+$piperExe = Join-Path $piperSrc "piper.exe"
+if (Test-Path $piperExe) {
+    $piperDst = Join-Path $distDir "vendor\piper"
+    New-Item -ItemType Directory -Path $piperDst -Force | Out-Null
+    # ★ 必须整目录递归拷贝：piper 除了 exe 还依赖 onnxruntime 等 dll
+    #   和 espeak-ng-data 音素数据。只拷 exe/dll 会得到一个能启动但
+    #   一合成就报错的引擎（缺音素表）。
+    Copy-Item (Join-Path $piperSrc "*") $piperDst -Recurse -Force
+    $piperMB = [math]::Round(((Get-ChildItem $piperDst -File -Recurse |
+        Measure-Object -Property Length -Sum).Sum) / 1MB, 1)
+    Write-Ok "已随包 Piper 语音引擎 → dist\vendor\piper（$piperMB MB）"
+} else {
+    Write-Warn2 "未找到 vendor\piper\piper.exe，安装包不带本地语音引擎"
+    Write-Dim "本地神经朗读将回退到联网下载（gh-proxy 限速，可能要十几分钟）"
+}
+
+# 预置语音包（当前只有英文默认语音 en_US-amy-medium）
+$voiceSrc = Join-Path $Root "vendor\tts-voices"
+if (Test-Path $voiceSrc) {
+    $voiceDst = Join-Path $distDir "vendor\tts-voices"
+    New-Item -ItemType Directory -Path $voiceDst -Force | Out-Null
+    Copy-Item (Join-Path $voiceSrc "*") $voiceDst -Recurse -Force
+    $voiceMB = [math]::Round(((Get-ChildItem $voiceDst -File -Recurse |
+        Measure-Object -Property Length -Sum).Sum) / 1MB, 1)
+    Write-Ok "已随包预置语音 → dist\vendor\tts-voices（$voiceMB MB）"
+} else {
+    Write-Dim "未找到 vendor\tts-voices，安装包不含预置语音（用户需自行下载）"
+}
+
 if (Test-Path (Join-Path $Root "README.md")) {
     Copy-Item (Join-Path $Root "README.md") (Join-Path $distDir "README.md") -Force
 }
