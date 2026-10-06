@@ -157,6 +157,18 @@ const Settings = (() => {
     const wse = document.getElementById('set-websearch');
     if (wse) wse.checked = config.web_search_enabled !== false;
 
+    // 界面语言 + AI 讲解语言：两件不同的事，但放在同一处管理。
+    //   界面语言 = 软件自己说什么语言（ui_lang）
+    //   讲解语言 = AI 给我讲的时候说什么语言（explain_lang）
+    // 界面语言立刻切走 UI（不等保存），讲解语言仍走「保存」落盘。
+    const uiLang = document.getElementById('set-ui-lang');
+    if (uiLang) {
+      const code = (config.ui_lang || window.I18n?.current?.() || 'zh-CN');
+      uiLang.innerHTML = (window.I18n?.LANGS || [{ id: 'zh-CN', name: '简体中文' }])
+        .map(l => `<option value="${l.id}">${l.name}</option>`).join('');
+      uiLang.value = code;
+    }
+
     // AI 讲解语言（与查词页右上角的下拉是同一份配置，两处改动互相同步）
     const exLang = document.getElementById('set-explain-lang');
     if (exLang) {
@@ -236,6 +248,15 @@ const Settings = (() => {
     if (top) config.sidebar_always_on_top = top.checked;
     const wse = document.getElementById('set-websearch');
     if (wse) config.web_search_enabled = wse.checked;
+
+    // 界面语言：不等「保存」按钮，选了立刻换。
+    // 这里的取舍是故意的——语言不像「每批多少题」那样需要反悔，
+    // 让用户拿不准时能立刻看到效果，比多点一次保存更重要。
+    const uiLang = document.getElementById('set-ui-lang');
+    if (uiLang) {
+      config.ui_lang = uiLang.value || 'zh-CN';
+      try { window.I18n?.setLang(config.ui_lang); } catch (e) { /* 字典坏了也别挡住保存 */ }
+    }
 
     // AI 讲解语言：走 setExplainLang 单独落盘，保证「选了就记住」，
     // 哪怕用户最后没点保存按钮。
@@ -1011,6 +1032,15 @@ const Settings = (() => {
         config.study[el.dataset.opt] = el.checked;
         try { await API.setStudyOptions(config.study); } catch (e) {}
       });
+    });
+
+    // 界面语言：改动立刻换 UI，不等「保存」。
+    // 故意不落 save —— 用户想看的是「切过去长什么样」，让他多点一次保存
+    // 才能看到效果，在这个选项上没有意义。真正写盘由 save() 负责。
+    document.getElementById('set-ui-lang')?.addEventListener('change', (e) => {
+      const code = e.target.value || 'zh-CN';
+      if (config) config.ui_lang = code;
+      window.I18n?.setLang(code);
     });
 
     bindSpeak();

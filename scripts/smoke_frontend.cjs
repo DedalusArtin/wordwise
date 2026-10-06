@@ -23,7 +23,7 @@ const ROOT = path.resolve(__dirname, '..');
 // 加载」这类问题会被漏掉（dir.js / translate.js 就是为此加进来的）。
 // 必须与 src/index.html 里的 <script> 顺序一致：前端没有模块系统，
 // 靠加载顺序决定谁先挂到 window 上。顺序错了，冒烟测试会报「undefined.bind」。
-const ORDER = ['theme.js', 'api.js', 'demo.js', 'dir.js', 'speak.js', 'ui.js', 'study.js', 'lookup.js',
+const ORDER = ['i18n.js', 'theme.js', 'api.js', 'demo.js', 'dir.js', 'speak.js', 'ui.js', 'study.js', 'lookup.js',
                'translate.js', 'graph.js', 'library.js', 'maint.js', 'update.js', 'settings.js',
                'sidebar.js', 'app.js'];
 
@@ -1806,6 +1806,55 @@ const cases = [
       throw new Error('缺 entry 的脏数据应当被滤掉');
     }
     return '';
+  }],
+
+  // ---- 界面语言（ui_lang）----
+  ['界面语言：中文模式原样返回，零改动', () => {
+    sandbox.I18n.setLang('zh-CN', { persist: false });
+    if (sandbox.I18n.t('加入词库') !== '加入词库') throw new Error('中文模式下不该翻译');
+    return '';
+  }],
+  ['界面语言：缺词典条目时回退原文，绝不吐空串或 key', () => {
+    sandbox.I18n.setLang('en', { persist: false });
+    const miss = sandbox.I18n.t('这句肯定还没来得及翻译');
+    if (miss !== '这句肯定还没来得及翻译') throw new Error('漏翻应原样返回，实际 ' + miss);
+    if (miss === '' || miss.includes('undefined')) throw new Error('漏翻不该变成空串/undefined');
+    return '';
+  }],
+  ['界面语言：translate 组合精确键与模板键（tPattern 不能被 || 短路掉）', () => {
+    sandbox.I18n.setLang('en', { persist: false });
+    // 精确键
+    if (sandbox.I18n.translate('加入词库') !== 'Add to Wordbook') throw new Error('精确键没命中');
+    // 模板键：走的是「精确没命中 → 再试模板」这条组合路径
+    if (sandbox.I18n.translate('已载入 42 个示例单词') !== '42 sample words loaded') {
+      throw new Error('模板键被短路了：' + sandbox.I18n.translate('已载入 42 个示例单词'));
+    }
+    sandbox.I18n.setLang('zh-CN', { persist: false });
+    return '';
+  }],
+  ['界面语言：切走再切回，原文必须还在（不能「从英文翻回中文」）', () => {
+    sandbox.I18n.setLang('en', { persist: false });
+    if (sandbox.I18n.t('查看详情卡') !== 'Details') throw new Error('英文模式没翻译');
+    sandbox.I18n.setLang('zh-CN', { persist: false });
+    if (sandbox.I18n.t('查看详情卡') !== '查看详情卡') throw new Error('切回中文丢了原文');
+    return '';
+  }],
+  ['界面语言：localize 遇到残缺节点不能抛（撑不死渲染就是底线）', () => {
+    // 注：本沙箱的 innerHTML 不解析成真实子树，能验证的只有「不抛」。
+    // 真实 DOM 下的文本属性替换由上面的 t / tPattern 用例间接覆盖。
+    sandbox.I18n.setLang('en', { persist: false });
+    const weird = { nodeType: 1, tagName: 'DIV', hasAttribute: () => false, childNodes: [] };
+    sandbox.I18n.localize(weird);
+    sandbox.I18n.localize(null);
+    sandbox.I18n.localize(undefined);
+    sandbox.I18n.setLang('zh-CN', { persist: false });
+    return '';
+  }],
+  ['界面语言：语言清单里必须有 zh-CN 和 en 两档', () => {
+    const ids = sandbox.I18n.LANGS.map(l => l.id);
+    if (!ids.includes('zh-CN')) throw new Error('缺简体中文');
+    if (!ids.includes('en')) throw new Error('缺 English');
+    return ids.join(',');
   }],
 
   // ---- 整应用启动链路 ----

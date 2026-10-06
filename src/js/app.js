@@ -262,6 +262,13 @@ const App = (() => {
       if (seg) Study.setMode('en_to_zh');
     } catch (e) { /* 用默认 */ }
 
+    // 界面语言：配置里的 `ui_lang` 优先，读不到就退回本地缓存 / 简体中文。
+    // 必须放在拿到配置**之后**做一次全量刷新，把 index.html 里那批静态文案
+    // 一起过字典；放早了就会变成「进应用还是中文、改一次设置才变英文」。
+    try {
+      window.I18n?.init(config && config.ui_lang);
+    } catch (e) { /* 字典出错不该拖垮启动，界面退回中文即可 */ }
+
     // 检测本地模型
     checkLlm();
 
