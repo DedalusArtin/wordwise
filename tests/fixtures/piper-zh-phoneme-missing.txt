@@ -1,0 +1,7 @@
+[2026-10-06 15:16:32.816] [piper] [info] Loaded voice in 0.1894643 second(s)
+[2026-10-06 15:16:32.838] [piper] [info] Initialized piper
+[2026-10-06 15:16:32.970] [piper] [warning] Missing 2 phoneme(s) from phoneme/id map!
+[2026-10-06 15:16:32.970] [piper] [warning] Missing "2" (\u0032): 4 time(s)
+[2026-10-06 15:16:32.970] [piper] [warning] Missing "5" (\u0035): 3 time(s)
+[2026-10-06 15:16:32.970] [piper] [info] Real-time factor: 0.0224225 (infer=0.0394636 sec, audio=1.76 sec)
+[2026-10-06 15:16:32.971] [piper] [info] Terminated piper
