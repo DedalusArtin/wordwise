@@ -543,6 +543,15 @@ pub fn cleanup_on_exit() {
 /// 这只是状态显示，不是功能开关。
 #[tauri::command]
 pub fn cmd_gpu_status() -> serde_json::Value {
+    // ★ 缓存结果：显卡是硬件，不会在进程活着的时候换 —— 检测一次就够。
+    //   nvidia-smi 每次都是一个子进程（几十到几百毫秒），而面板每次打开
+    //   都会调这个命令，反复探测纯属浪费（用户原话「检测一次就行了」）。
+    static CACHE: std::sync::OnceLock<serde_json::Value> = std::sync::OnceLock::new();
+    return CACHE.get_or_init(detect_gpu).clone();
+}
+
+/// 真正的探测逻辑（只会被调用一次，结果进 CACHE）。
+fn detect_gpu() -> serde_json::Value {
     let nvsmi = locate_nvidia_smi();
     let (gpu, driver_ok) = match &nvsmi {
         Some(exe) => match std::process::Command::new(exe)

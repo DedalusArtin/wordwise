@@ -920,6 +920,8 @@ const Settings = (() => {
   let ttsRateTimer = null;
   /** 「当前语音」订阅的退订函数（只订一次，面板反复进出不叠加）。 */
   let ttsVoiceUnsub = null;
+  /** 语音健康订阅的退订函数（同上）。 */
+  let ttsHealthUnsub = null;
 
   /*
     语音包按语言分组后，组一多整页就长得没法扫 —— 而且用户真正关心的
@@ -1340,6 +1342,22 @@ const Settings = (() => {
     // 不用去猜「我装的语音包生效了没」。同样只订一次。
     if (!ttsVoiceUnsub && window.Speak && window.Speak.onVoice) {
       ttsVoiceUnsub = window.Speak.onVoice(() => renderTtsFooter());
+    }
+
+    // 语音健康：链路任何失败的最终原因常驻在这里（toast 太快看不清）。
+    // 一切正常 → 显示中性小字；出错 → 红字 + 可行动的办法，不再自动消失。
+    if (!ttsHealthUnsub && window.Speak && window.Speak.onHealth) {
+      ttsHealthUnsub = window.Speak.onHealth((h) => {
+        const el = ttsEl('tts-health');
+        if (!el) return;
+        if (h && h.state === 'error') {
+          el.textContent = h.message;
+          el.classList.add('error');
+        } else {
+          el.classList.remove('error');
+          el.textContent = '朗读链路正常';
+        }
+      });
     }
   }
 

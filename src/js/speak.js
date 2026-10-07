@@ -194,17 +194,58 @@ const Speak = (() => {
     if (name === 'NotAllowedError') {
       msg = '系统拦下了自动播放：请再点一次朗读按钮';
     } else if (name === 'NotSupportedError') {
-      msg = '这份音频的格式本机播放不了';
+      // 合成本身是 WAV（WebView2 必然支持），走到这里几乎都是
+      // 合成产物损坏（半截 wav / 非法采样率）—— 重新下载语音包能修复；
+      // 词典真人录音是外站 MP3，那种失败走的是另一条降级路，到不了这里。
+      msg = '合成出的音频损坏（可能是语音包文件不完整），请到「设置 → 朗读」重新下载该语音包';
     } else {
       msg = '播放失败：' + String((err && (err.message || err)) || '未知原因');
     }
     notifyVoice('none', '', '', anchor);
+    healthError(msg);
     try {
       const U = window.WW;
       if (U && typeof U.toast === 'function') U.toast(msg, 'err');
     } catch (e) { /* 忽略 */ }
   }
 
+
+  /* ---------------- 语音健康（常驻状态，不再一闪而过） ----------------
+
+     用户原话：「点试听时下面有红色提示……太快了没看清，感觉这个要在语音模块提示」。
+     toast 会消失，朗读链路里每一步失败（本地合成失败 → 回退系统语音 → 系统又
+     没音色）的**最终原因**必须常驻在两处看得见的地方：设置页朗读面板顶部、
+     侧边栏语音状态条。这里只维护状态与订阅，谁显示谁订阅。 */
+
+  const healthSubs = [];
+  let ttsHealth = { state: 'ok', message: '' };   // state: 'ok' | 'error'
+
+  function notifyHealth(state, message) {
+    if (ttsHealth.state === state && ttsHealth.message === message) return;
+    ttsHealth = { state, message };
+    for (const fn of healthSubs) {
+      try { fn(ttsHealth); } catch (e) { /* 单个订阅者出错不影响其它 */ }
+    }
+  }
+
+  /** 订阅语音健康变化；返回退订函数。 */
+  function onHealth(fn) {
+    if (typeof fn === 'function') healthSubs.push(fn);
+    return () => {
+      const i = healthSubs.indexOf(fn);
+      if (i >= 0) healthSubs.splice(i, 1);
+    };
+  }
+
+  /** 记录一次朗读链路失败（常驻，直到下次成功朗读覆盖）。 */
+  function healthError(message) {
+    notifyHealth('error', String(message || ''));
+  }
+
+  /** 朗读成功 → 清除错误态。 */
+  function healthOk() {
+    if (ttsHealth.state !== 'ok') notifyHealth('ok', '');
+  }
 
   /* ---------------- 朗读引擎策略 ---------------- */
 
@@ -392,16 +433,23 @@ const Speak = (() => {
         audioEl.onerror = () => { speaking = false; };
         const p = audioEl.play();
         if (p && p.catch) {
-          return p.then(() => true).catch((err) => {
+          return p.then(() => { healthOk(); return true; }).catch((err) => {
             speaking = false;
             // ★ 不再静默：合成明明成功了，播不出来必须让用户知道为什么
             reportPlayError(err, anchor);
             return false;
           });
         }
+        healthOk();
         return true;
       })
-      .catch(() => false);
+      .catch((err) => {
+        // 后端合成失败：原因要留档（回退系统语音若也发不出声，
+        // 用户在常驻状态里能看到本地失败的真正原因，而不是只有「没声音」）
+        healthError('本地合成失败：' + String((err && (err.message || err)) || '未知原因')
+          + '；已改用系统语音');
+        return false;
+      });
   }
 
   /* ---------------- 朗读 ---------------- */
@@ -478,7 +526,11 @@ const Speak = (() => {
       // 真人录音挂了（外链失效、被墙）→ 降级合成，提示条也会跟着改成合成通道
       audioEl.onerror = () => { speaking = false; fb(); };
       const p = audioEl.play();
-      if (p && p.catch) p.catch(() => { speaking = false; fb(); });
+      if (p && p.catch) {
+        p.then(() => healthOk()).catch(() => { speaking = false; fb(); });
+      } else {
+        healthOk();
+      }
     } catch (e) {
       speaking = false;
       fb();
@@ -498,12 +550,17 @@ const Speak = (() => {
     const key = String(lang || 'en');
     if (missingVoiceWarned.has(key)) return;
     missingVoiceWarned.add(key);
+    // ★ 常驻到语音健康状态（侧边栏 + 设置页朗读面板），toast 只配当配角 ——
+    //   5 秒的红条没人来得及看清（用户原话「太快了我没看清」）。
+    const nm = (window.WW && window.WW.langLabel && window.WW.langLabel(key)) || key;
+    healthError('本机没有' + nm + '的系统语音，朗读发不出声。两个办法：'
+      + '在 Windows「设置 → 时间和语言 → 语音」里添加' + nm + '语音；'
+      + '或在「设置 → 朗读」下载离线语音包（不依赖系统，装完即可用）');
     try {
       const U = window.WW;
-      if (!U || typeof U.toast !== 'function') return;
-      const nm = (U.langLabel && U.langLabel(key)) || key;
-      U.toast(`本机没有${nm}语音，朗读发不出声。到「设置 → 朗读」下载离线语音包（不依赖系统），`
-        + '或在 Windows「设置 → 时间和语言 → 语音」里添加系统语音。', 'err');
+      if (U && typeof U.toast === 'function') {
+        U.toast('朗读失败：本机没有' + nm + '语音，详细办法见侧边栏语音状态或设置页朗读面板', 'err');
+      }
     } catch (e) { /* 提示本身失败不能拖累发声 */ }
   }
 
@@ -556,7 +613,7 @@ const Speak = (() => {
         if (typeof extra.pitch === 'number') u.pitch = extra.pitch;
         if (v) u.voice = v;
         const isLast = i === chunks.length - 1;
-        u.onend = () => { if (isLast) speaking = false; };
+        u.onend = () => { if (isLast) { speaking = false; healthOk(); } };
         u.onerror = () => { if (isLast) speaking = false; };
         synth.speak(u);
       });
@@ -711,6 +768,7 @@ const Speak = (() => {
     ensureReady, selectVoice, setLocalVoiceId, localVoiceId,
     // 「当前语音」：onVoice 订阅变化，currentVoice 直接读最新值
     onVoice, currentVoice, voiceLabel, voiceKindLabel,
+    onHealth,
   };
 })();
 

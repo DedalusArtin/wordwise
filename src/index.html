@@ -895,6 +895,10 @@
             <h3 class="panel-title">朗读与发音</h3>
             <button class="ghost-btn sm" id="btn-speak-test">试听</button>
           </div>
+          <!-- 语音健康：朗读链路任何一步失败的**最终原因**常驻在这里
+               （toast 5 秒就没了，用户原话「太快了我没看清」）；
+               一切正常时显示最近一次朗读用的是谁，不再自动消失。 -->
+          <div class="tts-health" id="tts-health"></div>
           <p class="muted">
             词典自带真人录音时<b>永远优先播录音</b>。没有录音时按下面选的引擎合成：
             <b>本地神经语音</b>离线可用、音质接近微软 Neural，需先下载语音包；

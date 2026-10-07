@@ -3452,6 +3452,23 @@ h1 .ver-chip { font-size: 11px; padding: 2px 8px; vertical-align: 4px; }
 }
 .tts-topbar .panel-title { margin-bottom: 0; }
 
+/* ---- 语音健康行：朗读链路失败的常驻出口 ----
+   toast 5 秒消失，这里的错误**一直挂着**，直到下一次成功朗读把它盖掉。
+   正常态显示中性小字（最近一次朗读用的是谁），错误态红字 + 可读原因。 */
+.tts-health {
+  min-height: 18px;
+  margin: 0 0 8px;
+  font-size: 12px;
+  color: var(--text-3);
+}
+.tts-health.error {
+  color: var(--red);
+  padding: 7px 10px;
+  background: var(--red-soft);
+  border-radius: var(--radius-sm);
+  line-height: 1.6;
+}
+
 /* ---- 当前语音模型：钉在面板最下方右下角 ----
    和上面同一个道理。用 sticky 而不是普通流内元素：流内元素会被
    「展开某个语言分组」撑下去（用户原话「被挤走」），absolute 则会

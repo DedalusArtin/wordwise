@@ -2803,6 +2803,31 @@ const cases = [
     return 'lessac-low + alan-low + 标注';
   }],
 
+  // ---- 语音健康：失败原因常驻（不再一闪而过）+ N 卡检测只跑一次 ----
+  // 现场：点试听闪过一条红提示（「在 Windows 里设置什么」）太快看不清 ——
+  // 那是「回退系统语音又没音色」的最终原因，必须常驻在语音模块里；
+  // 另外「已就绪却没声」时侧边栏必须跟着转红，不能停在「就绪」。
+  ['朗读：失败原因常驻两处 + GPU 检测缓存一次', () => {
+    const sp = fs.readFileSync(path.join(ROOT, 'src/js/speak.js'), 'utf8');
+    const html = fs.readFileSync(path.join(ROOT, 'src/index.html'), 'utf8');
+    const appjs = fs.readFileSync(path.join(ROOT, 'src/js/app.js'), 'utf8');
+    const setjs = fs.readFileSync(path.join(ROOT, 'src/js/settings.js'), 'utf8');
+    const llm = fs.readFileSync(path.join(ROOT, 'src-tauri/src/commands/localllm.rs'), 'utf8');
+
+    if (!/function onHealth/.test(sp)) throw new Error('缺语音健康订阅');
+    // 本地合成失败、系统没音色、播放失败，三条路都必须写常驻状态
+    if (!/healthError\('本地合成失败：/.test(sp)) throw new Error('本地合成失败没有进常驻状态');
+    if (!/healthError\('本机没有' \+ nm/.test(sp)) throw new Error('缺系统音色的失败没有进常驻状态');
+    if (!/healthError\(msg\);/.test(sp)) throw new Error('播放失败没有进常驻状态');
+    // 常驻出口：设置页健康行 + 侧边栏 chip 转红
+    if (!/id="tts-health"/.test(html)) throw new Error('设置页缺常驻健康行');
+    if (!/Speak\.onHealth/.test(setjs)) throw new Error('设置页没有订阅语音健康');
+    if (!/Speak\.onHealth/.test(appjs)) throw new Error('侧边栏没有订阅语音健康');
+    // N 卡检测只跑一次（OnceLock 缓存）
+    if (!/OnceLock<serde_json::Value>/.test(llm)) throw new Error('GPU 检测没有缓存结果');
+    return 'onHealth 三路挂接 + 常驻两处 + OnceLock 缓存';
+  }],
+
   // ---- 外部链接：默认在软件内打开，设置里可关；更新下载永远走系统浏览器 ----
   ['链接：命令层分流 + 更新下载强制外部', async () => {
     const rs = fs.readFileSync(path.join(ROOT, 'src-tauri/src/commands/mod.rs'), 'utf8');

@@ -434,6 +434,26 @@ const App = (() => {
       text.textContent = '语音包未安装';
     }
     if (chip && !engineOk) chip.title = '到「设置 → 朗读」先下载语音引擎';
+
+    // 朗读链路失败 → 状态条立即转红并写明原因（覆盖「已就绪」——
+    // 「文件都在却发不出声」正是用户撞上的盲区，状态必须跟着失败走）。
+    // 成功朗读后 Speak 自己会清回正常态（healthOk）。
+    if (!checkTts._healthBound && window.Speak && window.Speak.onHealth) {
+      checkTts._healthBound = true;
+      window.Speak.onHealth((h) => {
+        const d = document.getElementById('tts-dot');
+        const t = document.getElementById('tts-text');
+        const c = document.getElementById('tts-chip');
+        if (!d || !t) return;
+        if (h && h.state === 'error') {
+          d.className = 'dot offline';
+          t.textContent = '语音出错：' + (h.message || '').slice(0, 26);
+          if (c) c.title = h.message || '';
+        } else {
+          checkTts();   // 恢复正常态 → 重新按后端真实状态渲染
+        }
+      });
+    }
   }
 
   /* ---------- 本地模型状态 ---------- */
