@@ -2445,6 +2445,129 @@ const cases = [
     return h[1] + 'px';
   }],
 
+  // ---- 开关的胶囊几何不许被「字段样式」盖掉 ----
+  //
+  // ★ 这是同一个坑的第二次：用户两次截图点名「方形滑块」。
+  //   第一次是「支持语言」的勾选项（`.check`，已改成胶囊 chip）；
+  //   第二次是词典源卡片里的**启用开关**（`.switch input`）——
+  //   `.source-item input { border-radius: 6px; border; padding; width:100% }`
+  //   本来只想管文本框，却同时命中了开关；两条规则特异性都是 (0,1,1)，
+  //   而字段样式在文件里更靠后，于是 22px 高的轨道被扣上 6px 圆角（只有 27%），
+  //   渲染出来就是个圆角方块。
+  //
+  //   这条用例直接**模拟一次层叠**：把「词典源卡片里的开关 input」当作探针，
+  //   逐条判断命中并比特异性，最后断言胜出的几何值就是胶囊该有的那些。
+  //   比肉眼审 CSS 靠谱，也能挡住以后任何一条新的宽泛 `input` 规则。
+  ['样式：开关的胶囊几何不许被字段样式盖掉（用户两次点名「方形滑块」）', () => {
+    const css = fs.readFileSync(path.join(ROOT, 'src/css/app.css'), 'utf8')
+      .replace(/\/\*[\s\S]*?\*\//g, ' ');
+
+    const rules = [];
+    {
+      const re = /([^{}]+)\{([^{}]*)\}/g;
+      let m;
+      while ((m = re.exec(css)) !== null) {
+        const sels = m[1].split(',').map((s) => s.trim()).filter(Boolean);
+        if (!sels.length || sels.some((s) => s.startsWith('@'))) continue;
+        rules.push({ sels, decls: m[2] });
+      }
+    }
+
+    // 特异性：id*10000 + (class/attr/伪类)*100 + 元素
+    function spec(sel) {
+      const s = sel.replace(/::[a-z-]+(\([^)]*\))?/g, '');
+      const ids = (s.match(/#[\w-]+/g) || []).length;
+      const cls = (s.match(/\.[\w-]+/g) || []).length
+        + (s.match(/\[[^\]]*\]/g) || []).length
+        + (s.match(/:(?!not\b)[a-z-]+(\([^)]*\))?/g) || []).length;
+      const els = (s.replace(/[:#.\[]/g, ' ').match(/\b[a-zA-Z][\w-]*\b/g) || []).length;
+      return ids * 10000 + cls * 100 + els;
+    }
+
+    // 探针 = 开关的 <input> 本身：无 class，靠 `.switch input` 命中
+    const probe = {
+      tags: ['input'], classes: [], attrs: ['type="checkbox"'],
+      ancestors: ['source-item', 'switch', 'switch-bare'],
+    };
+    function matchCompound(part) {
+      if (/#[\w-]+/.test(part)) return false;
+      for (const n of [...part.matchAll(/:not\(([^)]*)\)/g)].map((x) => x[1])) {
+        if (n.includes('checkbox') || n.includes('radio')) return false;
+      }
+      const s = part.replace(/:not\([^)]*\)/g, '').replace(/::?[a-z-]+(\([^)]*\))?/g, '');
+      const tag = /^\s*([a-zA-Z][\w-]*)/.exec(s);
+      if (tag && !probe.tags.includes(tag[1].toLowerCase())) return false;
+      for (const c of [...s.matchAll(/\.([\w-]+)/g)].map((x) => x[1])) {
+        if (!probe.classes.includes(c)) return false;
+      }
+      for (const a of [...s.matchAll(/\[([^\]]+)\]/g)].map((x) => x[1].replace(/["'\s]/g, ''))) {
+        const [k, v] = a.split('=');
+        if (k === 'type' && v && !probe.attrs.includes(`type="${v}"`)) return false;
+      }
+      return true;
+    }
+    function matches(sel) {
+      if (sel.includes('::')) return false;
+      const parts = sel.split(/\s+/).filter((x) => x && !['>', '+', '~'].includes(x));
+      if (!parts.length || !matchCompound(parts[parts.length - 1])) return false;
+      for (const anc of parts.slice(0, -1)) {
+        const need = [...anc.matchAll(/\.([\w-]+)/g)].map((x) => x[1]);
+        if (need.length && !need.every((c) => probe.ancestors.includes(c))) return false;
+      }
+      return true;
+    }
+
+    // ① 只有开关专属的规则，才允许设置开关的几何/外观
+    const intruders = [];
+    for (const r of rules) {
+      for (const sel of r.sels) {
+        if (!matches(sel)) continue;
+        if (/\.switch\b/.test(sel)) continue;              // 开关自己的规则，正常
+        if (spec(sel) === 0) continue;                      // `* { … }` 通用重置
+        if (/border-radius|(^|[;\s])border\s*:|padding\s*:|width\s*:|height\s*:|background\s*:/
+          .test('; ' + r.decls)) {
+          intruders.push(`${sel} → ${r.decls.trim().slice(0, 60)}`);
+        }
+      }
+    }
+    if (intruders.length) {
+      throw new Error('有非开关专属的规则在改开关的几何属性（就是「方形滑块」的成因）：\n      '
+        + intruders.join('\n      '));
+    }
+
+    // ② 层叠胜出者必须是胶囊该有的值
+    function winner(prop) {
+      let w = null;
+      for (const r of rules) {
+        for (const sel of r.sels) {
+          if (!matches(sel)) continue;
+          const m = new RegExp('(?:^|[;{\\s])' + prop + '\\s*:\\s*([^;]+)').exec(r.decls);
+          if (!m) continue;
+          const sp = spec(sel);
+          if (!w || sp >= w.spec) w = { sel, spec: sp, value: m[1].trim() };
+        }
+      }
+      return w;
+    }
+    for (const [prop, want] of [
+      ['border-radius', '11px'], ['height', '22px'], ['width', '38px'],
+      ['padding', '0'], ['border', 'none'],
+    ]) {
+      const w = winner(prop);
+      if (!w || !w.value.replace(/\s+/g, ' ').startsWith(want)) {
+        throw new Error(`开关的 ${prop} 层叠结果是 ${w ? w.value : '（没人设）'}（来自 ${w ? w.sel : '-'}），`
+          + `期望 ${want} —— 22px 高配 6px 圆角只有 27%，看起来就是方块`);
+      }
+    }
+    // ③ 根治手段要还在：字段规则必须显式排除复选框。
+    //    （光靠抬高开关的特异性也能赢，但那是「比谁的规则更长」，
+    //      排除复选框才是把作用域收回到文本输入框，语义上才对。）
+    if (!/\.source-item input:not\(\[type="checkbox"\]\):not\(\[type="radio"\]\)/.test(css)) {
+      throw new Error('字段样式 `.source-item input` 又没有排除复选框了 —— 这就是「方形滑块」的根源');
+    }
+    return 'border-radius 11px / border none / padding 0';
+  }],
+
   ['样式：勾选项是胶囊而不是方框（用户点名的「方形滑块」）', () => {
     const css = fs.readFileSync(path.join(ROOT, 'src/css/app.css'), 'utf8');
     // ★ 查 :has() 必须先剥注释：本项目有多处注释**解释为什么不能用 :has()**，

@@ -666,9 +666,16 @@ code {
   user-select: none;
 }
 .switch:hover { background: var(--bg); }
-.switch input {
+/* ★ 选择器列表里同时写上 `input[type="checkbox"]` 那一份，是**故意的**：
+   命中同一个元素时，特异性按列表里**最具体**的那个选择器算（这里是 0,2,1）。
+   开关大量出现在表单区域（如 `.source-item`），那里难免有 `.xxx input {...}`
+   这类 (0,1,1) 的字段规则；一旦它排在后面，就会把这里的圆角、边框、内边距
+   悄悄改掉（这正是「方形滑块」的成因）。抬高特异性后，这类误伤再也不会生效。 */
+.switch input,
+.switch input[type="checkbox"] {
   appearance: none;
   -webkit-appearance: none;
+  -moz-appearance: none;
   width: 38px; height: 22px;
   background: #c9d0dd;
   border-radius: 11px;
@@ -678,8 +685,11 @@ code {
   flex-shrink: 0;
   margin: 0;
   border: none;
+  padding: 0;
   outline: none;
   box-shadow: inset 0 1px 2px rgba(0,0,0,.08);
+  display: inline-block;
+  vertical-align: middle;
 }
 .switch input::after {
   content: '';
@@ -709,14 +719,8 @@ code {
 .switch.switch-bare:hover { background: transparent; }
 
 /* 加固：部分 WebView 会忽略 appearance，导致原生勾选框与 ::after 圆点同时出现。
-   显式清掉复选框的原生外观与尺寸。 */
-.switch input[type="checkbox"] {
-  -webkit-appearance: none;
-  -moz-appearance: none;
-  appearance: none;
-  display: inline-block;
-  vertical-align: middle;
-}
+   外观与尺寸已经在上面那条（含 `input[type="checkbox"]` 的高特异性版本）里
+   一并清掉了，这里只留 WebView 专有的 `::-ms-check`。 */
 .switch input[type="checkbox"]::-ms-check { display: none; }
 
 .btn-row { display: flex; align-items: center; gap: 9px; margin-top: 10px; flex-wrap: wrap; }
@@ -1498,7 +1502,17 @@ h4.md-h, h5.md-h { font-size: 13.5px; font-weight: 600; color: var(--text); }
 .source-head { display: flex; align-items: center; gap: 11px; }
 .source-name { font-size: 13.5px; font-weight: 600; flex: 1; }
 .source-item .field { margin-bottom: 9px; }
-.source-item input, .source-item select {
+/* ⚠️ 这里必须排除 checkbox / radio。
+   原来的写法是 `.source-item input`，它会把面板里**所有** input 一起命中 ——
+   包括源标题左边那个 `.switch input[type="checkbox"]` 开关。两者特异性同为
+   (0,1,1)，而这条在文件里更靠后，于是 `border-radius:6px`、`border`、`padding`
+   和 `width:100%` 全部盖到开关头上：22px 高的轨道配 6px 圆角只有 27%，
+   渲染出来就是一个**圆角方块**而不是胶囊（用户反复点名的「方形滑块」）。
+   `.check input`（支持语言勾选项）同理被波及 —— 它靠 opacity/clip-path 隐藏，
+   肉眼看不出来，但宽度也被撑成了 100%，属于同一处作用域泄漏。
+   收窄到「文本类输入框」才是这条规则原本的意思。 */
+.source-item input:not([type="checkbox"]):not([type="radio"]),
+.source-item select {
   background: var(--panel);
   border: 1px solid var(--border);
   border-radius: 6px;
@@ -1507,7 +1521,7 @@ h4.md-h, h5.md-h { font-size: 13.5px; font-weight: 600; color: var(--text); }
   outline: none;
   font-size: 12.5px;
 }
-.source-item input:focus { border-color: var(--blue); }
+.source-item input:not([type="checkbox"]):not([type="radio"]):focus { border-color: var(--blue); }
 .map-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 8px; }
 .map-grid label { display: flex; flex-direction: column; gap: 3px; }
 .map-grid label > span { font-size: 11px; color: var(--text-3); }

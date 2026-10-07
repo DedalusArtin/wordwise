@@ -68,6 +68,60 @@ pub fn from_youdao_code(code: &str) -> String {
     }
 }
 
+/// 有道接口里「中文」的语言码。
+const YOUD_ZH: &str = "zh-CHS";
+
+/// 有道接口的语言清单里**没有**的语言。
+///
+/// 2026-10 实测：`it`（意大利语）任何方向都返回错误码 102，连
+/// `it → zh-CHS` 都不行。本项目界面是支持意大利语的，但在线翻译这一
+/// 步用不了，只能交给大模型兜底。
+fn youdao_lang_listed(code: &str) -> bool {
+    !matches!(code, "it")
+}
+
+/// 在线翻译支不支持「`from` → `to`」这个方向？
+///
+/// 返回 `None` 表示支持；`Some(原因)` 表示不支持，原因直接给用户看。
+///
+/// 2026-10 对 `aidemo.youdao.com/trans` 的实测结论（共 26 个方向）：
+///
+/// | 方向 | 结果 |
+/// | --- | --- |
+/// | 受支持的外语 → 中文 | ✅ |
+/// | 中文 → 受支持的外语 | ✅ |
+/// | 外语 → 外语（如 `en → ja`） | ❌ 错误码 102 |
+/// | 涉及意大利语（含 `it → zh`） | ❌ 错误码 102 |
+///
+/// 归纳成一句话：**必须有一端是中文**，且两端都得在它的语言清单里。
+///
+/// 明知不支持还要发一次请求，代价不只是空跑一趟：该接口限频很严
+/// （见 [`MIN_INTERVAL`] / [`COOLDOWN`]），白扔一次请求就等于消耗额度，
+/// 还可能把本来能用的查询一起挤进冷却。所以这里提前拦掉，让
+/// `crate::commands::translate::translate_core` 直接走大模型兜底。
+pub fn youdao_supports(from: &str, to: &str) -> Option<String> {
+    let f = youdao_code(from);
+    let t = youdao_code(to);
+
+    if f == t {
+        return Some(format!("源语言和目标语言都是{}，不需要翻译", lang_name(from)));
+    }
+    if !youdao_lang_listed(f) {
+        return Some(format!("在线翻译的语言清单里没有{}", lang_name(from)));
+    }
+    if !youdao_lang_listed(t) {
+        return Some(format!("在线翻译的语言清单里没有{}", lang_name(to)));
+    }
+    if f != YOUD_ZH && t != YOUD_ZH {
+        return Some(format!(
+            "在线翻译不支持 {} → {}：它只能做「中文 ↔ 外语」互译，外语之间互译请改用 AI 翻译",
+            lang_name(from),
+            lang_name(to)
+        ));
+    }
+    None
+}
+
 /// 界面语言清单：(代码, 中文名, 该语言的自称)。
 ///
 /// 中文名给界面下拉用，自称在提示词里对模型说更有效
@@ -240,12 +294,22 @@ struct YoudaoResp {
 }
 
 /// 有道错误码 → 人类可读说明。
+///
+/// 逐个说明含义（前几个是实测确认的，见 [`youdao_supports`] 的表格）：
+///   - `102` **不支持的语言**——绝大多数情况下是「外语 → 外语」，
+///     这本来就该被 [`youdao_supports`] 提前拦掉，走到这里说明接口侧
+///     的判断又变了（它的支持范围会调整），所以文案要能独立看懂；
+///   - `103` 文本过长；`101` 缺少必要参数（一般是空文本）。
 fn youdao_error(code: &str) -> String {
     match code {
         "0" => String::new(),
         // 该公开接口在密集请求下就是靠 411 限流
         "411" => "在线翻译接口触发频率限制".to_string(),
         "401" | "402" | "403" => "在线翻译接口拒绝了本次请求".to_string(),
+        "101" => "在线翻译缺少必要参数（待翻译内容可能为空）".to_string(),
+        "102" => "在线翻译不支持这个语言方向（它只能做「中文 ↔ 外语」互译，外语之间互译请改用 AI 翻译）"
+            .to_string(),
+        "103" => "待翻译内容过长，在线翻译无法处理".to_string(),
         other => format!("在线翻译接口返回错误码 {}", other),
     }
 }
@@ -294,6 +358,12 @@ pub async fn youdao_translate(
     };
     let y_from = youdao_code(&src_code);
     let y_to = youdao_code(to);
+
+    // 明知不支持就别发请求了：这一趟注定只拿回 102，
+    // 还会白白消耗本就紧张的限频额度（详见 youdao_supports 的实测表）。
+    if let Some(why) = youdao_supports(&src_code, to) {
+        return Err(anyhow!(why));
+    }
 
     // UA 由 client 统一带上（见 net::build_client）
     let resp = client
@@ -485,6 +555,64 @@ mod tests {
         assert_eq!(from_youdao_code("en2zh-CHS"), "en");
         assert_eq!(from_youdao_code("ja2zh-CHS"), "ja");
         assert_eq!(from_youdao_code(""), "");
+    }
+
+    /// 锁住 2026-10 的实测结论：该接口只做「中文 ↔ 外语」，
+    /// 外语之间互译一律拿回错误码 102。
+    ///
+    /// 这几条断言的意义在于：将来若有人想把"外语互译"也交给在线接口
+    /// （比如单纯删掉 `youdao_supports` 的拦截），测试会立刻失败，
+    /// 逼他先去重测一遍接口 —— 而不是让用户在界面上重新遇到 102。
+    #[test]
+    fn unsupported_directions_are_rejected_before_any_request() {
+        // ① 中文参与的两端都放行
+        assert!(youdao_supports("en", "zh").is_none(), "外语 → 中文应该支持");
+        assert!(youdao_supports("ja", "zh").is_none());
+        assert!(youdao_supports("zh", "en").is_none(), "中文 → 外语应该支持");
+        assert!(youdao_supports("zh", "ja").is_none());
+        assert!(youdao_supports("zh-CN", "en").is_none());
+
+        // ② 外语互译一律拦掉（这正是错误码 102 的来源）
+        for (from, to) in [
+            ("en", "ja"),
+            ("ja", "en"),
+            ("en", "ko"),
+            ("ko", "fr"),
+            ("de", "ru"),
+        ] {
+            let why = youdao_supports(from, to)
+                .unwrap_or_else(|| panic!("{} → {} 本应被拦下", from, to));
+            assert!(
+                why.contains("中文") && why.contains("外语"),
+                "原因要说清规则而不是甩错误码：{}",
+                why
+            );
+        }
+
+        // ③ 意大利语在它的语言清单里压根没有，连 it → 中文都不行
+        assert!(youdao_supports("it", "zh").is_some(), "it → zh 实测是 102");
+        assert!(youdao_supports("zh", "it").is_some(), "zh → it 实测是 102");
+        assert!(youdao_supports("en", "it").is_some());
+
+        // ④ 源语言与目标语言相同：不必发请求
+        let why = youdao_supports("en", "en").expect("相同语言应被拦下");
+        assert!(why.contains("不需要翻译"), "{}", why);
+        // 「中文词条、目标也是中文」同理
+        assert!(youdao_supports("zh", "zh").is_some());
+    }
+
+    #[test]
+    fn unsupported_reason_mentions_how_to_proceed() {
+        // 用户遇到这类提示时必须知道下一步该怎么办
+        let why = youdao_supports("en", "ja").expect("en → ja 不支持");
+        assert!(why.contains("AI 翻译"), "要指条明路：{}", why);
+
+        // 102 的兜底文案同样要能独立看懂（接口的支持范围会变）
+        let msg = youdao_error("102");
+        assert!(msg.contains("不支持"), "{}", msg);
+        assert!(msg.contains("中文"), "{}", msg);
+        assert!(youdao_error("103").contains("过长"));
+        assert!(youdao_error("101").contains("必要参数"));
     }
 
     #[test]
