@@ -1016,7 +1016,31 @@ pub fn normalize_wav(bytes: &[u8]) -> Vec<u8> {
     };
     // PCM 长度必须是 block_align 的整数倍，截齐（奇数字节必是撕裂）
     let align = ((channels as usize) * (bits as usize) / 8).max(1);
-    let pcm = &pcm[..pcm.len() - pcm.len() % align];
+    let mut pcm = pcm[..pcm.len() - pcm.len() % align].to_vec();
+
+    // ★ 峰值限制：piper 的合成幅度偶尔打满 16bit（实测峰值 100% FS、
+    //   多个样本 ±32768）——扬声器上就是「喷麦很炸、绝对过载」。这里把
+    //   峰值压到 87.5% FS（-1.16 dBFS），整段等比缩放，不改动态关系。
+    //   已经被 piper 削平的样本救不回来，但整体电平下来后不再刺耳。
+    if bits == 16 && pcm.len() >= 2 {
+        const CEIL: i32 = 28672; // 87.5% of 32768
+        let mut peak: i32 = 0;
+        for chunk in pcm.chunks_exact(2) {
+            let v = i16::from_le_bytes([chunk[0], chunk[1]]) as i32;
+            peak = peak.max(v.abs());
+        }
+        if peak > CEIL {
+            let gain = CEIL as f32 / peak as f32;
+            for chunk in pcm.chunks_exact_mut(2) {
+                let v = i16::from_le_bytes([chunk[0], chunk[1]]) as i32;
+                let scaled = (v as f32 * gain).round() as i32;
+                let clamped = scaled.clamp(-32768, 32767) as i16;
+                chunk.copy_from_slice(&clamped.to_le_bytes());
+            }
+            log::info!("TTS 峰值 {} 超限，已等比压到 {}（增益 {:.2}）", peak, CEIL, gain);
+        }
+    }
+    let pcm: &[u8] = &pcm;
 
     let mut out = Vec::with_capacity(44 + pcm.len());
     out.extend_from_slice(b"RIFF");

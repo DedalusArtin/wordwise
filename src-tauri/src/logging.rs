@@ -81,13 +81,68 @@ impl log::Log for FileLogger {
 /// 初始化全局 logger（state 启动时调用一次）。
 ///
 /// 只初始化一次；重复调用（测试里多次构造 AppState）直接忽略。
+/// panic hook：任何 Rust panic 都直接写进日志文件（绕过 logger，保证落盘）。
+/// 用户原话：「报错写日志方便 debug」——0.45.6/0.45.7 各有一次查词闪退
+/// （0xc0000409，panic=abort），因为没有 hook，日志里一个字都没留下。
+pub fn install_panic_hook() {
+    std::panic::set_hook(Box::new(|info| {
+        let msg = if let Some(s) = info.payload().downcast_ref::<&str>() {
+            (*s).to_string()
+        } else if let Some(s) = info.payload().downcast_ref::<String>() {
+            s.clone()
+        } else {
+            "panic（非字符串 payload）".to_string()
+        };
+        let loc = info
+            .location()
+            .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))
+            .unwrap_or_else(|| "未知位置".into());
+        let line = format!(
+            "[{}][PANIC] [rust] {} @ {}",
+            chrono_now_hms(),
+            msg,
+            loc
+        );
+        // 直写文件（logger 可能还没装 / 锁可能被毒化，绕开一切间接层）
+        if let Ok(guard) = LOG_PATH.lock() {
+            if let Some(p) = guard.as_ref() {
+                use std::io::Write;
+                if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(p) {
+                    let _ = writeln!(f, "{}", line);
+                }
+            }
+        }
+        log::error!("{}", line);
+    }));
+}
+
+/// 仅给 panic hook 用的当前时间（HH:MM:SS）。
+fn chrono_now_hms() -> String {
+    let d = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let s = d % 60;
+    let m = (d / 60) % 60;
+    let h = (d / 3600 + 8) % 24; // UTC+8
+    format!("{:02}:{:02}:{:02}", h, m, s)
+}
+
+/// 日志文件路径（panic hook 直写用，绕开 logger 自身的锁）。
+static LOG_PATH: std::sync::Mutex<Option<std::path::PathBuf>> = std::sync::Mutex::new(None);
+
 pub fn init(data_dir: &std::path::Path) {
     if log::set_logger(&LOGGER).is_ok() {
         log::set_max_level(LevelFilter::Info);
         let dir = data_dir.join("logs");
         let _ = std::fs::create_dir_all(&dir);
-        *LOGGER.file.lock().unwrap_or_else(|e| e.into_inner()) = Some(dir.join("wordwise.log"));
-        log::info!("日志系统就绪（文件：{}）", dir.join("wordwise.log").display());
+        let path = dir.join("wordwise.log");
+        *LOGGER.file.lock().unwrap_or_else(|e| e.into_inner()) = Some(path.clone());
+        if let Ok(mut g) = LOG_PATH.lock() {
+            *g = Some(path.clone());
+        }
+        install_panic_hook();
+        log::info!("日志系统就绪（文件：{}）", path.display());
     }
 }
 

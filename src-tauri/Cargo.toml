@@ -1,6 +1,6 @@
 [package]
 name = "wordwise"
-version = "0.45.7"
+version = "0.45.8"
 description = "WordWise - LM Studio 驱动的可视化背单词与 AI 讲解一体化桌面软件"
 authors = ["DedalusArtin"]
 edition = "2021"
@@ -138,7 +138,9 @@ winreg = "0.55"
 codegen-units = 1
 lto = true
 opt-level = "s"
-panic = "abort"
+# unwind 而不是 abort：单点 panic 只让那次调用失败（命令返回错误、后台任务
+# 终止），绝不再整包闪退——「查词直接闪退」0xc0000409 的治本项。
+panic = "unwind"
 strip = true
 
 [lib]

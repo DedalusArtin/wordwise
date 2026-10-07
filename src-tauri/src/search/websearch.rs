@@ -269,7 +269,13 @@ fn extract_results_html(html: &str, engine: &str, limit: usize) -> Vec<WebResult
         if let (Some(url), false) = (href, title_html.is_empty()) {
             if url.starts_with("http") && !is_engine_internal(&url) {
                 // 摘要：取标题块之后 900 字符里的第一段
-                let tail_end = (block_end + 900).min(html.len());
+                // ★ 字节偏移必须落到字符边界：网页正文是 UTF-8，「+900」
+                //   会切进多字节汉字中间（实测 panic：end byte index … is
+                //   inside '四'，panic=abort 时整包闪退、查词直接消失）。
+                let mut tail_end = (block_end + 900).min(html.len());
+                while tail_end < html.len() && !html.is_char_boundary(tail_end) {
+                    tail_end += 1;
+                }
                 let tail = &html[block_end..tail_end];
                 let snippet = extract_first_para(tail);
                 out.push(WebResult {
