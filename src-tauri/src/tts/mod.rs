@@ -350,6 +350,34 @@ static VOICE_DEFS: &[VoiceSpec] = &[
         note: "",
         urls: Vec::new(),
     },
+    VoiceSpec {
+        id: "en_US-lessac-low",
+        label: "Lessac · 美式女声（小体积）",
+        lang: "en",
+        locale: "en_us",
+        accent: "us",
+        gender: "female",
+        quality: "low",
+        bytes: 20_795_512,
+        hf_dir: "en/en_US/lessac/low",
+        preset: false,
+        note: "小体积模型：下载快（约为 medium 的三分之一），音质略低，适合流量/磁盘紧张时",
+        urls: Vec::new(),
+    },
+    VoiceSpec {
+        id: "en_GB-alan-low",
+        label: "Alan · 英式男声（小体积）",
+        lang: "en",
+        locale: "en_gb",
+        accent: "gb",
+        gender: "male",
+        quality: "low",
+        bytes: 20_913_408,
+        hf_dir: "en/en_GB/alan/low",
+        preset: false,
+        note: "小体积模型：下载快，音质略低",
+        urls: Vec::new(),
+    },
 ];
 
 /// 精选语音清单（只读；`urls` 在首次访问时填好）。
@@ -507,11 +535,18 @@ pub fn engine_ready(models_dir: &Path) -> bool {
     piper_exe(models_dir).is_file()
 }
 
-/// 扫描已安装的语音 id（`onnx` 与 `json` 都在才算装好）。
+/// 扫描已安装的语音 id（`onnx` 与 `json` 都在**且 onnx 足够大**才算装好）。
 ///
 /// 为什么要两个文件都在：只下到一半时 `onnx` 是完整的但缺配置，
 /// piper 启动会直接报错。把它们当作一个原子整体，界面才不会出现
 /// 「显示已安装、一点就失败」的状态。
+///
+/// 为什么还要校验大小：下载是**断点续传**，中断会在磁盘上留下半个
+/// `onnx`（几 MB）—— 只查「文件存在」的话，残缺文件会被当成已装好，
+/// 界面显示「已安装」、合成时 piper 必败，用户就撞上「明明载入成功
+/// 却发不出声」。真实的语音模型最小也有十几 MB，1 MB 以下必是残件。
+/// 残件不算已装，下载流程（`cmd_tts_install_voice`）就能重新把它补全，
+/// 而不是跳过（「文件存在 → continue」）永远留个坑。
 pub fn installed_voices(models_dir: &Path) -> Vec<String> {
     let mut out = Vec::new();
     let dir = voices_dir(models_dir);
@@ -523,13 +558,30 @@ pub fn installed_voices(models_dir: &Path) -> Vec<String> {
             continue;
         }
         let id = e.file_name().to_string_lossy().to_string();
-        if voice_onnx(models_dir, &id).is_file() && voice_json(models_dir, &id).is_file() {
+        if voice_ready(models_dir, &id) {
             out.push(id);
         }
     }
     out.sort();
     out
 }
+
+/// 单条语音是否**真的**可用：两个文件都在，且 `onnx` 不是残件。
+pub fn voice_ready(models_dir: &Path, id: &str) -> bool {
+    let o = voice_onnx(models_dir, id);
+    let j = voice_json(models_dir, id);
+    if !o.is_file() || !j.is_file() {
+        return false;
+    }
+    match std::fs::metadata(&o) {
+        Ok(m) => m.len() >= MIN_ONNX_BYTES,
+        Err(_) => false,
+    }
+}
+
+/// onnx 模型的最小可信体积。Piper 官方最小的语音模型也有十几 MB，
+/// 断点续传留下的残件远小于这个值。
+pub const MIN_ONNX_BYTES: u64 = 1024 * 1024;
 
 /// 一条语音需要下载的文件：`(目标文件名, HF 相对路径)`。
 pub fn voice_files(s: &VoiceSpec) -> Vec<(String, String)> {
@@ -664,9 +716,10 @@ pub fn resolve_engine(app_dir: &Path, models_dir: &Path) -> Option<PathBuf> {
 
 /// 解析某条语音的 `(onnx, json)`：同样是下载优先、随包兜底。
 pub fn resolve_voice(app_dir: &Path, models_dir: &Path, id: &str) -> Option<(PathBuf, PathBuf)> {
-    let (o, j) = (voice_onnx(models_dir, id), voice_json(models_dir, id));
-    if o.is_file() && j.is_file() {
-        return Some((o, j));
+    // ★ 必须走 voice_ready（含大小校验）：残缺的 onnx 交给 piper 只会
+    //   启动失败，宁可回落随包那份，也不制造「合成必败」的假可用。
+    if voice_ready(models_dir, id) {
+        return Some((voice_onnx(models_dir, id), voice_json(models_dir, id)));
     }
     resolve_bundled_voice(app_dir, id)
 }
@@ -691,7 +744,7 @@ pub fn available_voices(app_dir: &Path, models_dir: &Path) -> Vec<String> {
 
 /// 这条语音从哪来：`downloaded` / `bundled` / `none`（界面据此显示标签）。
 pub fn voice_source(app_dir: &Path, models_dir: &Path, id: &str) -> &'static str {
-    if voice_onnx(models_dir, id).is_file() && voice_json(models_dir, id).is_file() {
+    if voice_ready(models_dir, id) {
         return "downloaded";
     }
     if resolve_bundled_voice(app_dir, id).is_some() {
@@ -704,7 +757,7 @@ pub fn voice_source(app_dir: &Path, models_dir: &Path, id: &str) -> &'static str
 /// 而且用户可能只是想「不要它」，那应该在设置里禁用而不是删文件）。
 /// 这个函数回答「删除操作删的到底是哪一份」。
 pub fn is_downloaded_voice(models_dir: &Path, id: &str) -> bool {
-    voice_onnx(models_dir, id).is_file() && voice_json(models_dir, id).is_file()
+    voice_ready(models_dir, id)
 }
 
 /// 一条语音在**所有镜像**上的 `.onnx` 地址，按优先级排列。
@@ -1073,8 +1126,7 @@ mod tests {
         // 下载的那份优先于随包的
         let dl = voice_dir(&models, "zh_CN-huayan-x_low");
         std::fs::create_dir_all(&dl).unwrap();
-        std::fs::write(voice_onnx(&models, "zh_CN-huayan-x_low"), b"x").unwrap();
-        std::fs::write(voice_json(&models, "zh_CN-huayan-x_low"), b"{}").unwrap();
+        write_fake_onnx(&models, "zh_CN-huayan-x_low");
         assert_eq!(voice_source(&app, &models, "zh_CN-huayan-x_low"), "downloaded");
         let _ = std::fs::remove_dir_all(&app);
     }
@@ -1269,6 +1321,18 @@ mod tests {
         assert_eq!(lang_locale("zh"), "zh");
     }
 
+
+    /// 写一个**超过 MIN_ONNX_BYTES** 的假 onnx —— installed 判定含大小校验
+    /// （防断点续传的残件），几字节的假文件不再算数。
+    fn write_fake_onnx(dir: &Path, id: &str) {
+        let d = voice_dir(dir, id);
+        std::fs::create_dir_all(&d).unwrap();
+        let mut data = vec![0u8; MIN_ONNX_BYTES as usize + 1];
+        data[0] = b'x';
+        std::fs::write(voice_onnx(dir, id), &data).unwrap();
+        std::fs::write(voice_json(dir, id), b"{}").unwrap();
+    }
+
     #[test]
     fn installed_detection_requires_both_files() {
         let tmp = std::env::temp_dir().join(format!("ww-tts-test-{}", std::process::id()));
@@ -1278,8 +1342,11 @@ mod tests {
         std::fs::create_dir_all(&d).unwrap();
         std::fs::write(voice_onnx(&tmp, "en_US-amy-medium"), b"x").unwrap();
         assert!(installed_voices(&tmp).is_empty(), "缺 json 不该算已安装");
-        // 补上 json → 装好
+        // 补上 json，但 onnx 只有几字节（断点续传的残件）→ 仍不算装好
         std::fs::write(voice_json(&tmp, "en_US-amy-medium"), b"{}").unwrap();
+        assert!(installed_voices(&tmp).is_empty(), "onnx 小于 MIN_ONNX_BYTES 的残件不该算已安装");
+        // 写足体积 → 装好
+        write_fake_onnx(&tmp, "en_US-amy-medium");
         assert_eq!(installed_voices(&tmp), vec!["en_US-amy-medium".to_string()]);
         // 目录不存在时是空表而不是 panic
         let _ = std::fs::remove_dir_all(&tmp);

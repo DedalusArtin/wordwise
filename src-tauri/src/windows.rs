@@ -82,6 +82,8 @@ fn build_invoke_handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync +
         commands::explain::cmd_explain_to_entry,
         // 后台词库内容增强（AI 空闲时把单薄词条补成统一详细的详解）
         commands::explain::cmd_enrich_status,
+        // N 卡 / GPU 加速状态（Vulkan 后端 + nvidia-smi 探测）
+        commands::localllm::cmd_gpu_status,
         // 词库
         commands::cmd_list_words,
         commands::cmd_add_word,

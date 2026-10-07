@@ -528,3 +528,74 @@ pub async fn cmd_local_llm_probe(state: State<'_, Arc<AppState>>) -> Result<serd
 pub fn cleanup_on_exit() {
     localllm::shutdown();
 }
+
+/// 检测 N 卡 / GPU 加速状态。
+///
+/// 随包的 llama.cpp 引擎是 **Vulkan** 构建（`llama-*-bin-win-vulkan-*.zip`），
+/// 启动时已带 `-ngl 999`（全部层进 GPU）—— Vulkan 后端对 N 卡 / A 卡 /
+/// Intel 核显都有效，**不需要** CUDA 运行时。这里只负责「如实检测并显示」：
+///
+///   1. 探测 `nvidia-smi`（N 卡驱动自带，装了驱动就在 PATH 或 System32），
+///      拿到显卡型号；
+///   2. 结合引擎是否为 Vulkan 构建、`-ngl` 是否已传，给出结论。
+///
+/// 探测失败一律返回 `accel: false` + 原因，绝不阻塞、绝不报错 ——
+/// 这只是状态显示，不是功能开关。
+#[tauri::command]
+pub fn cmd_gpu_status() -> serde_json::Value {
+    let nvsmi = locate_nvidia_smi();
+    let (gpu, driver_ok) = match &nvsmi {
+        Some(exe) => match std::process::Command::new(exe)
+            .args(["--query-gpu=name", "--format=csv,noheader"])
+            .output()
+        {
+            Ok(o) if o.status.success() => {
+                let name = String::from_utf8_lossy(&o.stdout)
+                    .lines()
+                    .next()
+                    .unwrap_or("")
+                    .trim()
+                    .to_string();
+                (if name.is_empty() { None } else { Some(name) }, true)
+            }
+            _ => (None, false),
+        },
+        None => (None, false),
+    };
+
+    let engine_vulkan = crate::localllm::engine_asset().contains("vulkan");
+    serde_json::json!({
+        // N 卡检测：nvidia-smi 能给出型号即视为有 N 卡
+        "nvidia": gpu.as_ref().map(|n| n.contains("NVIDIA")).unwrap_or(false),
+        "gpu_name": gpu,
+        "driver_ok": driver_ok,
+        "backend": if engine_vulkan { "vulkan" } else { "cpu" },
+        // 引擎是 Vulkan 构建 + 启动带 -ngl 999 → 检测到任何 Vulkan 设备
+        // （N 卡 / A 卡 / Intel）就会走 GPU；nvidia-smi 探测到 N 卡时如实报
+        "accel": engine_vulkan && (gpu.is_some() || driver_ok),
+    })
+}
+
+/// 找 `nvidia-smi.exe`：先看 PATH，再看驱动默认安装位置。
+fn locate_nvidia_smi() -> Option<PathBuf> {
+    if let Ok(out) = std::process::Command::new("where").arg("nvidia-smi").output() {
+        if out.status.success() {
+            if let Some(first) = String::from_utf8_lossy(&out.stdout).lines().next() {
+                let p = PathBuf::from(first.trim());
+                if p.is_file() {
+                    return Some(p);
+                }
+            }
+        }
+    }
+    for dir in [
+        r"C:\Windows\System32",
+        r"C:\Program Files\NVIDIA Corporation\NVSMI",
+    ] {
+        let p = PathBuf::from(dir).join("nvidia-smi.exe");
+        if p.is_file() {
+            return Some(p);
+        }
+    }
+    None
+}

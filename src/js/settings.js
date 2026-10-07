@@ -1190,6 +1190,8 @@ const Settings = (() => {
 
     // 底部「当前语音模型」跟着一起刷新（它是 sticky 的，内容变了也要改）
     renderTtsFooter();
+    // 侧边栏的「语音载入情况」同步刷新 —— 下载/删除语音包后不用等下次启动
+    if (window.App && window.App.checkTts) window.App.checkTts();
   }
 
   /**

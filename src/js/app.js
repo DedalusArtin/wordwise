@@ -363,6 +363,8 @@ const App = (() => {
 
     // 检测本地模型
     checkLlm();
+    // 语音载入情况（侧边栏常驻，与模型状态并排）
+    checkTts();
 
     // 静默检查更新：后台跑，不阻塞首屏（失败只写进设置页，不弹窗）
     window.Update?.checkOnStart?.();
@@ -397,6 +399,41 @@ const App = (() => {
     setInterval(() => {
       if (Pages.current === 'study' && !Study.state.running) refreshStudy();
     }, 60000);
+  }
+
+  /* ---------- 语音（TTS）载入情况 ----------
+
+     用户原话：「明明已经载入成功但是没有读……在边上显示语音载入情况」。
+     之前「语音包装没装好」只有进设置页才知道 —— 而朗读发生在查词页、
+     背诵页的每一次点击上。这里与「本地模型」状态并排，常驻侧边栏。 */
+  async function checkTts() {
+    const dot = document.getElementById('tts-dot');
+    const text = document.getElementById('tts-text');
+    const chip = document.getElementById('tts-chip');
+    if (!dot || !text) return;
+    if (!API.ttsStatus) return;
+    let st = null;
+    try { st = await API.ttsStatus(); } catch (e) { /* 后端没就绪就先不显示 */ }
+    if (!st) return;
+    dot.className = 'dot';
+    const engineOk = !!st.engine_ready;
+    const n = (st.installed || []).length;
+    if (!engineOk) {
+      dot.classList.add('offline');
+      text.textContent = '语音引擎未安装';
+    } else if (n > 0) {
+      dot.classList.add('online');
+      const cur = (st.config && st.config.voice_local) || '';
+      const label = cur
+        ? ((st.voices || []).find(v => v.id === cur) || { label: cur }).label
+        : '自动';
+      text.textContent = `语音已就绪 · ${label}`;
+      chip && (chip.title = `已装 ${n} 个语音包，点击进设置管理`);
+    } else {
+      dot.classList.add('offline');
+      text.textContent = '语音包未安装';
+    }
+    if (chip && !engineOk) chip.title = '到「设置 → 朗读」先下载语音引擎';
   }
 
   /* ---------- 本地模型状态 ---------- */
@@ -458,7 +495,7 @@ const App = (() => {
   }
 
   return {
-    init, checkLlm, updateLlmChip, refreshConfig,
+    init, checkLlm, checkTts, updateLlmChip, refreshConfig,
     get info() { return info; },
     get config() { return config; },
     get llmStatus() { return llmStatus; },

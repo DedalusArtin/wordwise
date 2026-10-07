@@ -127,6 +127,85 @@ const Speak = (() => {
     return refreshVoices().map(v => ({ name: v.name, lang: v.lang, local: !!v.localService }));
   }
 
+  /* ---------------- 播放解锁与错误可见化 ----------------
+
+     ★ 为什么需要 unlock：Piper 冷启动合成一条要 3~10 秒（模型加载），
+     等音频回来时，点击按钮带来的「用户手势」早已超过 Chromium 约 5 秒
+     的有效期 —— `audioEl.play()` 会被 NotAllowedError 拒绝，而且这个
+     错误此前被静默吞掉。用户的体感就是「明明合成成功了却没声音」
+     （合成缓存的 wav 都落盘了，喇叭却不响）。
+
+     解法：在**手势调用栈内**（speak() 的同步开头）用同一个 <audio>
+     元素播一次极短的静音 —— Chromium 对「播过一次的元素」不再套
+     自动播放限制，之后无论合成多久都能出声。 */
+
+  let audioUnlocked = false;
+
+  /** 10ms 静音 WAV 的 data URL（现生成，44 字节头 + 160 字节数据）。 */
+  function silentWavUrl() {
+    const sr = 8000, n = sr / 10;
+    const buf = new ArrayBuffer(44 + n * 2);
+    const v = new DataView(buf);
+    const ws = (o, s) => { for (let i = 0; i < s.length; i++) v.setUint8(o + i, s.charCodeAt(i)); };
+    ws(0, 'RIFF'); v.setUint32(4, 36 + n * 2, true); ws(8, 'WAVE');
+    ws(12, 'fmt '); v.setUint32(16, 16, true);
+    v.setUint16(20, 1, true); v.setUint16(22, 1, true);
+    v.setUint32(24, sr, true); v.setUint32(28, sr * 2, true);
+    v.setUint16(32, 2, true); v.setUint16(34, 16, true);
+    ws(36, 'data'); v.setUint32(40, n * 2, true);
+    const u8 = new Uint8Array(buf);
+    let bin = '';
+    for (let i = 0; i < u8.length; i += 8192) {
+      bin += String.fromCharCode.apply(null, u8.subarray(i, i + 8192));
+    }
+    return 'data:audio/wav;base64,' + btoa(bin);
+  }
+
+  /**
+   * 在用户手势内解锁本模块复用的那个 <audio>。必须**同步**调用
+   * （speak() 入口处），放异步链里手势就过期了。失败不打扰 ——
+   * 若解锁没成，播放失败时至少还有可见的错误提示兜底。
+   */
+  function unlockAudio() {
+    if (audioUnlocked) return;
+    try {
+      if (!audioEl) audioEl = new Audio();
+      audioEl.muted = true;                 // 静音解锁，听不见也无需听
+      audioEl.src = silentWavUrl();
+      const p = audioEl.play();
+      if (p && p.catch) {
+        p.then(() => { audioUnlocked = true; audioEl.muted = false; })
+          .catch(() => { audioEl.muted = false; /* 没解开也别留静音状态 */ });
+      } else {
+        audioUnlocked = true;
+        audioEl.muted = false;
+      }
+    } catch (e) { /* 忽略 */ }
+  }
+
+  /**
+   * 播放失败**不再静默**：分类给出用户能行动的提示。
+   * 之前这里 catch(() => false) 把 NotAllowedError 吞得干干净净，
+   * 用户只看到「点了没反应」，排查无从下手。
+   */
+  function reportPlayError(err, anchor) {
+    const name = (err && err.name) || '';
+    let msg;
+    if (name === 'NotAllowedError') {
+      msg = '系统拦下了自动播放：请再点一次朗读按钮';
+    } else if (name === 'NotSupportedError') {
+      msg = '这份音频的格式本机播放不了';
+    } else {
+      msg = '播放失败：' + String((err && (err.message || err)) || '未知原因');
+    }
+    notifyVoice('none', '', '', anchor);
+    try {
+      const U = window.WW;
+      if (U && typeof U.toast === 'function') U.toast(msg, 'err');
+    } catch (e) { /* 忽略 */ }
+  }
+
+
   /* ---------------- 朗读引擎策略 ---------------- */
 
   /*
@@ -313,7 +392,12 @@ const Speak = (() => {
         audioEl.onerror = () => { speaking = false; };
         const p = audioEl.play();
         if (p && p.catch) {
-          return p.then(() => true).catch(() => { speaking = false; return false; });
+          return p.then(() => true).catch((err) => {
+            speaking = false;
+            // ★ 不再静默：合成明明成功了，播不出来必须让用户知道为什么
+            reportPlayError(err, anchor);
+            return false;
+          });
         }
         return true;
       })
@@ -344,6 +428,10 @@ const Speak = (() => {
       currentKey = '';
       return;
     }
+    // ★ 媒体解锁必须在**这个同步栈**里做（此刻还握着用户手势）：
+    //   Piper 冷启动合成要 3~10 秒，等到能 play() 时手势早过期了，
+    //   Chromium 会以 NotAllowedError 拒绝 —— 「合成成功却没声音」的主因。
+    unlockAudio();
     stop();
     currentKey = key;
     lastKey = key;

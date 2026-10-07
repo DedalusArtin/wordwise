@@ -62,7 +62,7 @@ $DefaultIscc      = "G:\Programming\07-utils\Inno Setup 7\ISCC.exe"
 $SupportedIsccMajors = @(6, 7)
 
 # 版本号统一从 tauri.conf.json 读，避免与安装包、界面显示的版本脱节
-$AppVersion = "0.45.0"
+$AppVersion = "0.45.1"
 try {
     $cfgPath = Join-Path $Root "src-tauri\tauri.conf.json"
     $cfg = Get-Content $cfgPath -Raw -ErrorAction Stop | ConvertFrom-Json

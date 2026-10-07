@@ -798,6 +798,7 @@ const Maint = (() => {
           ${sv.running ? `<span>端口 <b>${sv.port}</b></span>` : ''}
           <span>引擎 ${e.ready ? '就绪' : '<b class="warn">未安装</b>'}</span>
           <span>本地模型 <b>${installed.length}</b> 个</span>
+          <span id="gpu-line">GPU 检测中…</span>
         </div>`;
 
       // ---- 主按钮 ----
@@ -875,6 +876,21 @@ const Maint = (() => {
       try { s.ai = await API.llmStatus(); } catch (e) { s.ai = null; }
       last = s;
       render(s);
+      // N 卡 / GPU 加速状态（异步补：探测 nvidia-smi 要起一个子进程，
+      // 别拖慢面板出现）
+      if (API.gpuStatus) {
+        API.gpuStatus().then((g) => {
+          const el = document.getElementById('gpu-line');
+          if (!el || !g) return;
+          if (g.accel && g.gpu_name) {
+            el.innerHTML = `GPU 加速 <b>${U().esc(g.gpu_name)}</b>（Vulkan）`;
+          } else if (g.backend === 'vulkan') {
+            el.textContent = 'GPU 加速：未检测到独显，走 CPU';
+          } else {
+            el.textContent = 'GPU 加速：引擎不支持';
+          }
+        }).catch(() => {});
+      }
     }
 
     function toSettings() {

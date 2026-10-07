@@ -2761,6 +2761,48 @@ const cases = [
     return 'addEventListener + 指纹比对 + 选中态同步 + 空列表重试';
   }],
 
+  // ---- 朗读没声音：播放解锁 + 失败可见 + 语音包残件自愈 + 状态常驻 ----
+  // 现场：合成缓存的 wav 都落盘了（后端一直成功），喇叭却不响 ——
+  // 播放被 Chromium 的自动播放策略拦下（合成 3~10 秒后手势过期）且被静默吞掉；
+  // 另有「断点续传留下半个 onnx，界面显示已安装、合成必败」。
+  ['朗读：播放解锁、失败可见、残件自愈、侧边栏状态', () => {
+    const sp = fs.readFileSync(path.join(ROOT, 'src/js/speak.js'), 'utf8');
+    const html = fs.readFileSync(path.join(ROOT, 'src/index.html'), 'utf8');
+    const appjs = fs.readFileSync(path.join(ROOT, 'src/js/app.js'), 'utf8');
+    const setjs = fs.readFileSync(path.join(ROOT, 'src/js/settings.js'), 'utf8');
+    const tts = fs.readFileSync(path.join(ROOT, 'src-tauri/src/tts/mod.rs'), 'utf8');
+    const llm = fs.readFileSync(path.join(ROOT, 'src-tauri/src/commands/localllm.rs'), 'utf8');
+
+    // ① 手势内解锁媒体（必须在 speak() 的同步栈里）
+    if (!/function unlockAudio/.test(sp)) throw new Error('缺播放解锁');
+    if (!/unlockAudio\(\);/.test(sp)) throw new Error('speak() 没有调用解锁');
+    // ② 播放失败不再静默
+    if (!/function reportPlayError/.test(sp)) throw new Error('缺播放失败上报');
+    if (/\.catch\(\(\) => \{ speaking = false; return false; \}\)/.test(sp)) {
+      throw new Error('播放失败仍被静默吞掉');
+    }
+    // ③ 语音包残件（onnx 小于阈值）不算已装
+    if (!/MIN_ONNX_BYTES/.test(tts)) throw new Error('缺 onnx 大小下限');
+    if (!/fn voice_ready/.test(tts)) throw new Error('缺 voice_ready 判定');
+    // ④ 侧边栏常驻语音状态（与「本地模型」并排）
+    if (!/id="tts-chip"/.test(html)) throw new Error('侧边栏缺语音状态条');
+    if (!/function checkTts/.test(appjs)) throw new Error('缺 checkTts');
+    if (!/App\.checkTts\(\)/.test(setjs)) throw new Error('设置页改完语音包没有刷新侧边栏');
+    // ⑤ N 卡 / GPU 检测命令
+    if (!/fn cmd_gpu_status/.test(llm)) throw new Error('缺 GPU 检测命令');
+    return 'unlock + reportPlayError + voice_ready + tts-chip + gpu 检测';
+  }],
+
+  // ---- 小模型 TTS：清单里要有 low 档（下载快、体积小） ----
+  ['朗读：语音清单含小体积档', () => {
+    const tts = fs.readFileSync(path.join(ROOT, 'src-tauri/src/tts/mod.rs'), 'utf8');
+    if (!/en_US-lessac-low/.test(tts)) throw new Error('缺 lessac-low');
+    if (!/en_GB-alan-low/.test(tts)) throw new Error('缺 alan-low');
+    // 下载快慢如实标注
+    if (!/小体积模型/.test(tts)) throw new Error('小体积档没有标注说明');
+    return 'lessac-low + alan-low + 标注';
+  }],
+
   // ---- 外部链接：默认在软件内打开，设置里可关；更新下载永远走系统浏览器 ----
   ['链接：命令层分流 + 更新下载强制外部', async () => {
     const rs = fs.readFileSync(path.join(ROOT, 'src-tauri/src/commands/mod.rs'), 'utf8');
