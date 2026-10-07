@@ -915,6 +915,14 @@
             </select>
           </label>
 
+          <!-- 朗读输出设备：每台机器的音频设备不同（有的机器默认设备失效
+               会让 <audio> 全部播不出），这里可把朗读指到任意输出设备 -->
+          <label class="field"><span>朗读输出设备</span>
+            <select id="tts-output">
+              <option value="">系统默认</option>
+            </select>
+          </label>
+
           <!-- 本地语音包管理 -->
           <div class="tts-box" id="tts-box">
             <div class="tts-box-head">

@@ -1192,6 +1192,26 @@ const Settings = (() => {
       if (window.Speak && window.Speak.setEnginePref) window.Speak.setEnginePref(e);
     }
 
+    // 朗读输出设备：枚举本机所有输出设备（每台机器不同；有的机器默认设备
+    // 失效会让 <audio> 全部播不出，指到别的设备即可绕开）
+    const outSel = ttsEl('tts-output');
+    if (outSel && navigator.mediaDevices && navigator.mediaDevices.enumerateDevices) {
+      navigator.mediaDevices.enumerateDevices().then((devs) => {
+        const outs = devs.filter((d) => d.kind === 'audiooutput');
+        const cur = (window.Speak && window.Speak.outputPref) ? window.Speak.outputPref() : '';
+        while (outSel.options.length > 1) outSel.remove(1);
+        outs.forEach((d, i) => {
+          const o = document.createElement('option');
+          o.value = d.deviceId;
+          // 设备名要媒体权限才拿得到；拿不到就用序号，至少能选
+          o.textContent = d.label || ('输出设备 ' + (i + 1));
+          outSel.appendChild(o);
+        });
+        outSel.value = cur;
+        if (outSel.value !== cur) outSel.value = '';   // 记住的设备已不在了 → 回默认
+      }).catch(() => { /* 枚举失败就只留系统默认 */ });
+    }
+
     // 底部「当前语音模型」跟着一起刷新（它是 sticky 的，内容变了也要改）
     renderTtsFooter();
     // 侧边栏的「语音载入情况」同步刷新 —— 下载/删除语音包后不用等下次启动
@@ -1234,6 +1254,13 @@ const Settings = (() => {
         await API.setTtsPrefs({ engine: e });
       } catch (err) { /* 落盘失败也不影响本次会话 */ }
       U().toast('朗读引擎已切换', 'ok');
+    });
+
+    // 朗读输出设备：写进 Speak 偏好，元素与 WebAudio 两条通道都跟着走
+    const outSel = ttsEl('tts-output');
+    outSel?.addEventListener('change', () => {
+      if (window.Speak && window.Speak.setOutputPref) window.Speak.setOutputPref(outSel.value || '');
+      U().toast(outSel.value ? '朗读输出设备已切换' : '朗读输出设备已恢复系统默认', 'ok');
     });
 
     // 语音包列表是重渲染的，所以用事件委托而不是逐个绑定

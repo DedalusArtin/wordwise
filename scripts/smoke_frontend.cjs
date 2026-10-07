@@ -2988,6 +2988,58 @@ const cases = [
     }
   }],
 
+  // ---- WebAudio 兜底播放（2026-10-07 破案：本机 WebView2 的 <audio> 播放管线
+  //      整体失灵——任何来源 play() 都 NotSupportedError 或永久挂起，连 188 字节
+  //      标准静音 PCM 都失败；WebAudio 解码与发声完全正常。元素播不出必须降级） ----
+  ['朗读：WebAudio 兜底——元素播不出时用 decodeAudioData + BufferSource 出声', async () => {
+    const sp = fs.readFileSync(path.join(ROOT, 'src/js/speak.js'), 'utf8');
+    // 文本守卫：降级链路的三要素必须在
+    if (!/decodeAudioData/.test(sp)) throw new Error('缺 WebAudio 解码');
+    if (!/createBufferSource/.test(sp)) throw new Error('缺 BufferSource 播放');
+    if (!/__stalled/.test(sp)) throw new Error('play() 挂起没有超时判定（本机实测会永久挂起）');
+    if (!/playViaWebAudio\(res\.audio/.test(sp)) throw new Error('合成结果没有接入 WebAudio 兜底');
+    // 输出设备适配：每台机器音频设备不同（本机实测 WebView2 只见 1 个疑似失效设备）
+    const html = fs.readFileSync(path.join(ROOT, 'src/index.html'), 'utf8');
+    const setjs = fs.readFileSync(path.join(ROOT, 'src/js/settings.js'), 'utf8');
+    if (!/setSinkId/.test(sp)) throw new Error('缺输出设备适配（setSinkId）');
+    if (!/ww\.speak\.output/.test(sp)) throw new Error('缺输出设备偏好存储');
+    if (!/id="tts-output"/.test(html)) throw new Error('朗读面板缺输出设备下拉');
+    if (!/enumerateDevices/.test(setjs)) throw new Error('设置页没有枚举输出设备');
+    // 行为守卫：注入 play() 必拒的 <audio> 与一个可用的 AudioContext
+    const origAudio = sandbox.Audio;
+    const origCtx = sandbox.AudioContext;
+    let started = 0;
+    sandbox.Audio = function () {
+      return { play: () => Promise.reject(Object.assign(new Error('no'), { name: 'NotSupportedError' })), pause() {}, addEventListener() {}, currentTime: 0 };
+    };
+    sandbox.AudioContext = function () {
+      this.state = 'running';
+      this.resume = () => Promise.resolve();
+      this.sampleRate = 48000;
+      this.destination = {};
+      this.decodeAudioData = () => Promise.resolve({ duration: 1.9 });
+      this.createBufferSource = () => ({
+        connect() {},
+        buffer: null,
+        onended: null,
+        start() { started++; if (this.onended) this.onended(); },
+        stop() {},
+      });
+      this.close = function () {};
+    };
+    if (!sandbox.atob) sandbox.atob = (s) => Buffer.from(s, 'base64').toString('binary');
+    try {
+      const ok = await sandbox.Speak.playViaWebAudio('data:audio/wav;base64,' + Buffer.from('RIFFdummydata').toString('base64'));
+      if (ok !== true) throw new Error('WebAudio 兜底没有接手播放');
+      if (started !== 1) throw new Error('BufferSource.start 没有被调用');
+      return '解码 + start + onended 全链路 OK';
+    } finally {
+      sandbox.Audio = origAudio;
+      sandbox.AudioContext = origCtx;
+      delete sandbox.atob;
+    }
+  }],
+
   // ---- 外部链接：默认在软件内打开，设置里可关；更新下载永远走系统浏览器 ----
   ['链接：命令层分流 + 更新下载强制外部', async () => {
     const rs = fs.readFileSync(path.join(ROOT, 'src-tauri/src/commands/mod.rs'), 'utf8');

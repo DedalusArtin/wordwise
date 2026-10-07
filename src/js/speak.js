@@ -210,6 +210,92 @@ const Speak = (() => {
   }
 
 
+  /* ---------------- WebAudio 兜底播放 ----------------
+
+     为什么需要它：本机实测（2026-10-07，WebView2 154）这台机器的
+     HTMLMediaElement 播放管线整体失灵 —— **任何**来源（在线 MP3、合成
+     WAV、甚至 188 字节的标准静音 PCM）play() 都抛 NotSupportedError 或
+     **永久挂起**，而 WebAudio 的 decodeAudioData 能把同一段字节完整解码、
+     AudioBufferSourceNode 能正常发声到自然结束（onended 触发）。
+     元素播不通用这条路把声音真正送到耳朵里，而不是对着红字干瞪眼。 */
+
+  let audioCtx = null;
+  let webAudioSrc = null;
+
+  /* ---- 朗读输出设备：每台机器的音频设备不同 ----
+     实测有的机器上 WebView2 只看得到一个（可能是虚拟/失效的）输出设备，
+     <audio> 管线因此整体失灵。允许把朗读指到指定的输出设备：
+     <audio> 走 setSinkId，AudioContext 同样走 setSinkId（Chromium 110+）。 */
+  const LS_OUTPUT = 'ww.speak.output';
+
+  function outputPref() {
+    try { return localStorage.getItem(LS_OUTPUT) || ''; } catch (e) { return ''; }
+  }
+
+  function setOutputPref(id) {
+    try {
+      if (id) localStorage.setItem(LS_OUTPUT, id);
+      else localStorage.removeItem(LS_OUTPUT);
+    } catch (e) { /* 忽略 */ }
+    // 已经活着的 AudioContext 立即跟着换设备
+    try { if (audioCtx && id && audioCtx.setSinkId) audioCtx.setSinkId(id).catch(() => {}); } catch (e) { /* 忽略 */ }
+  }
+
+  function applySink(el) {
+    const id = outputPref();
+    if (!id || !el || typeof el.setSinkId !== 'function') return Promise.resolve();
+    return el.setSinkId(id).catch(() => { /* 设备可能已拔出，按默认走 */ });
+  }
+
+  function ensureAudioCtx() {
+    if (!audioCtx) {
+      const AC = window.AudioContext || window.webkitAudioContext;
+      if (!AC) return null;
+      try { audioCtx = new AC(); } catch (e) { return null; }
+    }
+    try { if (audioCtx.state === 'suspended') audioCtx.resume(); } catch (e) { /* 忽略 */ }
+    applySink(audioCtx);
+    return audioCtx;
+  }
+
+  function dataUriToBuffer(dataUri) {
+    const b64 = String(dataUri || '').split(',')[1] || '';
+    const bin = atob(b64);
+    const u8 = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) u8[i] = bin.charCodeAt(i);
+    return u8.buffer;
+  }
+
+  /** 用 WebAudio 播一段 data URI 音频。返回 Promise<boolean>（true = 已接手）。 */
+  function playViaWebAudio(dataUri, anchor) {
+    const ac = ensureAudioCtx();
+    if (!ac || !ac.decodeAudioData) return Promise.resolve(false);
+    let bytes;
+    try { bytes = dataUriToBuffer(dataUri); } catch (e) { return Promise.resolve(false); }
+    return ac.decodeAudioData(bytes).then((audioBuf) => {
+      return new Promise((resolve) => {
+        let src;
+        try {
+          src = ac.createBufferSource();
+          src.buffer = audioBuf;
+          src.connect(ac.destination);
+        } catch (e) { resolve(false); return; }
+        webAudioSrc = src;
+        src.onended = () => {
+          speaking = false;
+          if (webAudioSrc === src) webAudioSrc = null;
+          resolve(true);
+        };
+        try { src.start(); } catch (e) {
+          speaking = false;
+          if (webAudioSrc === src) webAudioSrc = null;
+          resolve(false);
+        }
+      });
+    }).catch(() => Promise.resolve(false));
+  }
+
+
   /* ---------------- 语音健康（常驻状态，不再一闪而过） ----------------
 
      用户原话：「点试听时下面有红色提示……太快了没看清，感觉这个要在语音模块提示」。
@@ -436,14 +522,30 @@ const Speak = (() => {
         notifyVoice('local', res.voice || '', text, anchor);
         audioEl.onended = () => { speaking = false; };
         audioEl.onerror = () => { speaking = false; };
-        const p = audioEl.play();
+        // 先把输出指到选定设备（如有）再开播 —— setSinkId 完成后才 play
+        const p = Promise.resolve(applySink(audioEl)).then(() => audioEl.play());
         if (p && p.catch) {
-          return p.then(() => { healthOk(); return true; }).catch((err) => {
-            speaking = false;
-            // ★ 不再静默：合成明明成功了，播不出来必须让用户知道为什么
-            reportPlayError(err, anchor);
-            return false;
-          });
+          // ★ 有些 Windows 环境的 WebView2 播放管线整体失灵：play() 对任何
+          //   来源都抛 NotSupportedError，甚至**永久挂起**（实测机器：能解码、
+          //   不能开播，连 188 字节标准 PCM 都失败）。等 3 秒不结算就视为
+          //   管线故障，降级到 WebAudio 播放（实测可用）。
+          const stalled = new Promise((r) => setTimeout(() => r({ __stalled: true }), 3000));
+          return Promise.race([p.then(() => ({ ok: true })).catch((err) => ({ err })), stalled])
+            .then((got) => {
+              if (got && got.ok) { healthOk(); return true; }
+              if (got && got.__stalled) {
+                try { audioEl.pause(); } catch (e) { /* 忽略 */ }
+              }
+              const err = (got && got.err) || { name: 'NotSupportedError', message: 'play() 挂起' };
+              speaking = false;
+              // ★ 播放管线故障 ≠ 音频损坏 —— 字节已经被 WebAudio 完整解码
+              //   验证过（实测 duration 精确）。先试 WebAudio，真发不出声才报错。
+              return playViaWebAudio(res.audio, anchor).then((ok) => {
+                if (ok) { healthOk(); return true; }
+                reportPlayError(err, anchor);
+                return false;
+              });
+            });
         }
         healthOk();
         return true;
@@ -485,6 +587,7 @@ const Speak = (() => {
     //   Piper 冷启动合成要 3~10 秒，等到能 play() 时手势早过期了，
     //   Chromium 会以 NotAllowedError 拒绝 —— 「合成成功却没声音」的主因。
     unlockAudio();
+    ensureAudioCtx();   // WebAudio 兜底通道也要在手势内创建/恢复
     stop();
     currentKey = key;
     lastKey = key;
@@ -655,6 +758,7 @@ const Speak = (() => {
     try {
       if (audioEl) { audioEl.pause(); audioEl.currentTime = 0; }
     } catch (e) { /* 忽略 */ }
+    try { if (webAudioSrc) { webAudioSrc.stop(); webAudioSrc = null; } } catch (e) { /* 忽略 */ }
     try { window.speechSynthesis && window.speechSynthesis.cancel(); } catch (e) { /* 忽略 */ }
     try { if (window.WW && window.WW.voiceTipHide) window.WW.voiceTipHide(); } catch (e) { /* 忽略 */ }
   }
@@ -767,6 +871,8 @@ const Speak = (() => {
   return {
     speak, speakText, preview, stop, resolve, btnHtml, bindDelegate, bcp47,
     playUrl, playTts, voices, availableLang,
+    playViaWebAudio,   // 导出：冒烟测试直接断言 WebAudio 兜底
+    outputPref, setOutputPref,   // 导出：朗读输出设备偏好（设置页读写）
     voicePref, setVoicePref, ratePref, setRatePref, resetPrefs,
     enginePref, setEnginePref, setLocalReady, isLocalReady, playLocalTts,
     // 本地语音门面：切换 / 同步 / 读取当前生效的语音包
