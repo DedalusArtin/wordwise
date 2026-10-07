@@ -585,14 +585,23 @@ pub fn run_app() {
     {
         builder = builder.on_window_event(|window, event| match event {
             WindowEvent::CloseRequested { api, .. } if window.label() == MAIN_LABEL => {
-                api.prevent_close();
-                let _ = window.hide();
-
-                // 仅当用户开启了侧边栏常驻时才自动唤出，避免突兀弹出
+                // ★ 关闭行为必须在这里也尊重「关闭时缩小到托盘」开关——
+                //   此前这里无条件隐藏，Alt+F4 / 任务栏关闭永远缩托盘，
+                //   设置里的开关形同虚设（只有自绘 X 按钮那条路认开关）。
                 let state = window.app_handle().state::<Arc<AppState>>();
-                let keep_sidebar = state.cfg().sidebar_always_on_top;
-                if keep_sidebar {
-                    let _ = sidebar_show(window.app_handle().clone());
+                if state.cfg().study.close_to_tray {
+                    api.prevent_close();
+                    let _ = window.hide();
+
+                    // 仅当用户开启了侧边栏常驻时才自动唤出，避免突兀弹出
+                    let keep_sidebar = state.cfg().sidebar_always_on_top;
+                    if keep_sidebar {
+                        let _ = sidebar_show(window.app_handle().clone());
+                    }
+                } else {
+                    // 直接退出：与自绘 X 的「退出」同一出口（托盘注销、子进程回收）
+                    api.prevent_close();
+                    window.app_handle().exit(0);
                 }
             }
             _ => {}

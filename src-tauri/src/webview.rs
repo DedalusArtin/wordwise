@@ -59,12 +59,37 @@ pub fn open_in_app(app: &AppHandle, url: &str) -> Result<(), String> {
     // （不调 `decorations(false)`），这样自带最小化 / 最大化 / 关闭按钮，
     // 不必再自绘一套 —— 主窗口那套自绘边框是为了贴合应用 UI，
     // 而浏览窗口装的是别人家的页面，系统标题栏更合适。
+    //
+    // ★ 数据目录隔离：浏览窗口用**独立**的数据目录 → WebView2 会为它起
+    //   **独立的浏览器进程**，重页面的 JS / 渲染压力不再与主窗口共享同一
+    //   进程 —— 这是「软件内浏览器卡死风险」的治本项；顺带 cookie 与主应用
+    //   完全隔离（各自持久化，互不干扰）。
+    let data_dir = app
+        .path()
+        .app_data_dir()
+        .map(|d| d.join("webview-browser"))
+        .unwrap_or_else(|_| std::env::temp_dir().join("wordwise-browser"));
+
     WebviewWindowBuilder::new(app, WEBVIEW_LABEL, WebviewUrl::External(parsed))
         .title(&host)
         .inner_size(1100.0, 820.0)
         .min_inner_size(640.0, 480.0)
         .resizable(true)
         .visible(true)
+        .data_directory(data_dir)
+        // 导航守卫：只放行 http(s)/about。file:/javascript: 等非常规 scheme
+        // 一律拦下 —— 防误导航，也少一类把 webview 拖死的路径。
+        .on_navigation(|url| matches!(url.scheme(), "http" | "https" | "about"))
+        // 加载反馈：开新页时标题给出「加载中…」，完成后显示站点 ——
+        // 不再是一块一动不动、让人以为卡死的白板。
+        .on_page_load(|win, payload| match payload.event() {
+            tauri::webview::PageLoadEvent::Started => {
+                let _ = win.set_title("加载中…");
+            }
+            tauri::webview::PageLoadEvent::Finished => {
+                let _ = win.set_title(payload.url().host_str().unwrap_or("网页浏览"));
+            }
+        })
         .build()
         .map_err(|e| format!("创建浏览窗口失败：{e}"))?;
 

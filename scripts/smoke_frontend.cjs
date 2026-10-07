@@ -3068,6 +3068,25 @@ const cases = [
     return '试听随语音语言 + enrich_now 现场补全 + 义项展开';
   }],
 
+  // ---- 托盘开关必须两条关闭路径都认 + 应用内浏览器进程隔离 ----
+  ['关闭行为：系统关闭与自绘 X 都认开关；应用内浏览器独立进程', () => {
+    const win = fs.readFileSync(path.join(ROOT, 'src-tauri/src/windows.rs'), 'utf8');
+    const appjs = fs.readFileSync(path.join(ROOT, 'src/js/app.js'), 'utf8');
+    const wv = fs.readFileSync(path.join(ROOT, 'src-tauri/src/webview.rs'), 'utf8');
+    // 系统关闭路径：CloseRequested 里必须按开关分流，而不是无条件隐藏
+    if (/WindowEvent::CloseRequested \{ api, \.\. \} if window\.label\(\) == MAIN_LABEL => \{\s*api\.prevent_close\(\);\s*let _ = window\.hide\(\);/.test(win))
+      throw new Error('系统关闭仍无条件隐藏（无视 close_to_tray 开关）');
+    if (!/state\.cfg\(\)\.study\.close_to_tray/.test(win)) throw new Error('系统关闭没有读开关');
+    // 自绘 X：点击时现读配置（不能拿启动缓存）
+    if (!/getElementById\('btn-close-win'\)\?\.addEventListener\('click', async/.test(appjs))
+      throw new Error('关闭按钮没有现读配置');
+    // 应用内浏览器：独立数据目录（独立进程）+ 导航守卫 + 加载反馈
+    if (!/data_directory/.test(wv)) throw new Error('浏览窗口缺独立数据目录（进程隔离）');
+    if (!/on_navigation/.test(wv)) throw new Error('浏览窗口缺导航守卫');
+    if (!/on_page_load/.test(wv)) throw new Error('浏览窗口缺加载反馈');
+    return '关闭双路径认开关 + 浏览器进程隔离与导航守卫';
+  }],
+
   // ---- 外部链接：默认在软件内打开，设置里可关；更新下载永远走系统浏览器 ----
   ['链接：命令层分流 + 更新下载强制外部', async () => {
     const rs = fs.readFileSync(path.join(ROOT, 'src-tauri/src/commands/mod.rs'), 'utf8');
