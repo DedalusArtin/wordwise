@@ -66,3 +66,6 @@ installer/build_iss.bat
 # 需要本地复现「带引擎的便携包」时，把引擎解压到 vendor\llama 即可
 # （llama-server.exe + 若干 .dll，来源见 build.ps1 里的 engine 说明）。
 /vendor/
+
+# 会话工作区（任务清单、项目记忆日志等）。属于本机协作产物，不进仓库。
+/.workbuddy/
