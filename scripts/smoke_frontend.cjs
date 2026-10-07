@@ -2838,6 +2838,7 @@ const cases = [
     const sp = fs.readFileSync(path.join(ROOT, 'src/js/speak.js'), 'utf8');
     const models = fs.readFileSync(path.join(ROOT, 'src-tauri/src/models.rs'), 'utf8');
     const llm = fs.readFileSync(path.join(ROOT, 'src-tauri/src/commands/localllm.rs'), 'utf8');
+    const css = fs.readFileSync(path.join(ROOT, 'src/css/app.css'), 'utf8');
 
     // 日志基础设施：环形缓冲 + 文件轮转 + 分析规则
     if (!/RING_CAP/.test(lg) || !/MAX_FILE_BYTES/.test(lg)) throw new Error('日志基础设施不完整');
@@ -2850,14 +2851,141 @@ const cases = [
     // 前端错误上报（诊断数据源）
     if (!/unhandledrejection/.test(appjs)) throw new Error('缺全局错误上报');
     if (!/API\.logWrite\('error', '\[tts\]/.test(sp)) throw new Error('朗读失败没有落日志');
-    // 设置页分组手风琴
+    // 设置页分组手风琴（行为级回归另有专条：手风琴必须真的搬面板）
     if (!/SETTINGS_GROUPS/.test(setjs)) throw new Error('缺分组定义');
     if (!/settings-group-head/.test(setjs)) throw new Error('缺组头');
+    // 「折叠了之后什么都没了」事故的根因模式，逐条钉死：
+    if (!/querySelector\('\.settings-cols'\)/.test(setjs))
+      throw new Error('手风琴没有从 .settings-cols 收集面板（面板不是 page 的直接子元素，会收集不到）');
+    if (/page\.innerHTML\s*=\s*''/.test(setjs))
+      throw new Error('settings.js 禁止 page.innerHTML 清空（会把页头与保存按钮一起弄丢）');
+    if (!/'本地大模型一键部署'/.test(setjs))
+      throw new Error('「本地大模型一键部署」面板没进任何分组（会被清掉）');
+    if (!/makeGroup\('其他', true\)/.test(setjs))
+      throw new Error('缺孤儿面板兜底组「其他」');
+    if (!/\.settings-groups \{/.test(css))
+      throw new Error('CSS 缺分组容器 .settings-groups 样式');
     // 关闭行为
     if (!/close_to_tray: bool/.test(models)) throw new Error('配置缺 close_to_tray');
     if (!/cmd_app_exit/.test(llm) || !/appExit/.test(apijs)) throw new Error('缺退出命令');
     if (!/API\.appExit\(\)/.test(appjs)) throw new Error('关闭按钮没有按配置分流');
     return '日志三件套 + 诊断面板 + 分组手风琴 + 关闭分流';
+  }],
+
+  // ---- 设置页手风琴：行为级回归（「折叠了之后什么都没了」事故） ----
+  // 用迷你 DOM 真跑 setupPanelFolds：面板必须真的搬进分组、页头与保存按钮
+  // 必须保留、孤儿面板必须进「其他」、开合必须写 localStorage、重复调用 no-op。
+  ['设置手风琴：面板真的搬进分组，页头与孤儿面板不丢，开合可持久化', () => {
+    function miniEl(tag, cls) {
+      const el = { tagName: tag, children: [], parentNode: null, textContent: '', attrs: {}, listeners: {} };
+      const cl = { _set: new Set(String(cls || '').split(/\s+/).filter(Boolean)) };
+      const sync = () => { el._cls = [...cl._set].join(' '); };
+      cl.add = (c) => { cl._set.add(c); sync(); };
+      cl.remove = (c) => { cl._set.delete(c); sync(); };
+      cl.toggle = (c, on) => { const want = on === undefined ? !cl._set.has(c) : !!on; if (want) cl.add(c); else cl.remove(c); };
+      cl.contains = (c) => cl._set.has(c);
+      sync();
+      Object.defineProperty(el, 'className', {
+        get() { return el._cls || ''; },
+        set(v) { cl._set = new Set(String(v || '').split(/\s+/).filter(Boolean)); el._cls = [...cl._set].join(' '); },
+      });
+      el.classList = cl;
+      el.setAttribute = (k, v) => { el.attrs[k] = v; };
+      el.getAttribute = (k) => (el.attrs[k] === undefined ? null : el.attrs[k]);
+      el.addEventListener = (t2, fn) => { (el.listeners[t2] = el.listeners[t2] || []).push(fn); };
+      el.appendChild = (ch) => { ch.parentNode = el; el.children.push(ch); return ch; };
+      el.replaceChild = (nw, old) => {
+        const i = el.children.indexOf(old);
+        if (i >= 0) { nw.parentNode = el; el.children.splice(i, 1, nw); }
+        return old;
+      };
+      el.matches = (sel) => {
+        const c = String(sel).startsWith('.') ? sel.slice(1) : '';
+        return !!c && (' ' + (el.className || '') + ' ').includes(' ' + c + ' ');
+      };
+      el.querySelectorAll = (sel) => {
+        sel = String(sel);
+        if (sel.startsWith(':scope > ')) {
+          const c = sel.slice(9);
+          return el.children.filter((ch) => ch.matches && ch.matches(c));
+        }
+        const out = [];
+        const walk = (n) => { n.children.forEach((ch) => { if (ch.matches(sel)) out.push(ch); walk(ch); }); };
+        walk(el);
+        return out;
+      };
+      el.querySelector = (sel) => el.querySelectorAll(sel)[0] || null;
+      return el;
+    }
+    // 与 index.html 的真实设置页同构：15 个面板（含曾漏掉的本地大模型一键部署）
+    const TITLES = ['外观与主题', '记忆辅助内容', '朗读与发音', '演示模式',
+      'AI 服务（本地模型 / 在线 API）', '本地大模型一键部署', '语言', '网络与代理',
+      '词典与翻译源（可扩展小语种）', '数据库', '数据与模型的存放位置', '语言与搜索',
+      '日志诊断', '关于与更新'];
+    const page = miniEl('section', 'page');
+    page.id = 'page-settings';
+    const header = miniEl('header', 'page-head');
+    const saveBtn = miniEl('button', 'primary-btn');
+    saveBtn.id = 'btn-save-settings';
+    header.appendChild(saveBtn);
+    const cols = miniEl('div', 'two-col settings-cols');
+    const panels = TITLES.map((tt) => {
+      const p = miniEl('div', 'panel');
+      const h = miniEl('h3', 'panel-title');
+      h.textContent = tt;
+      p.appendChild(h);
+      cols.appendChild(p);
+      return p;
+    });
+    page.appendChild(header);
+    page.appendChild(cols);
+
+    const origGet = sandbox.document.getElementById;
+    const origCreate = sandbox.document.createElement;
+    sandbox.document.getElementById = (id) => (id === 'page-settings' ? page : origGet(id));
+    // 手风琴内部用 document.createElement 建组卡：测试期间同样换成 miniEl，
+    // 否则建出来的是默认 fakeEl（appendChild 是空操作、没有 matches）。
+    sandbox.document.createElement = (tag) => miniEl(tag);
+    sandbox.localStorage.clear();
+    try {
+      sandbox.Settings.setupPanelFolds();
+      if (!page.children.includes(header)) throw new Error('page-head（保存按钮）被弄丢了');
+      const wrap = page.children.find((c) => c.matches('.settings-groups'));
+      if (!wrap) throw new Error('.settings-groups 容器没有替换原网格');
+      if (page.children.includes(cols)) throw new Error('原网格还在（替换失败）');
+      // 14 个面板全部进了某个组体
+      const inBody = new Set();
+      wrap.children.forEach((g) => {
+        const body = g.children.find((c) => c.matches('.settings-group-body'));
+        if (body) body.children.forEach((p) => inBody.add(p));
+      });
+      panels.forEach((p) => { if (!inBody.has(p)) throw new Error('有面板没进任何分组'); });
+      // 面板都有主时不应出现「其他」兜底组
+      const hasOther = wrap.children.some((g) => g.children[0] && g.children[0].children[0]
+        && g.children[0].children[0].textContent === '其他');
+      if (hasOther) throw new Error('不该出现「其他」组（面板都进了既定分组）');
+      // 「数据与网络」默认收起，第一组默认展开
+      const adv = wrap.children.find((g) => g.children[0].children[0].textContent === '数据与网络');
+      if (!adv.classList.contains('collapsed')) throw new Error('「数据与网络」应默认收起');
+      if (wrap.children[0].classList.contains('collapsed')) throw new Error('第一组（通用）应默认展开');
+      // 点组头：收起 → localStorage 记录 → 再点展开
+      const head0 = wrap.children[0].children[0];
+      head0.listeners.click[0]();
+      if (!wrap.children[0].classList.contains('collapsed')) throw new Error('点击后没有收起');
+      const saved = JSON.parse(sandbox.localStorage.getItem('ww.settings.groupFold') || '{}');
+      if (saved['通用'] !== true) throw new Error('折叠状态没有写进 localStorage');
+      head0.listeners.click[0]();
+      if (wrap.children[0].classList.contains('collapsed')) throw new Error('第二次点击没有展开');
+      // 重复调用是 no-op（不会把分组再包一层）
+      sandbox.Settings.setupPanelFolds();
+      const n = page.children.filter((c) => c.matches && c.matches('.settings-groups')).length;
+      if (n !== 1) throw new Error('重复调用破坏了结构（出现 ' + n + ' 份分组容器）');
+      return '14 面板全进组 + 页头保留 + 开合持久化 + 重复调用 no-op';
+    } finally {
+      sandbox.document.getElementById = origGet;
+      sandbox.document.createElement = origCreate;
+      sandbox.localStorage.clear();
+    }
   }],
 
   // ---- 外部链接：默认在软件内打开，设置里可关；更新下载永远走系统浏览器 ----

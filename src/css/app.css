@@ -3475,6 +3475,7 @@ h1 .ver-chip { font-size: 11px; padding: 2px 8px; vertical-align: 4px; }
   transition: transform .16s ease;
 }
 .settings-group.collapsed .settings-group-head .sg-caret { transform: rotate(-90deg); }
+.settings-groups { display: block; }  /* 替换原两栏网格：组卡全宽竖向堆叠 */
 .settings-group-body { padding: 2px 20px 8px; }
 .settings-group.collapsed .settings-group-body { display: none; }
 
