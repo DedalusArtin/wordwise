@@ -192,6 +192,33 @@ pub fn cmd_enrich_status() -> serde_json::Value {
     crate::enrich::status()
 }
 
+/// 查词现场触发词条补全：本地命中但词条单薄（没音标/没释义）时，前端
+/// 立即调这里，不等后台空闲轮。完成后广播 `enrich://done` 事件，
+/// 前端据此强刷正在看的卡片。
+#[tauri::command]
+pub async fn cmd_enrich_word(
+    state: State<'_, Arc<AppState>>,
+    app: tauri::AppHandle,
+    word: String,
+    lang: String,
+) -> Result<serde_json::Value, String> {
+    let st = state.inner().clone();
+    let word = word.trim().to_string();
+    let lang = lang.trim().to_string();
+    if word.is_empty() {
+        return Err("没有可补全的词".into());
+    }
+    let ok = crate::enrich::enrich_now(&st, &word, &lang).await;
+    if ok {
+        use tauri::Emitter;
+        let _ = app.emit(
+            "enrich://done",
+            serde_json::json!({ "word": word, "lang": lang }),
+        );
+    }
+    Ok(serde_json::json!({ "enriched": ok }))
+}
+
 /// 把一条 AI 讲解**并入词库**：整理成结构化词条 → 写进 `words` 表 → 进复习队列。
 ///
 /// 这是「讲解也是一种存储」的落点：讲解从"一段聊天文字"变成"一个可背的词条"。

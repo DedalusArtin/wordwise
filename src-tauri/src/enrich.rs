@@ -109,6 +109,19 @@ async fn enrich_one(
     state.db.update_word_entry_json(word, lang, &json)
 }
 
+/// 查词现场补全：本地命中的词条如果单薄（没音标/没释义），不等后台
+/// 空闲轮，立即补一次。AI 未启用时直接返回 false（前端不等待）。
+/// 与后台循环并发安全：合并纪律「现有为准，生成垫底」保证两边同时
+/// 跑也不会互相覆盖。
+pub async fn enrich_now(state: &AppState, word: &str, lang: &str) -> bool {
+    let cfg = state.config.read().clone();
+    let llm_ready = cfg.study.ai_explain && !cfg.llm.base_url.trim().is_empty();
+    if !llm_ready {
+        return false;
+    }
+    matches!(enrich_one(state, &cfg.llm, word, lang).await, Ok(true))
+}
+
 /// 启动后台增强循环（整个应用生命周期一个任务）。
 pub fn spawn(state: Arc<AppState>) {
     // 单测等非 runtime 环境构造 AppState 时直接跳过：增强是纯增强能力，

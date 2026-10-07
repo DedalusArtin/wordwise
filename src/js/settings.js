@@ -886,7 +886,17 @@ const Settings = (() => {
     });
 
     document.getElementById('btn-speak-test')?.addEventListener('click', () => {
-      S().preview('Hello, this is how I read. 你好，这是朗读效果。', 'en');
+      // ★ 试听文案必须跟语音包语言一致：英语语音被硬灌中文，espeak 音素化
+      //   出来的就是一串噪声（实测 lessac-low 念「你好，这是朗读效果」= 破音
+      //   乱码，用户原话「音轨没对接上」）。按当前语音包的语言前缀选文案。
+      const vid = (S().localVoiceId && S().localVoiceId()) || '';
+      const lang = (vid.split('-')[0] || 'en').toLowerCase();
+      let text = 'Hello, this is how I read. Nice to meet you.';
+      let tag = 'en';
+      if (lang.startsWith('zh')) { text = '你好，这是朗读效果，很高兴认识你。'; tag = 'zh'; }
+      else if (lang.startsWith('ja')) { text = 'こんにちは、これは読み上げのテストです。'; tag = 'ja'; }
+      else if (lang.startsWith('ko')) { text = '안녕하세요, 읽기 테스트입니다.'; tag = 'ko'; }
+      S().preview(text, tag);
     });
 
     document.getElementById('btn-speak-reset')?.addEventListener('click', () => {

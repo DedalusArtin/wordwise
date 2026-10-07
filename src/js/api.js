@@ -465,6 +465,8 @@ const API = {
   ttsClearCache: () => invoke('cmd_tts_clear_cache'),
   // 后台词库内容增强的进度（AI 空闲时把单薄词条补成详解）
   enrichStatus: () => invoke('cmd_enrich_status'),
+  enrichWord: (word, lang) => invoke('cmd_enrich_word', { word, lang }),
+  onEnriched: (fn) => listen('enrich://done', fn),
   // 语音包下载进度（与更新、本地模型三条流各自独立）
   onTtsProgress: (fn) => listen('tts://progress', fn),
   onTtsDone: (fn) => listen('tts://done', fn),

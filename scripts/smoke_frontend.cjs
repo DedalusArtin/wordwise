@@ -3040,6 +3040,34 @@ const cases = [
     }
   }],
 
+  // ---- 试听文案跟随语音包语言（英语语音灌中文必然破音乱码，本机实测）----
+  // ---- + 查词现场 AI 补全（本地命中但词条单薄不等后台空闲轮） ----
+  ['朗读：试听文案跟随语音包语言；查词：单薄词条现场 AI 补全', () => {
+    const setjs = fs.readFileSync(path.join(ROOT, 'src/js/settings.js'), 'utf8');
+    const sp = fs.readFileSync(path.join(ROOT, 'src/js/speak.js'), 'utf8');
+    const lk = fs.readFileSync(path.join(ROOT, 'src/js/lookup.js'), 'utf8');
+    const ui = fs.readFileSync(path.join(ROOT, 'src/js/ui.js'), 'utf8');
+    const apijs = fs.readFileSync(path.join(ROOT, 'src/js/api.js'), 'utf8');
+    const enr = fs.readFileSync(path.join(ROOT, 'src-tauri/src/enrich.rs'), 'utf8');
+    const win = fs.readFileSync(path.join(ROOT, 'src-tauri/src/windows.rs'), 'utf8');
+    const html = fs.readFileSync(path.join(ROOT, 'src/index.html'), 'utf8');
+    // 试听：写死的中英混排文案必须消失，改为按 localVoiceId 语言前缀选文案
+    if (/Hello, this is how I read\. 你好，这是朗读效果。/.test(setjs))
+      throw new Error('试听仍是中英混排文案（英语语音念中文必破音）');
+    if (!/localVoiceId/.test(setjs)) throw new Error('试听没有跟随语音包语言');
+    // 查词现场补全链路
+    if (!/enrich_now/.test(enr)) throw new Error('enrich.rs 缺 enrich_now');
+    if (!/cmd_enrich_word/.test(win)) throw new Error('cmd_enrich_word 没有注册');
+    if (!/cmd_enrich_word/.test(apijs) || !/enrich:\/\/done/.test(apijs)) throw new Error('api.js 缺补全调用或事件');
+    if (!/maybeEnrich/.test(lk)) throw new Error('lookup 缺单薄词条触发');
+    // 释义粘连展开（tame 实测：多义挤一条用「<」分隔）
+    if (!/explodeLegacySenses/.test(ui)) throw new Error('renderEntry 缺老词条义项展开');
+    // 输出设备下拉 + 引擎偏好共用面板元素
+    if (!/id="tts-output"/.test(html)) throw new Error('朗读面板缺输出设备下拉');
+    if (!/outputPref/.test(sp)) throw new Error('speak.js 缺输出设备偏好');
+    return '试听随语音语言 + enrich_now 现场补全 + 义项展开';
+  }],
+
   // ---- 外部链接：默认在软件内打开，设置里可关；更新下载永远走系统浏览器 ----
   ['链接：命令层分流 + 更新下载强制外部', async () => {
     const rs = fs.readFileSync(path.join(ROOT, 'src-tauri/src/commands/mod.rs'), 'utf8');

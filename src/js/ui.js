@@ -195,7 +195,34 @@ function loadingHtml(text = '加载中…') {
  * @param {object} opts   { showInflections, showExamples, showRelated, showMnemonic,
  *                          showPhonetic, compactHead, tabs }
  */
+/* 部分导入词库把多个释义挤在一条里、用「<」分隔（实测 tame：
+   「adj. 驯服的，温顺的 < 沉闷的，乏味的 vt. 驯服，制服」整坨塞进一条
+   sense）。展开成独立义项，顺带把挤在中间的词性标记（vt. / n. …）
+   拆出来——卡片渲染与 AI 补全都吃结构化的 senses。 */
+function explodeLegacySenses(entry) {
+  if (!entry || !entry.senses || !entry.senses.length) return entry;
+  const hasSep = entry.senses.some((s) => /</.test(s.definition || ''));
+  if (!hasSep) return entry;
+  const POS = /^(n|v|vt|vi|adj|adv|prep|conj|pron|art|num|interj|int|aux)\.\s*/;
+  const out = [];
+  entry.senses.forEach((s) => {
+    const parts = String(s.definition || '').split(/\s*<\s*/).map((x) => x.trim()).filter(Boolean);
+    if (parts.length <= 1 && !POS.test(String(s.definition || ''))) { out.push(s); return; }
+    const list = parts.length ? parts : [String(s.definition || '')];
+    let lastPos = s.pos || '';
+    list.forEach((p0) => {
+      let p = p0;
+      const m = p.match(POS);
+      if (m) { lastPos = m[1] + '.'; p = p.slice(m[0].length).trim(); }
+      if (p) out.push({ pos: lastPos, definition: p, examples: (s.examples || []).slice(0) });
+    });
+  });
+  entry.senses = out;
+  return entry;
+}
+
 function renderEntry(entry, opts = {}) {
+  entry = explodeLegacySenses(entry);
   const o = {
     showInflections: true,
     showExamples: true,

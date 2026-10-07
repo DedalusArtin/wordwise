@@ -537,7 +537,35 @@ const Lookup = (() => {
     });
   }
 
+  // 本会话已触发过补全的词（同一个词一生只补一次，失败也不反复撞）
+  const enrichTried = new Set();
+
+  /** 本地命中但词条单薄 → 现场触发 AI 补全（后台写库，完成即广播事件）。 */
+  function maybeEnrich(res) {
+    const e = res && res.entry;
+    if (!e || !e.word) return;
+    const ph = e.phonetic || {};
+    const thin = (!String(ph.uk || '').trim() && !String(ph.us || '').trim())
+      || !(e.senses || []).length;
+    if (!thin) return;
+    const lang = e.lang || res.lang || 'en';
+    const k = String(e.word).toLowerCase() + '|' + lang;
+    if (enrichTried.has(k)) return;
+    enrichTried.add(k);
+    API.enrichWord(e.word, lang).catch(() => { /* AI 没配 / 失败：静默 */ });
+  }
+
   function bind() {
+    // 补全完成 → 正在看的词正好是被补的那个 → 强制刷新一次（绕过缓存）
+    API.onEnriched((p) => {
+      try {
+        if (p && lastResult
+          && String(p.word || '').toLowerCase() === String(lastResult.word || '').toLowerCase()) {
+          query(lastResult.word, true, { fromNav: true });
+        }
+      } catch (e) { /* 忽略 */ }
+    });
+
     const input = document.getElementById('lk-input');
     const go = document.getElementById('lk-go');
     const refresh = document.getElementById('lk-refresh');
@@ -1008,6 +1036,9 @@ const Lookup = (() => {
     }
 
     loadDictLinks(res.word, res.lang);
+
+    // 词条单薄（没音标/没释义）→ 现场触发 AI 补全；完成后事件回调强刷卡片
+    maybeEnrich(res);
 
     // 词级译文（需求 2）：与词典查询并行，不阻塞上面已经画好的词条。
     //
