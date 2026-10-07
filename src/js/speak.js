@@ -534,11 +534,19 @@ const Speak = (() => {
   }
 
   // 预加载语音列表（部分引擎首次 getVoices 为空，需要等 voiceschanged）
+  //
+  // ★ 用 addEventListener 而不是给 `onvoiceschanged` 赋值：后者是**单槽位**
+  //   属性，设置页也用同一招刷新下拉，两边会互相覆盖 —— 谁后绑定谁生效，
+  //   另一个就永远收不到通知（设置页先绑、speak.js 后绑的话，下拉就再也没
+  //   机会刷新，表现就是「系统音色列表一直是空的 / 选了没反应」）。
   if (window.speechSynthesis) {
     try { refreshVoices(); } catch (e) { /* 忽略 */ }
     try {
-      window.speechSynthesis.onvoiceschanged = () => { refreshVoices(); };
-    } catch (e) { /* 忽略 */ }
+      window.speechSynthesis.addEventListener('voiceschanged', refreshVoices);
+    } catch (e) {
+      // 老 WebView 没有 addEventListener（非 EventTarget）→ 退回单槽位赋值
+      try { window.speechSynthesis.onvoiceschanged = refreshVoices; } catch (e2) { /* 忽略 */ }
+    }
   }
 
   return {

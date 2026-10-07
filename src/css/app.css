@@ -3432,6 +3432,46 @@ h1 .ver-chip { font-size: 11px; padding: 2px 8px; vertical-align: 4px; }
 }
 .tts-lang-group.open .tts-lang-count { background: var(--blue-soft); color: var(--blue-dark); }
 .tts-lang-body { display: flex; flex-direction: column; gap: 6px; }
+
+/* ---- 试听：钉在面板顶部 ----
+   朗读是「改一下设置 → 听一下」的循环操作。按钮原本排在面板末尾，
+   每改一次都要先滚下去点、再滚回来看设置。这里用 sticky 钉住：
+   滚动容器是 `.content`（`overflow-y: auto`），所以 top:0 会贴在内容区
+   上沿；负的左右外边距抵消 `.panel` 的内边距，让背景铺满整宽，
+   下面滚过去的内容不会从缝里透出来。
+   注意**不要**改成 absolute —— 那会让它脱离文档流并随面板滚动而移动，
+   正好是用户抱怨的「位置跳动」。 */
+.tts-topbar {
+  position: sticky; top: 0; z-index: 3;
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 12px;
+  margin: -18px -20px 12px;
+  padding: 14px 20px 10px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+}
+.tts-topbar .panel-title { margin-bottom: 0; }
+
+/* ---- 当前语音模型：钉在面板最下方右下角 ----
+   和上面同一个道理。用 sticky 而不是普通流内元素：流内元素会被
+   「展开某个语言分组」撑下去（用户原话「被挤走」），absolute 则会
+   脱流叠到别的控件上。sticky 在两种情况下都稳。 */
+.tts-footer {
+  position: sticky; bottom: 0; z-index: 3;
+  display: flex; align-items: baseline; justify-content: flex-end; gap: 8px;
+  margin: 14px -20px -18px;
+  padding: 10px 20px 14px;
+  background: var(--panel);
+  border-top: 1px solid var(--border);
+  font-size: 12px;
+}
+.tts-footer-label { color: var(--text-3); flex: none; }
+/* 模型 id / 音色名可能很长（如 en_US-amy-medium），截断而不是撑破布局 */
+.tts-footer b {
+  color: var(--text-2); font-weight: 600;
+  min-width: 0; max-width: 70%;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
 /* 没有本地语音包的语言必须**明说**，否则用户会以为软件漏做了 */
 .tts-missing {
   margin-top: 12px; padding: 10px 12px;
@@ -3465,5 +3505,12 @@ h1 .ver-chip { font-size: 11px; padding: 2px 8px; vertical-align: 4px; }
 /* 「已安装」标签：绿色系，与释义里的蓝色 tag 区分开 */
 .tag.ok {
   background: var(--green-soft); color: var(--green);
+  border-color: transparent;
+}
+
+/* 「使用中」：当前真正生效的那条语音。要和「已下载」区分开 ——
+   下载了不等于在用，用户需要一眼看出哪条在起作用。 */
+.tag.inuse {
+  background: var(--blue); color: #fff;
   border-color: transparent;
 }

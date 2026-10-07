@@ -882,8 +882,11 @@
         </div>
 
         <!-- 朗读（本地神经语音 / 在线 / 系统语音三通道） -->
-        <div class="panel">
-          <h3 class="panel-title">朗读与发音</h3>
+        <div class="panel" id="panel-speak">
+          <div class="tts-topbar">
+            <h3 class="panel-title">朗读与发音</h3>
+            <button class="ghost-btn sm" id="btn-speak-test">试听</button>
+          </div>
           <p class="muted">
             词典自带真人录音时<b>永远优先播录音</b>。没有录音时按下面选的引擎合成：
             <b>本地神经语音</b>离线可用、音质接近微软 Neural，需先下载语音包；
@@ -927,11 +930,16 @@
             <span class="muted" id="set-speak-rate-val">0.95×</span>
           </div>
           <div class="option-row">
-            <button class="ghost-btn sm" id="btn-speak-test">试听</button>
             <button class="ghost-btn sm" id="btn-tts-clear-cache">清理语音缓存</button>
             <button class="ghost-btn sm" id="btn-speak-reset">恢复默认</button>
           </div>
           <p class="muted" id="set-speak-voices-hint"></p>
+
+          <!-- 当前语音模型：钉在面板最下方右下角，不随内容展开收起而移动 -->
+          <div class="tts-footer" id="tts-footer">
+            <span class="tts-footer-label">当前语音模型</span>
+            <b id="tts-current-model">—</b>
+          </div>
         </div>
 
         <!-- 演示模式（需求 3） -->

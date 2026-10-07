@@ -2649,18 +2649,33 @@ const cases = [
     const counts = (html.match(/class="tts-lang-count"/g) || []).length;
     if (counts !== groups.length) throw new Error('折叠态下必须保留「已装/总数」摘要');
 
-    // 折叠的组内容容器必须真的带 hidden，否则等于没折叠
-    const hiddenBodies = (html.match(/class="tts-lang-body" hidden/g) || []).length;
+    // 折叠的组内容容器必须真的藏起来。
+    //
+    // ★ 必须用 `.hidden` **class**，不能用 `hidden` **属性**：
+    //   `.tts-lang-body { display: flex }` 是作者样式，会盖掉浏览器给
+    //   `[hidden]` 的默认 `display: none`（作者样式优先于 UA 样式），
+    //   属性写法等于没写 —— 这正是用户截图里「箭头明明是收起态 ▸、
+    //   内容却全露着」的成因。
+    const hiddenBodies = (html.match(/class="tts-lang-body hidden"/g) || []).length;
     if (hiddenBodies !== groups.length - opens) {
-      throw new Error(`隐藏的内容容器数应为 ${groups.length - opens}，实际 ${hiddenBodies}`);
+      throw new Error(`折叠的内容容器应带 .hidden class，应为 ${groups.length - opens} 个，实际 ${hiddenBodies}`);
+    }
+    if (/class="tts-lang-body" hidden/.test(html)) {
+      throw new Error('用了 hidden 属性：会被 .tts-lang-body{display:flex} 盖掉，等于没折叠');
     }
     const openMark = (html.match(/<div class="tts-lang-group open"/g) || []).length;
     if (openMark !== opens) throw new Error('展开的组缺 open 标记，样式组挂不上');
 
     // 点击处理必须就地改 DOM 且不触发重渲染（重渲染会丢焦点，连按会失效）
     const src = fs.readFileSync(path.join(ROOT, 'src/js/settings.js'), 'utf8');
-    if (!/ttsLangOpen\.set\(lang, next\)/.test(src)) throw new Error('折叠状态没有被记住');
-    if (!/body\.hidden = !next/.test(src)) throw new Error('折叠没有就地切换显隐');
+    if (!/ttsLangOpen\.set\(lang, open\)/.test(src)) throw new Error('折叠状态没有被记住');
+    if (!/classList\.toggle\('hidden', !open\)/.test(src)) {
+      throw new Error('折叠没有就地切换显隐（必须走 .hidden class）');
+    }
+    // 负向守卫：`.hidden = ` 这种属性写法一旦回来，折叠立刻失效
+    if (/\.hidden\s*=\s*[^=]/.test(src)) {
+      throw new Error('又用回了 hidden 属性：它会被作者样式盖掉，折叠点了不生效');
+    }
     return `${groups.length} 组，默认展开 1 组`;
   }],
 
@@ -2686,6 +2701,83 @@ const cases = [
     if (!/hintMissingVoice/.test(sp)) throw new Error('无音色可用时没有任何提示');
     if (!/missingVoiceWarned/.test(sp)) throw new Error('缺音色提示没有做同会话去重');
     return '缺语言 + 安装路径 + 无音色如实上报';
+  }],
+
+  // ---- 语音包：下载完要能「选中生效」 ----
+  //
+  // 现场：用户下了几十 MB 的语音包，界面上却只有一个「已下载」标签，
+  // 没有任何地方能把它选成「当前使用」的那条 —— 后端只能自己按语言猜，
+  // 装了多条时用户无从选择。下载了 ≠ 在用，这两件事要能分别看出来。
+  ['设置：语音包下载后能选中生效', async () => {
+    const src = fs.readFileSync(path.join(ROOT, 'src/js/settings.js'), 'utf8');
+    if (!/data-tts-use=/.test(src)) throw new Error('已安装的语音包没有「使用」入口');
+    if (!/class="tag inuse"/.test(src)) throw new Error('看不出哪条正在使用');
+    if (!/voice_local: id/.test(src)) throw new Error('切换语音没有写回后端配置');
+    if (!/if \(!ttsCurrentVoice\)/.test(src)) throw new Error('下载完没有自动接管（下了却还用不上）');
+    // 删掉的正好是「使用中」那条时，要把指向它的配置一起清掉，
+    // 否则留下一个指向不存在文件的 voice_local，每次朗读都先失败再回退。
+    if (!/ttsCurrentVoice === id/.test(src)) throw new Error('删除使用中的语音后没有清配置');
+    return '使用入口 + 使用中标记 + 下载后自动应用 + 删除时清配置';
+  }],
+
+  // ---- 系统音色：刷新不许打断用户的选择 ----
+  //
+  // 现场：「系统音色选不了」。两个原因叠加 ——
+  //   ① `onvoiceschanged` 是**单槽位属性**，设置页与 speak.js 都用它，
+  //      互相覆盖，谁后绑定谁生效；
+  //   ② 每次刷新都重建 innerHTML，把用户正在展开 / 正在选的下拉打断，
+  //      选完立刻被抹掉，看起来就是「点了没反应」。
+  ['设置：系统音色的刷新不许打断选择', async () => {
+    const src = fs.readFileSync(path.join(ROOT, 'src/js/settings.js'), 'utf8');
+    const sp = fs.readFileSync(path.join(ROOT, 'src/js/speak.js'), 'utf8');
+
+    if (!/addEventListener\('voiceschanged'/.test(src)) {
+      throw new Error('设置页没有用事件监听（会与 speak.js 互相覆盖）');
+    }
+    if (!/addEventListener\('voiceschanged'/.test(sp)) {
+      throw new Error('speak.js 没有用事件监听');
+    }
+    // 旧写法就是箭头函数直接赋值 —— 兜底分支里的 `= onVoices` 不算
+    if (/onvoiceschanged\s*=\s*\(\)\s*=>/.test(src) || /onvoiceschanged\s*=\s*\(\)\s*=>/.test(sp)) {
+      throw new Error('又出现 onvoiceschanged 属性赋值（单槽位，会互相覆盖）');
+    }
+    if (!/syncVoiceSelection/.test(src)) throw new Error('没有单独同步选中项');
+    if (!/sig === speakVoicesSig/.test(src)) throw new Error('清单没变时仍会重建下拉');
+    if (!/list\.length\) \{ renderSpeakVoices\(true\); return; \}/.test(src)) {
+      throw new Error('音色首次读不到时没有重试（下拉会永久停在「未提供可用语音」）');
+    }
+    return 'addEventListener + 指纹比对 + 选中态同步 + 空列表重试';
+  }],
+
+  // ---- 布局：试听钉顶部、当前语音模型钉右下角 ----
+  //
+  // 现场：试听按钮排在面板最末尾，改一次设置要滚下去点、再滚回来看设置；
+  // 模型名会被展开的语音包分组顶下去（用户原话「被挤走」）。
+  ['样式：试听钉顶部、当前语音模型钉右下角', async () => {
+    const html = fs.readFileSync(path.join(ROOT, 'src/index.html'), 'utf8');
+    const css = fs.readFileSync(path.join(ROOT, 'src/css/app.css'), 'utf8');
+
+    if (!/id="btn-speak-test"/.test(html)) throw new Error('试听按钮丢了');
+    if (!/tts-topbar[\s\S]{0,220}id="btn-speak-test"/.test(html)) {
+      throw new Error('试听不在顶部固定条里');
+    }
+    if (!/id="tts-current-model"/.test(html)) throw new Error('缺「当前语音模型」节点');
+    if (!/id="tts-footer"/.test(html)) throw new Error('缺右下角的固定容器');
+
+    const top = css.match(/\.tts-topbar\s*\{([^}]*)\}/);
+    if (!top || !/position:\s*sticky/.test(top[1])) throw new Error('tts-topbar 没有 sticky');
+    if (!/top:\s*0/.test(top[1])) throw new Error('tts-topbar 没有钉在顶部');
+
+    const foot = css.match(/\.tts-footer\s*\{([^}]*)\}/);
+    if (!foot || !/position:\s*sticky/.test(foot[1])) throw new Error('tts-footer 没有 sticky');
+    if (!/bottom:\s*0/.test(foot[1])) throw new Error('tts-footer 没有钉在底部');
+    if (!/justify-content:\s*flex-end/.test(foot[1])) throw new Error('模型名没有靠右下角');
+
+    // 两个固定条都不能脱流：absolute 会叠到别的控件上，并随内容滚动而移动
+    if (/\.tts-(?:topbar|footer)\s*\{[^}]*position:\s*absolute/.test(css)) {
+      throw new Error('固定条不能用 absolute：会脱流并随内容移动');
+    }
+    return '试听 sticky top + 模型名 sticky bottom 右对齐';
   }],
 
   // ---- 词条语言：列 lang 与 entry_json 里的 lang 必须同源 ----

@@ -718,23 +718,95 @@ const Settings = (() => {
    * （引擎异步加载），所以这里在 `voiceschanged` 时再刷一次；一直为空就
    * 如实告诉用户「系统里没装语音包」，而不是给一个永远空的下拉。
    */
-  function renderSpeakVoices() {
+  /** 上次渲染的音色清单指纹；用来判断「列表真的变了没」。 */
+  let speakVoicesSig = null;
+  /** 上次渲染用的那个 `<select>` 元素。 */
+  let speakVoicesFor = null;
+  /** 音色迟迟读不到时的重试定时器。 */
+  let speakVoicesTimer = null;
+
+  /** 音色清单的指纹（语言 + 名字）。 */
+  function voiceSignature(list) {
+    return list.map(v => `${v.lang}|${v.name}`).join('\n');
+  }
+
+  /**
+   * 让下拉的选中项跟用户偏好对齐。
+   *
+   * 单独抽出来是因为两个时机都要跑：重建之后、以及「列表没变、只同步不重建」。
+   * `sel.value` 指向已不存在的 option 时浏览器会把它变成空串 —— 这种情况下
+   * 顺手把过期的偏好清掉，免得每次进设置页都白找一遍。
+   */
+  function syncVoiceSelection() {
+    const sel = document.getElementById('set-speak-voice');
+    if (!sel) return;
+    const S = window.Speak;
+    const pref = (S && S.voicePref) ? S.voicePref() : '';
+    const want = pref.includes('|') ? pref : '';
+    if (sel.value !== want) sel.value = want;
+    if (want && sel.value !== want && S && S.setVoicePref) S.setVoicePref('', '');
+  }
+
+  /**
+   * 音色列表为空时的有限重试。
+   *
+   * WebView2 首次 `getVoices()` 常返回空数组（语音引擎在后台加载），而且
+   * **不保证**之后一定会触发 voiceschanged。没有这个重试，下拉就永久停在
+   * 「（系统未提供可用语音）」—— 用户看到的就是「系统音色根本没法选」。
+   */
+  function retrySpeakVoices(times) {
+    clearTimeout(speakVoicesTimer);
+    const left = typeof times === 'number' ? times : 10;
+    if (left <= 0) return;
+    speakVoicesTimer = setTimeout(() => {
+      const S = window.Speak;
+      const list = (S && S.voices) ? S.voices() : [];
+      if (list.length) { renderSpeakVoices(true); return; }
+      retrySpeakVoices(left - 1);
+    }, 400);
+  }
+
+  /**
+   * 填充音色下拉。
+   *
+   * @param {boolean} [force] 清单没变时也强制重建（列表从空变为有值时用）
+   */
+  function renderSpeakVoices(force) {
     const sel = document.getElementById('set-speak-voice');
     if (!sel) return;
     const S = window.Speak;
     const list = (S && S.voices) ? S.voices() : [];
-    const pref = (S && S.voicePref) ? S.voicePref() : '';
-    const prefName = pref.includes('|') ? pref.slice(pref.indexOf('|') + 1) : '';
 
     if (!list.length) {
-      sel.innerHTML = '<option value="">（系统未提供可用语音）</option>';
+      // 只在「上一次不是空」时写一次；反复重建会打断用户正在操作的下拉
+      if (speakVoicesSig !== '') {
+        speakVoicesSig = '';
+        sel.innerHTML = '<option value="">（系统未提供可用语音）</option>';
+      }
       const hint = document.getElementById('set-speak-voices-hint');
       if (hint) {
         hint.textContent = '这台机器上暂时读不到系统语音。可在「Windows 设置 → 时间和语言 → 语音」'
           + '安装语音包后重开本程序；朗读按钮届时会自动可用。';
       }
+      retrySpeakVoices();
       return;
     }
+
+    const sig = voiceSignature(list);
+    // ★ 清单没变、且下拉还是**同一个元素**时，只同步选中项，绝不重建
+    //   innerHTML。重建会把用户正在展开 / 正在选择的下拉瞬间打断 ——
+    //   表现就是「点了没反应」「选完又弹回去」。voiceschanged 在部分
+    //   WebView 里触发得相当频繁，每次重建都等于把用户刚做的选择抹掉一次。
+    //
+    //   还要比元素引用：只比签名的话，DOM 若被整体换过（如切换界面语言
+    //   重建页面），`sel` 是个全新的空下拉，而签名还停在旧值上 ——
+    //   跳过重建就会留下一个永远空着的下拉。
+    if (!force && sig === speakVoicesSig && speakVoicesFor === sel) {
+      syncVoiceSelection();
+      return;
+    }
+    speakVoicesSig = sig;
+    speakVoicesFor = sel;
 
     // 按语言分组，方便在几十个音色里找
     const byLang = {};
@@ -742,9 +814,11 @@ const Settings = (() => {
     const langs = Object.keys(byLang).sort();
     sel.innerHTML = '<option value="">自动（按语言挑最好的音色）</option>'
       + langs.map(l => `<optgroup label="${U().esc(l)}">`
-        + byLang[l].map(v => `<option value="${U().esc(v.lang + '|' + v.name)}"${v.name === prefName ? ' selected' : ''}>`
+        + byLang[l].map(v => `<option value="${U().esc(v.lang + '|' + v.name)}">`
           + `${U().esc(v.name)}${v.local ? '' : '（在线）'}</option>`).join('')
         + '</optgroup>').join('');
+    // 选中态统一由 syncVoiceSelection 落，避免两处各写一份判断
+    syncVoiceSelection();
 
     // ---- 提示语：不说「检测到 N 个」这种没有信息量的废话 ----
     //
@@ -792,6 +866,8 @@ const Settings = (() => {
       const i = v.indexOf('|');
       if (i > 0) S().setVoicePref(v.slice(0, i), v.slice(i + 1));
       else S().setVoicePref('', '');
+      // 底部「当前语音模型」跟着一起变，用户不用离开这一屏就能确认选上了
+      renderTtsFooter();
       U().toast('音色已保存，点「试听」确认', 'ok');
     });
 
@@ -817,11 +893,18 @@ const Settings = (() => {
       U().toast('朗读设置已恢复默认', 'ok');
     });
 
-    // 引擎异步加载完音色后会触发一次（首次进设置页常常还没就绪）
+    // 引擎异步加载完音色后会触发（首次进设置页常常还没就绪）。
+    //
+    // ★ 用 addEventListener 而不是给 `onvoiceschanged` 赋值：那是**单槽位**
+    //   属性，speak.js 也在用同一招做预加载，两边互相覆盖 —— 谁后绑定谁生效，
+    //   另一个就永远收不到通知。用事件监听才能两边都收到。
     if (window.speechSynthesis) {
+      const onVoices = () => renderSpeakVoices();
       try {
-        window.speechSynthesis.onvoiceschanged = () => renderSpeakVoices();
-      } catch (e) { /* 忽略 */ }
+        window.speechSynthesis.addEventListener('voiceschanged', onVoices);
+      } catch (e) {
+        try { window.speechSynthesis.onvoiceschanged = onVoices; } catch (e2) { /* 忽略 */ }
+      }
     }
   }
 
@@ -835,6 +918,8 @@ const Settings = (() => {
   */
   let ttsProgressUnlisten = null;
   let ttsRateTimer = null;
+  /** 「当前语音」订阅的退订函数（只订一次，面板反复进出不叠加）。 */
+  let ttsVoiceUnsub = null;
 
   /*
     语音包按语言分组后，组一多整页就长得没法扫 —— 而且用户真正关心的
@@ -847,6 +932,19 @@ const Settings = (() => {
     会在下载完成后被合回去，看起来像界面抽风。
   */
   const ttsLangOpen = new Map();
+
+  /**
+   * 当前生效的**本地语音包 id**（后端 `cfg.tts.voice_local`）。
+   *
+   * 空串 = 后端按词条语言自动挑。这个值同时决定两件事：
+   *   · 语音包列表里哪一条显示「使用中」；
+   *   · 下载完成后要不要自动接管（见 bindTts 里下载分支）。
+   * 所以它在每次 loadTts 后都要与后端对齐，不能只信本地。
+   */
+  let ttsCurrentVoice = '';
+
+  /** id → 显示名。底部「当前语音模型」要显示人话而不是 `en_US-amy-medium`。 */
+  let ttsVoiceLabels = {};
 
   /** 当前正在学的语言：优先取 App 已加载的配置，其次看设置里的下拉。 */
   function currentStudyLang() {
@@ -880,6 +978,34 @@ const Settings = (() => {
   }
 
   function ttsEl(id) { return document.getElementById(id); }
+
+  /**
+   * 把某一组的折叠状态**同时**写进 Map 与 DOM。
+   *
+   * 状态只有 `ttsLangOpen` 这一个来源，DOM 只是它的投影 —— 这样「点击就地开合」
+   * 与「整块重渲染」不会各持一份互相打架。
+   *
+   * 之前是交互只改 DOM、渲染只读 Map，两边一旦不同步就会出现用户报的那几个
+   * 现象：点了像没反应（改的是根本不生效的 `hidden` 属性）、刚展开又被合回去
+   * （重渲染按旧 Map 画）、多个分组跟着一起变（DOM 与 Map 各说各话）。
+   *
+   * @param {Element} group `.tts-lang-group` 元素
+   * @param {string}  lang  语言代码（Map 的键）
+   * @param {boolean} open  目标状态
+   */
+  function applyLangOpen(group, lang, open) {
+    if (!group) return;
+    ttsLangOpen.set(lang, open);
+    group.classList.toggle('open', open);
+    const head = group.querySelector('.tts-lang-head');
+    if (head) head.setAttribute('aria-expanded', open ? 'true' : 'false');
+    const caret = group.querySelector('.tts-caret');
+    if (caret) caret.textContent = open ? '▾' : '▸';
+    // ★ 必须用 class：`.tts-lang-body { display: flex }` 会盖掉浏览器对
+    //   `[hidden]` 的默认 `display:none`，属性写法等于没写。
+    const body = group.querySelector('.tts-lang-body');
+    if (body) body.classList.toggle('hidden', !open);
+  }
 
   function humanSize(n) {
     const f = Number(n) || 0;
@@ -923,6 +1049,13 @@ const Settings = (() => {
 
     const installed = st.installed || [];
     const engineOk = !!st.engine_ready;
+
+    // 与后端对齐「当前生效的本地语音」。必须在下面渲染之前取 ——
+    // voiceRow 要靠它决定哪一行显示「使用中」。
+    ttsCurrentVoice = (st.config && st.config.voice_local) || '';
+    ttsVoiceLabels = {};
+    (st.voices || []).forEach(v => { ttsVoiceLabels[v.id] = v.label; });
+
     // 把「本地能不能用」同步给发音模块：不可用时 speak() 直接走系统语音，
     // 不必每次点喇叭都去后端撞一次墙再回退。
     if (window.Speak && window.Speak.setLocalReady) {
@@ -968,11 +1101,22 @@ const Settings = (() => {
       // 随包预置的那份在安装目录里，删不掉（下次覆盖安装还会回来），
       // 所以不给删除按钮，只标出来源。
       const bundled = v.source === 'bundled';
-      const act = v.installed
-        ? `<span class="tag ok">${bundled ? '随包预置' : '已下载'}</span>`
-          + (bundled ? '' : `<button class="ghost-btn xs" data-tts-remove="${U().esc(v.id)}">删除</button>`)
-        : `<button class="ghost-btn xs" data-tts-install="${U().esc(v.id)}"${engineOk ? '' : ' disabled'}>`
+      // 「使用中」= 后端正在拿它合成。下载了不等于在用 —— 这两件事必须
+      // 分开显示，否则用户会以为「下完了怎么还是系统音色」。
+      const inUse = v.installed && !!ttsCurrentVoice && v.id === ttsCurrentVoice;
+      let act;
+      if (v.installed) {
+        act = (inUse
+          ? '<span class="tag inuse">使用中</span>'
+          // 没被指定的已装语音给一个切换入口 —— 否则下载完就没法「选中生效」，
+          // 用户只能靠后端按语言自动挑，装了多条时无从选择。
+          : `<button class="ghost-btn xs" data-tts-use="${U().esc(v.id)}">使用</button>`)
+          + `<span class="tag ok">${bundled ? '随包预置' : '已下载'}</span>`
+          + (bundled ? '' : `<button class="ghost-btn xs" data-tts-remove="${U().esc(v.id)}">删除</button>`);
+      } else {
+        act = `<button class="ghost-btn xs" data-tts-install="${U().esc(v.id)}"${engineOk ? '' : ' disabled'}>`
           + `下载 ${U().esc(v.size_text || '')}</button>`;
+      }
       const meta = [
         v.accent ? String(v.accent).toUpperCase() : '',
         v.size_text || '',
@@ -982,7 +1126,7 @@ const Settings = (() => {
       const note = v.note
         ? `<span class="tts-note">${U().esc(v.note)}</span>`
         : '';
-      return `<div class="tts-voice-row">
+      return `<div class="tts-voice-row${inUse ? ' in-use' : ''}">
         <div class="tts-voice-main"><b>${U().esc(v.label)}</b><span class="muted">${U().esc(meta)}</span>${note}</div>
         <div class="tts-voice-act">${act}</div>
       </div>`;
@@ -1015,7 +1159,13 @@ const Settings = (() => {
           // 折叠时这行「已装/总数」就是唯一线索，必须留着
           `<span class="tts-lang-count">${g.inst}/${g.total}</span>` +
         '</button>' +
-        '<div class="tts-lang-body"' + (open ? '' : ' hidden') + '>'
+        // ★ 折叠态用 `.hidden` **class**，不是 `hidden` **属性**。
+        //   `.tts-lang-body { display: flex }` 是作者样式，会盖掉浏览器给
+        //   `[hidden]` 的默认 `display: none`（作者样式优先于 UA 样式），
+        //   于是「藏起来」这个动作根本不生效 —— 箭头变、内容还在，
+        //   这就是「折叠点了没反应 / 状态错乱」的根因。
+        //   本项目本来就约定用 `.hidden`（带 !important，见 app.css 顶部）。
+        '<div class="tts-lang-body' + (open ? '' : ' hidden') + '">'
           + g.list.map(voiceRow).join('') + '</div>' +
       '</div>';
     }).join('') + missingHtml)
@@ -1034,6 +1184,35 @@ const Settings = (() => {
       sel.value = e;
       if (window.Speak && window.Speak.setEnginePref) window.Speak.setEnginePref(e);
     }
+
+    // 底部「当前语音模型」跟着一起刷新（它是 sticky 的，内容变了也要改）
+    renderTtsFooter();
+  }
+
+  /**
+   * 刷新面板右下角那行「当前语音模型」。
+   *
+   * 优先级：用户指定的本地语音包 > 最近一次真正发声用的音色 > 自动。
+   * 第三个分支是必要的 —— 一条语音包都没装、也还没听过任何声音时，
+   * 显示「—」会让人以为功能坏了，如实说「自动（按语言挑选）」更准确。
+   */
+  function renderTtsFooter() {
+    const el = ttsEl('tts-current-model');
+    if (!el) return;
+    if (ttsCurrentVoice) {
+      el.textContent = ttsVoiceLabels[ttsCurrentVoice] || ttsCurrentVoice;
+      el.title = ttsCurrentVoice;   // 截断时鼠标悬停能看到完整 id
+      return;
+    }
+    const S = window.Speak;
+    const cur = (S && S.currentVoice) ? S.currentVoice() : null;
+    if (cur && cur.voice) {
+      el.textContent = S.voiceLabel(cur.engine, cur.voice);
+      el.title = el.textContent;
+      return;
+    }
+    el.textContent = '自动（按语言挑选）';
+    el.title = '';
   }
 
   function bindTts() {
@@ -1051,29 +1230,49 @@ const Settings = (() => {
     // 语音包列表是重渲染的，所以用事件委托而不是逐个绑定
     ttsEl('tts-voice-list')?.addEventListener('click', async (ev) => {
       // 分组标题：就地开合，**不重渲染** —— 重渲染会把焦点弄丢，连按几次
-      // 展开就没反应了。状态只写进 Map，供下次 loadTts() 复原。
-      const head = ev.target.closest('.tts-lang-head[data-tts-fold]');
+      // 展开就没反应了。状态由 applyLangOpen 统一落到 Map + DOM 两处。
+      const head = ev.target.closest?.('.tts-lang-head[data-tts-fold]');
       if (head) {
         const lang = head.getAttribute('data-tts-fold');
-        const nowOpen = head.getAttribute('aria-expanded') === 'true';
-        const next = !nowOpen;
-        ttsLangOpen.set(lang, next);
-        head.setAttribute('aria-expanded', next ? 'true' : 'false');
-        const caret = head.querySelector('.tts-caret');
-        if (caret) caret.textContent = next ? '▾' : '▸';
-        const body = head.parentElement && head.parentElement.querySelector('.tts-lang-body');
-        if (body) body.hidden = !next;
-        head.parentElement?.classList.toggle('open', next);
+        // 用 class 判断当前状态，与 applyLangOpen 的写入口径一致
+        const group = head.closest('.tts-lang-group');
+        const next = !(group && group.classList.contains('open'));
+        applyLangOpen(group, lang, next);
         return;
       }
 
-      const ins = ev.target.closest('[data-tts-install]');
-      const del = ev.target.closest('[data-tts-remove]');
+      // 「使用」某条已安装的语音 → 立即生效并记住
+      const use = ev.target.closest?.('[data-tts-use]');
+      if (use) {
+        const id = use.getAttribute('data-tts-use');
+        use.disabled = true;
+        try {
+          await API.setTtsPrefs({ voice_local: id });
+          ttsCurrentVoice = id;
+          U().toast('已切换本地语音，点「试听」确认', 'ok');
+        } catch (e) {
+          U().toast('切换失败：' + String((e && e.message) || e), 'err');
+        }
+        loadTts();
+        return;
+      }
+
+      const ins = ev.target.closest?.('[data-tts-install]');
+      const del = ev.target.closest?.('[data-tts-remove]');
       if (ins) {
         const id = ins.getAttribute('data-tts-install');
         ins.disabled = true;
         try {
           const r = await API.ttsInstallVoice(id);
+          // 下载完**立即应用**：用户花几十 MB 流量下的东西，就是为了让它发声。
+          // 只在「当前还没指定语音」时才自动接管 —— 他已经明确选过另一条的话，
+          // 抢过来会把用户的设置改掉。
+          if (!ttsCurrentVoice) {
+            try {
+              await API.setTtsPrefs({ voice_local: id });
+              ttsCurrentVoice = id;
+            } catch (e) { /* 接管失败不影响本次下载，用户可手动点「使用」 */ }
+          }
           U().toast((r && r.message) || '语音包已安装', 'ok');
         } catch (e) {
           U().toast('语音包下载失败：' + String((e && e.message) || e), 'err');
@@ -1084,6 +1283,14 @@ const Settings = (() => {
         const id = del.getAttribute('data-tts-remove');
         try {
           await API.ttsRemoveVoice(id);
+          // 删掉的正好是「当前使用」的那条 → 一并清掉指定，免得残留一个
+          // 指向不存在文件的 voice_local（它会让每次朗读都先失败再回退）
+          if (ttsCurrentVoice === id) {
+            try {
+              await API.setTtsPrefs({ voice_local: '' });
+              ttsCurrentVoice = '';
+            } catch (e) { /* 忽略 */ }
+          }
           U().toast('已删除语音包', 'ok');
         } catch (e) {
           U().toast('删除失败：' + String((e && e.message) || e), 'err');
@@ -1122,6 +1329,13 @@ const Settings = (() => {
         ttsShowProgress(p);
         if (p.stage === 'done' || p.stage === 'failed') setTimeout(ttsHideProgress, 1600);
       })).then((un) => { ttsProgressUnlisten = un; }).catch(() => { /* 订阅失败不影响手动下载 */ });
+    }
+
+    // 「当前语音模型」跟着实际发声实时更新 —— 用户点一次朗读就能看到
+    // 这次到底是谁念的（本地 Piper / 系统语音 / 词典录音），
+    // 不用去猜「我装的语音包生效了没」。同样只订一次。
+    if (!ttsVoiceUnsub && window.Speak && window.Speak.onVoice) {
+      ttsVoiceUnsub = window.Speak.onVoice(() => renderTtsFooter());
     }
   }
 
@@ -1179,7 +1393,10 @@ const Settings = (() => {
 
   return {
     bind, load, save,
-    renderSpeakVoices, loadSpeak, loadTts,
+    renderSpeakVoices, loadSpeak, loadTts, renderTtsFooter,
+    // 折叠状态写入函数也导出：冒烟测试要能直接断言「开合后 body 用的是
+    // `.hidden` class 而不是 `hidden` 属性」，而不是去猜 DOM 长什么样
+    applyLangOpen,
     // 预设表与识别函数也导出：冒烟测试要能直接断言「选某家带出什么地址」，
     // 而不是靠解析 DOM 里的 option 文本去猜
     presets: AI_PRESETS,
