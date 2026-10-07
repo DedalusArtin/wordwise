@@ -378,8 +378,14 @@ pub async fn cmd_tts_speak(
         cfg.tts.voice_local.clone()
     } else {
         tts::pick_voice_for_lang(&l, &a, &installed).ok_or_else(|| {
-            let lang_name = if l.trim().is_empty() { "该语言" } else { l.trim() };
-            format!("没有 {lang_name} 的本地语音包，已改用系统语音")
+            // 语言名要说人话：`en` 这种代码直接塞进提示，用户看不懂也不会
+            // 联想到「去哪儿装」。这里换成「英语」并顺带指向解决办法。
+            let lang_name = if l.trim().is_empty() {
+                "该语言".to_string()
+            } else {
+                crate::translate::lang_name(&crate::tts::lang_base(l.trim()))
+            };
+            format!("本地语音包里没有{lang_name}语音，已改用系统语音；可在「设置 → 朗读」下载对应语音包")
         })?
     };
 

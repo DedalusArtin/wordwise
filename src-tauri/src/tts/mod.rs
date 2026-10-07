@@ -388,7 +388,7 @@ pub fn spec(id: &str) -> Option<&'static VoiceSpec> {
 }
 
 /// 语言码归一化成**主语言**：`EN` / `en-US` / `en_US` → `en`。
-fn lang_base(s: &str) -> String {
+pub(crate) fn lang_base(s: &str) -> String {
     s.trim()
         .to_lowercase()
         .replace('-', "_")

@@ -178,6 +178,7 @@ const Speak = (() => {
     dict: '词典真人录音',
     local: '本地 AI 语音',   // 后端 Piper 合成的神经语音
     system: '系统语音',      // WebView speechSynthesis 兜底
+    none: '没有可用语音',    // 两条通道都凑不出音色（如实说，别假装是系统语音）
   };
   function voiceKindLabel(engine) {
     return VOICE_KIND[engine] || VOICE_KIND.system;
@@ -332,6 +333,28 @@ const Speak = (() => {
   }
 
   /**
+   * 「机器里没有这门语言的任何音色」——如实告诉用户该去哪儿补。
+   *
+   * ★ 为什么需要它：朗读是高频操作，每次失败都弹提示会把人烦死；但一次都不
+   *   说，用户就只能对着「点了喇叭没反应」干瞪眼（真实反馈：「切换 piper 却
+   *   还是系统音色」有一半是被这个沉默坑出来的 —— 其实本机一条英语音色都没有）。
+   *   所以折中：**每种语言一个会话只提醒一次**。
+   */
+  const missingVoiceWarned = new Set();
+  function hintMissingVoice(lang) {
+    const key = String(lang || 'en');
+    if (missingVoiceWarned.has(key)) return;
+    missingVoiceWarned.add(key);
+    try {
+      const U = window.WW;
+      if (!U || typeof U.toast !== 'function') return;
+      const nm = (U.langLabel && U.langLabel(key)) || key;
+      U.toast(`本机没有${nm}语音，朗读发不出声。到「设置 → 朗读」下载离线语音包（不依赖系统），`
+        + '或在 Windows「设置 → 时间和语言 → 语音」里添加系统语音。', 'err');
+    } catch (e) { /* 提示本身失败不能拖累发声 */ }
+  }
+
+  /**
    * 用 WebView 内置语音合成朗读。
    * @param {string} text
    * @param {string} lang   语言代码（en / ja / zh…）或 BCP-47
@@ -357,6 +380,19 @@ const Speak = (() => {
       // 系统语音这一路的音色是**按 tag + 打分**挑出来的，取一次就够，
       // 顺便把它报给界面（用户能看出「原来是系统语音在念」）。
       const v = pickVoice(tag);
+      if (!v) {
+        // ★ 挑不出音色时**不能**照旧报「系统语音」：那样界面写着「系统语音」、
+        //   耳朵里却一点声音都没有 —— 用户会以为朗读功能坏了（真实反馈：
+        //   「为什么切换 piper 但还是系统音色」的一半原因就在这里）。
+        //   分两种情况：清单已经加载过却没有这门语言 → 确实缺，如实告知；
+        //   清单还一次都没加载出来（引擎异步） → 不能冤枉它，照旧尝试播放。
+        if (voices().length) {
+          speaking = false;
+          notifyVoice('none', '', content, extra.anchor);
+          hintMissingVoice(lang);
+          return;
+        }
+      }
       notifyVoice('system', v ? v.name : '', content, extra.anchor);
 
       chunks.forEach((chunk, i) => {

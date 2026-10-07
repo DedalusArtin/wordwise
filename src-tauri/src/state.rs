@@ -128,6 +128,13 @@ impl AppState {
             log::warn!("词库语言修复迁移失败（不影响本次运行）：{e}");
         }
 
+        // 紧随其后：清洗「列的 lang 与 entry_json 里的 lang 不一致」的存量脏数据。
+        // 顺序不能反 —— 先由上面那步把列改到权威语言，这一步才<｜hy_place▁holder▁no▁813｜>到一个
+        // 已经正确的目标值去对齐 JSON；反过来会把 JSON 写回旧的错误语言。
+        if let Err(e) = db.repair_entry_json_langs() {
+            log::warn!("词条语言对齐失败（读取时会自行兜底）：{e}");
+        }
+
         Ok(Arc::new(Self {
             db,
             config: RwLock::new(config),

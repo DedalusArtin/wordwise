@@ -746,14 +746,33 @@ const Settings = (() => {
           + `${U().esc(v.name)}${v.local ? '' : '（在线）'}</option>`).join('')
         + '</optgroup>').join('');
 
+    // ---- 提示语：不说「检测到 N 个」这种没有信息量的废话 ----
+    //
+    // 现场：用户机器上一共 7 个音色，日语 4 个 + 中文 3 个，**一个英语的都没有**，
+    // 而他在学英语。旧文案「检测到 7 个系统音色」让人以为一切正常，于是
+    // 「点了朗读没声音 / 音色里选不到英语」就成了悬案 —— 界面既没说缺什么，
+    // 也没说去哪儿装。这里把两件事补齐：先说英语到底有没有，再给 Windows
+    // 的具体路径。
     const hint = document.getElementById('set-speak-voices-hint');
     if (hint) {
-      const natural = list.filter(v => /natural|neural|online/i.test(v.name)).length;
-      hint.textContent = `检测到 ${list.length} 个系统音色，其中 ${natural} 个是神经网络音色（更自然）。`
-        + ' 选「自动」时会优先使用神经网络音色。';
+      const base = (s) => String(s || '').toLowerCase().replace('_', '-').split('-')[0];
+      const hasBase = new Set(list.map(v => base(v.lang)));
+      const study = currentStudyLang();
+      const absent = LANG_OPTIONS.filter(([code]) => !hasBase.has(base(code)));
+
+      const parts = [];
+      if (!hasBase.has(base(study))) {
+        const nm = U().langLabel(study);
+        parts.push(`本机没有${nm}的系统语音，朗读${nm}单词时会没声音或发音不准。`);
+      }
+      if (absent.length) {
+        parts.push(`未检测到：${absent.map(([, n]) => n).join('、')}。`);
+      }
+      parts.push('到「Windows 设置 → 时间和语言 → 语音 → 添加语音」安装对应语音包，装完重开本程序即可在下拉里选择；'
+        + '也可以直接装上面的离线语音包（Piper），不依赖系统语音。');
+      hint.textContent = parts.join(' ');
     }
   }
-
   function loadSpeak() {
     const S = window.Speak;
     if (!S) return;
@@ -816,6 +835,49 @@ const Settings = (() => {
   */
   let ttsProgressUnlisten = null;
   let ttsRateTimer = null;
+
+  /*
+    语音包按语言分组后，组一多整页就长得没法扫 —— 而且用户真正关心的
+    通常只有「我**正在学**的那门语言」，其余语言是干扰（需求：加折叠）。
+
+    折叠状态按语言代码记在模块级 Map 里：
+      · 未记录 → 走默认（只展开「正在学的语言」那一组）；
+      · 用户手动点过 → 永远以用户最后一次点击为准。
+    因为下载/删除语音包都会整块重渲染，若状态只存 DOM，用户刚展开的组
+    会在下载完成后被合回去，看起来像界面抽风。
+  */
+  const ttsLangOpen = new Map();
+
+  /** 当前正在学的语言：优先取 App 已加载的配置，其次看设置里的下拉。 */
+  function currentStudyLang() {
+    try {
+      if (window.App && window.App.config && window.App.config.target_lang) {
+        return String(window.App.config.target_lang);
+      }
+    } catch (e) { /* 忽略 */ }
+    const sel = document.getElementById('set-lang');
+    return (sel && sel.value) || 'en';
+  }
+
+  /** 两个语言码是否指代同一「主语言」（en / en-US / en_US 视为同一门）。 */
+  function sameBase(a, b) {
+    const base = (s) => String(s || '').toLowerCase().replace('_', '-').split('-')[0];
+    return base(a) === base(b);
+  }
+
+  /**
+   * 本次渲染该默认展开哪一组。
+   *
+   * 规则：优先「正在学的语言」那组；**若它压根没有语音包**（e.g. 在学韩语而
+   * 清单里只有英/中），那就展开第一组 —— 否则整页只剩一排折叠标题，用户会
+   * 以为列表是空的 / 功能坏了。一次只展开一组，剩下的靠标题上的「已装/总数」
+   * 给线索。
+   */
+  function ttsDefaultOpenLang(groups) {
+    const study = currentStudyLang();
+    const hit = groups.find(g => sameBase(g.lang, study));
+    return hit ? hit.lang : (groups[0] ? groups[0].lang : '');
+  }
 
   function ttsEl(id) { return document.getElementById(id); }
 
@@ -939,14 +1001,24 @@ const Settings = (() => {
         '在设置里把「朗读引擎」设为「自动」即可。</span></div>'
       : '';
 
-    box.innerHTML = (groups.map(g =>
-      '<div class="tts-lang-group">' +
-        '<div class="tts-lang-head">' +
-          `<span class="tts-lang-name">${U().esc(U().langLabel(g.lang))}</span>` +
+    // 折叠交互：整块 `<button class="tts-lang-head">` 都能点，命中面积比
+    // 只点一个小箭头大得多 —— 这正是「看到铁就知道这门语言有没有可装的包」。
+    const defaultOpen = ttsDefaultOpenLang(groups);
+    box.innerHTML = (groups.map(g => {
+      const open = ttsLangOpen.has(g.lang) ? ttsLangOpen.get(g.lang) : g.lang === defaultOpen;
+      const label = U().langLabel(g.lang);
+      return '<div class="tts-lang-group' + (open ? ' open' : '') + '">' +
+        '<button type="button" class="tts-lang-head" data-tts-fold="' + U().esc(g.lang) + '"'
+          + ' aria-expanded="' + (open ? 'true' : 'false') + '">' +
+          '<span class="tts-caret" aria-hidden="true">' + (open ? '▾' : '▸') + '</span>' +
+          `<span class="tts-lang-name">${U().esc(label)}</span>` +
+          // 折叠时这行「已装/总数」就是唯一线索，必须留着
           `<span class="tts-lang-count">${g.inst}/${g.total}</span>` +
-        '</div>' +
-        '<div class="tts-lang-body">' + g.list.map(voiceRow).join('') + '</div>' +
-      '</div>').join('') + missingHtml)
+        '</button>' +
+        '<div class="tts-lang-body"' + (open ? '' : ' hidden') + '>'
+          + g.list.map(voiceRow).join('') + '</div>' +
+      '</div>';
+    }).join('') + missingHtml)
       || '<p class="muted">没有可用的语音清单。</p>';
 
     const hint = ttsEl('tts-hint');
@@ -978,6 +1050,23 @@ const Settings = (() => {
 
     // 语音包列表是重渲染的，所以用事件委托而不是逐个绑定
     ttsEl('tts-voice-list')?.addEventListener('click', async (ev) => {
+      // 分组标题：就地开合，**不重渲染** —— 重渲染会把焦点弄丢，连按几次
+      // 展开就没反应了。状态只写进 Map，供下次 loadTts() 复原。
+      const head = ev.target.closest('.tts-lang-head[data-tts-fold]');
+      if (head) {
+        const lang = head.getAttribute('data-tts-fold');
+        const nowOpen = head.getAttribute('aria-expanded') === 'true';
+        const next = !nowOpen;
+        ttsLangOpen.set(lang, next);
+        head.setAttribute('aria-expanded', next ? 'true' : 'false');
+        const caret = head.querySelector('.tts-caret');
+        if (caret) caret.textContent = next ? '▾' : '▸';
+        const body = head.parentElement && head.parentElement.querySelector('.tts-lang-body');
+        if (body) body.hidden = !next;
+        head.parentElement?.classList.toggle('open', next);
+        return;
+      }
+
       const ins = ev.target.closest('[data-tts-install]');
       const del = ev.target.closest('[data-tts-remove]');
       if (ins) {

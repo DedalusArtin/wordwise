@@ -25,6 +25,58 @@ pub struct WordRow {
     pub added_at: i64,
 }
 
+/// 解出一行里存的 `entry_json`，**并强制让它与这一行的主键语言一致**。
+///
+/// ★ 为什么非得有这一步：`words` 的语言实际存了两份 —— SQL 列 `lang`（主键的
+///   一半）和 `entry_json` 里的 `"lang"` 字段。两者本该永远相等，但历史代码
+///   搬行时只改了列（见 [`migrate_words_lang`] 的修订说明），JSON 原样带走，
+///   于是漂移。实测用户库里 **5037 行** 处于「列 = `en`、JSON = `ja`」的状态，
+///   `April` / `significance` 都在其中。
+///
+///   漂移的后果被用户当成三个互不相关的 bug 报了上来：
+///     1. 详情卡拿 `entry.lang` 判定语言标签 → 英语词头顶挂着「日语」；
+///     2. 朗读拿 `entry.lang` 去挑 piper 音色 → 请求 `ja` 的本地语音包，而用户
+///        压根没装 → `playLocalTts` 失败 → 静默回退系统音色，于是「明明切了
+///        piper，出来的还是系统音色」；
+///     3. `speak()` 失败那一路吞噬了原因，界面只显示「接口出现问题」。
+///
+///   存量脏数据由 `repair_entry_json_langs` 清洗；这里保证**任何一次读取**都不
+///   会再把错值泄漏给上层 —— 包括升级后第一次启动、清洗尚未跑到时的那几行。
+///   两条防线缺一不可：只有清洗，则在清洗前读到的仍然是错的；只有兜底，则
+///   脏数据永远躺在文件里，`export_all` 导出的还是错语言。
+fn entry_from_stored(word: &str, lang: &str, json: &str) -> WordEntry {
+    let mut entry: WordEntry = serde_json::from_str(json).unwrap_or_else(|_| WordEntry::new(word));
+    if entry.lang != lang {
+        entry.lang = lang.to_string();
+    }
+    entry
+}
+
+/// 把 `entry_json` 里的 `"lang"` 字段改成 `lang`，其余字节尽量保持原样。
+///
+/// 解析失败时**原样返回**，绝不在这里把一条本来还能看释义的词条变成空壳 ——
+/// 宁可留着一处已知的语言漂移，也不能让用户连释义都看不到。
+fn rewrite_entry_json_lang(json: &str, lang: &str) -> String {
+    match serde_json::from_str::<serde_json::Value>(json) {
+        Ok(mut v) => {
+            let needs = v
+                .as_object()
+                .and_then(|o| o.get("lang"))
+                .and_then(|x| x.as_str())
+                .map(|x| x != lang)
+                .unwrap_or(false);
+            if !needs {
+                return json.to_string();
+            }
+            if let Some(o) = v.as_object_mut() {
+                o.insert("lang".to_string(), serde_json::Value::String(lang.to_string()));
+            }
+            serde_json::to_string(&v).unwrap_or_else(|_| json.to_string())
+        }
+        Err(_) => json.to_string(),
+    }
+}
+
 /// 一条 AI 讲解存档。
 ///
 /// 讲解是花算力换来的，必须留下来：再点开同一个词应当秒回本地内容，
@@ -503,10 +555,8 @@ impl Db {
                 |r| r.get(0),
             )
             .optional()?;
-        match row {
-            Some(j) => Ok(Some(serde_json::from_str(&j)?)),
-            None => Ok(None),
-        }
+        // 第二个参数是**列上的 lang**，不是 JSON 里的 —— 语言以主键为准。
+        Ok(row.map(|j| entry_from_stored(word, lang, &j)))
     }
 
     /// 按词形取词条，**不限语言**；多条时取释义最完整的那条。
@@ -520,18 +570,17 @@ impl Db {
     ///   这里兜底一次，宁可把它显示出来，也不无声丢掉用户真学过的词。
     pub fn get_word_any_lang(&self, word: &str) -> Result<Option<WordEntry>> {
         let conn = self.conn.lock();
-        let row: Option<String> = conn
+        // 连 `lang` 一起取：这里本就是为了兜底 `study_state` 与词条语言打架的
+        // 情况，若再沿用 JSON 里那份漂移的语言，等于把坑原样搬回来。
+        let row: Option<(String, String)> = conn
             .query_row(
-                "SELECT entry_json FROM words WHERE lower(word)=lower(?1) \
+                "SELECT lang, entry_json FROM words WHERE lower(word)=lower(?1) \
                  ORDER BY length(entry_json) DESC LIMIT 1",
                 params![word],
-                |r| r.get(0),
+                |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .optional()?;
-        match row {
-            Some(j) => Ok(Some(serde_json::from_str(&j)?)),
-            None => Ok(None),
-        }
+        Ok(row.map(|(lang, j)| entry_from_stored(word, &lang, &j)))
     }
 
     pub fn word_count(&self, lang: &str) -> Result<i64> {
@@ -759,22 +808,24 @@ impl Db {
     pub fn list_words(&self, lang: &str, limit: i64, offset: i64) -> Result<Vec<WordRow>> {
         let conn = self.conn.lock();
         let mut stmt = conn.prepare(
-            "SELECT word, lang, entry_json, added_at FROM words
+            // `WHERE lang=?1` 已经把语言定死了，不必再 SELECT lang —— 少了这一列，
+            // 下面就不会出现「列的语言」与「外层的 lang」两个同名变量打架。
+            "SELECT word, entry_json, added_at FROM words
              WHERE lang=?1 ORDER BY added_at DESC, word ASC LIMIT ?2 OFFSET ?3",
         )?;
         let rows = stmt.query_map(params![lang, limit, offset], |r| {
-            let word: String = r.get(0)?;
-            let lang: String = r.get(1)?;
-            let json: String = r.get(2)?;
-            let added_at: i64 = r.get(3)?;
-            Ok((word, lang, json, added_at))
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, i64>(2)?,
+            ))
         })?;
 
         let mut out = Vec::new();
         for row in rows {
-            let (word, lang, json, added_at) = row?;
-            let entry: WordEntry = serde_json::from_str(&json).unwrap_or_else(|_| WordEntry::new(&word));
-            out.push(WordRow { word, lang, entry, added_at });
+            let (w, json, added_at) = row?;
+            let entry = entry_from_stored(&w, lang, &json);
+            out.push(WordRow { word: w, lang: lang.to_string(), entry, added_at });
         }
         Ok(out)
     }
@@ -861,8 +912,7 @@ impl Db {
             let mut out = Vec::new();
             for row in rows {
                 let (word, lang, json, added_at) = row?;
-                let entry: WordEntry =
-                    serde_json::from_str(&json).unwrap_or_else(|_| WordEntry::new(&word));
+                let entry = entry_from_stored(&word, &lang, &json);
                 out.push(WordRow { word, lang, entry, added_at });
             }
             Ok(out)
@@ -878,13 +928,18 @@ impl Db {
     pub fn random_words(&self, lang: &str, limit: i64) -> Result<Vec<WordEntry>> {
         let conn = self.conn.lock();
         let mut stmt = conn.prepare(
-            "SELECT entry_json FROM words WHERE lang=?1 ORDER BY RANDOM() LIMIT ?2",
+            "SELECT word, entry_json FROM words WHERE lang=?1 ORDER BY RANDOM() LIMIT ?2",
         )?;
-        let rows = stmt.query_map(params![lang, limit], |r| r.get::<_, String>(0))?;
+        let rows = stmt.query_map(params![lang, limit], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+        })?;
         let mut out = Vec::new();
         for row in rows {
-            if let Ok(e) = serde_json::from_str::<WordEntry>(&row?) {
-                out.push(e);
+            let (word, json) = row?;
+            // 顺手挡掉解析不出来的行（历史上塞进去的空串 / 截断 JSON），
+            // 免得干扰项里混进一个空词。
+            if serde_json::from_str::<serde_json::Value>(&json).is_ok() {
+                out.push(entry_from_stored(&word, lang, &json));
             }
         }
         Ok(out)
@@ -2035,6 +2090,69 @@ impl Db {
         }
         Ok((books_fixed, rows_fixed, words_moved))
     }
+
+    /// 清洗存量脏数据：把 `entry_json` 里的 `"lang"` 改回与列 `lang` 一致。
+    ///
+    /// # 为什么认定「列」是权威值
+    /// 列 `lang` 是 `words` 主键的一半，`wordbook_words.lang` / `study_state.lang`
+    /// 都靠它与词条对齐；真要以 JSON 为准，就得连主键一起搬动、牵扯三张表，
+    /// 风险远大于收益。而且这次实测的脏数据（`significance` 等 5037 行）里，
+    /// 列写着 `en`、`dict_cache` 的同名词条也是 `en`、音标是 `/sɪɡˈnɪfɪkəns/`，
+    /// 只有 `entry_json` 是 `ja` —— 错的就是 JSON 那份。
+    ///
+    /// # 幂等
+    /// 第二次跑时 JSON 已等于列，`WHERE` 选不出任何行，改动数返回 0。
+    ///
+    /// # 关于 `json_valid` 的 CASE 包裹
+    /// `json_extract` 遇到坏 JSON 会**直接报错并让整条语句失败**，一个坏词条
+    /// 就能让这次迁移整体作废。SQLite 不保证 `AND` 的求值顺序，所以必须用
+    /// `CASE`（保证短路）把 `json_valid` 的判断放到前面；坏 JSON 那一行会被
+    /// 判为「无需修改」跳过，留给 [`entry_from_stored`] 在读取时兜底。
+    pub fn repair_entry_json_langs(&self) -> Result<usize> {
+        let mut conn = self.conn.lock();
+        let tx = conn.transaction()?;
+
+        let targets: Vec<(String, String, String)> = {
+            let mut stmt = tx.prepare(
+                r#"SELECT word, lang, entry_json FROM words
+                   WHERE lang <> ''
+                     AND CASE WHEN json_valid(entry_json)
+                              THEN COALESCE(json_extract(entry_json, '$.lang'), '')
+                              ELSE lang END <> lang"#,
+            )?;
+            let rows = stmt.query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                ))
+            })?;
+            let mut v = Vec::new();
+            for r in rows {
+                v.push(r?);
+            }
+            v
+        };
+
+        let mut fixed = 0usize;
+        for (word, lang, json) in targets {
+            let new_json = rewrite_entry_json_lang(&json, &lang);
+            if new_json == json {
+                continue; // 理论上不会发生：SQL 已筛过一遍
+            }
+            tx.execute(
+                "UPDATE words SET entry_json=?3 WHERE word=?1 AND lang=?2",
+                rusqlite::params![word, lang, new_json],
+            )?;
+            fixed += 1;
+        }
+
+        tx.commit()?;
+        if fixed > 0 {
+            eprintln!("[wordwise] 词条语言修复：对齐 {fixed} 个词条的 JSON lang 与列的 lang");
+        }
+        Ok(fixed)
+    }
 }
 
 /// 把 `book_id` 下、当前语言为 `ol` 的词条迁到权威语言 `want`。
@@ -2083,9 +2201,14 @@ fn migrate_words_lang(
         if ja_words.contains(&word) {
             continue;
         }
+        // ★ `entry_json` 里也存着一份 `"lang"`，必须跟着列一起改。
+        //   旧实现把 JSON 原样 `INSERT` 过去，于是造出「列已是 en、JSON 还写着
+        //   ja」的行 —— 前端读 JSON，标签就显示成「日语」，朗读也随之去要 ja
+        //   的语音包。这是那一批脏数据的源头，必须在这里掐断。
+        let fixed_json = rewrite_entry_json_lang(&entry_json, want);
         conn.execute(
             "INSERT OR IGNORE INTO words(word,lang,entry_json,added_at) VALUES(?1,?2,?3,?4)",
-            rusqlite::params![word, want, entry_json, added_at],
+            rusqlite::params![word, want, fixed_json, added_at],
         )?;
         conn.execute(
             r#"INSERT OR IGNORE INTO study_state
@@ -2867,5 +2990,127 @@ mod tests {
 
         // 真查不到时仍是 None —— 兜底不等于凭空造词条
         assert!(db.get_word_any_lang("这个词根本不存在").unwrap().is_none());
+    }
+
+    // ---------- 「列 lang 漂移出 JSON lang」的回归测试 ----------
+    //
+    // 现场来自用户真实数据：全库 5037 行处于「列 = en、JSON = ja」的状态，
+    // 于是英语词的详情卡挂着「日语」标签、朗读去要 ja 的 piper 语音包而失败、
+    // 失败后又静默退回系统音色 —— 三件事其实是同一个根因。
+
+    /// 直接读一行的原始 JSON，绕过任何读取侧兜底。
+    fn raw_json(db: &Db, word: &str, lang: &str) -> String {
+        let c = db.conn.lock();
+        c.query_row(
+            "SELECT entry_json FROM words WHERE word=?1 AND lang=?2",
+            params![word, lang],
+            |r| r.get(0),
+        )
+        .unwrap()
+    }
+
+    /// 造一行「列与 JSON 不一致」的脏数据（模拟老版本迁移留下的坑）。
+    fn insert_dirty(db: &Db, word: &str, column_lang: &str, json_lang: &str) {
+        let e = entry(json_lang, word, "n.", "意义，重要性");
+        let json = serde_json::to_string(&e).unwrap();
+        let c = db.conn.lock();
+        c.execute(
+            "INSERT OR REPLACE INTO words(word,lang,entry_json,added_at) VALUES(?1,?2,?3,?4)",
+            params![word, column_lang, json, 1],
+        )
+        .unwrap();
+    }
+
+    /// 任何一条读取路径都不许把 JSON 里那份漂移的语言泄漏出去。
+    #[test]
+    fn reads_report_the_columns_language_not_the_stale_json_one() {
+        let db = tmp_db("json-lang-drift");
+        insert_dirty(&db, "significance", "en", "ja");
+
+        let got = db.get_word("significance", "en").unwrap().expect("应取到词条");
+        assert_eq!(got.lang, "en", "详情卡读到的必须是列的 en，否则界面会挂「日语」标签");
+
+        let any = db.get_word_any_lang("Significance").unwrap().unwrap();
+        assert_eq!(any.lang, "en", "跨语言兜底同样不能以 JSON 为准");
+
+        let rows = db.list_words("en", 10, 0).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].entry.lang, "en");
+
+        let found = db.search_words(Some("en"), "significance", 10).unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].entry.lang, "en");
+
+        let rnd = db.random_words("en", 5).unwrap();
+        assert!(rnd.iter().all(|e| e.lang == "en"), "随机抽词也必须带上列的语言");
+    }
+
+    /// 迁移搬行时必须**连 JSON 一起改写**，否则继续制造新的脏数据。
+    #[test]
+    fn language_migration_rewrites_the_json_lang_too() {
+        let db = tmp_db("book-lang-json");
+        db.upsert_wordbook(&Wordbook {
+            id: "kaoyan-core".into(),
+            name: "考研核心词汇".into(),
+            lang: "ja".into(), // 历史上被错标成日语
+            builtin: true,
+            installed: true,
+            ..Default::default()
+        })
+        .unwrap();
+        db.bulk_upsert_words(&[entry("ja", "significance", "n.", "意义")], 1)
+            .unwrap();
+        db.add_words_to_book("kaoyan-core", &["significance".to_string()], "ja")
+            .unwrap();
+
+        let authoritative = crate::dict::importer::builtin_book_langs();
+        let (_, _, moved) = db.fix_builtin_book_langs(&authoritative).unwrap();
+        assert_eq!(moved, 1, "词条应被迁到 en");
+
+        let j = raw_json(&db, "significance", "en");
+        assert!(
+            j.contains("\"lang\":\"en\""),
+            "迁移必须同步改写 JSON 里的 lang，否则继续制造列/JSON 漂移；实际：{j}"
+        );
+        // 释义不能被这次改写冲掉
+        assert!(j.contains("意义"), "改写 lang 不得丢掉释义：{j}");
+    }
+
+    /// 存量清洗：洗掉漂移、保护坏 JSON、且第二次运行零改动。
+    #[test]
+    fn repair_entry_json_langs_aligns_json_and_is_idempotent() {
+        let db = tmp_db("json-lang-repair");
+        insert_dirty(&db, "April", "en", "ja");
+        insert_dirty(&db, "abdomen", "en", "ja");
+        {
+            let c = db.conn.lock();
+            c.execute(
+                "INSERT OR REPLACE INTO words(word,lang,entry_json,added_at) VALUES('broken','en','{oops',1)",
+                [],
+            )
+            .unwrap();
+        }
+
+        assert_eq!(
+            db.repair_entry_json_langs().unwrap(),
+            2,
+            "两行漂移都应被清洗，坏 JSON 那行应被跳过而不是让整次迁移报错"
+        );
+
+        let j = raw_json(&db, "April", "en");
+        assert!(j.contains("\"lang\":\"en\""), "清洗后 JSON 里必须是 en：{j}");
+        assert!(!j.contains("\"lang\":\"ja\""), "旧的 ja 必须被替换：{j}");
+
+        assert_eq!(
+            raw_json(&db, "broken", "en"),
+            "{oops",
+            "解析不了的 JSON 必须原样保留 —— 宁可留着语言漂移，也不能让用户连释义都看不到"
+        );
+
+        assert_eq!(
+            db.repair_entry_json_langs().unwrap(),
+            0,
+            "第二次运行必须零改动，否则每次启动都会写一遍库"
+        );
     }
 }

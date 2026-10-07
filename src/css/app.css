@@ -3387,19 +3387,36 @@ h1 .ver-chip { font-size: 11px; padding: 2px 8px; vertical-align: 4px; }
    「我要学的这门语言装没装、有没有得装」一眼可答，两处语音 UI 也统一了。 */
 .tts-lang-group { margin-bottom: 12px; }
 .tts-lang-group:last-of-type { margin-bottom: 0; }
+/* 标题本身是个 button，要抹掉浏览器默认外观，又要让人看出它能点 */
 .tts-lang-head {
-  display: flex; align-items: center; justify-content: space-between;
-  gap: 8px; margin-bottom: 6px; padding-left: 2px;
+  display: flex; align-items: center; gap: 8px;
+  width: 100%; margin-bottom: 6px; padding: 5px 8px 5px 4px;
+  font: inherit; text-align: left;
+  border: 1px solid transparent; border-radius: var(--radius-sm);
+  background: transparent; color: inherit; cursor: pointer;
 }
+.tts-lang-head:hover { background: var(--border-2); border-color: var(--border); }
+.tts-lang-head:focus-visible { outline: 2px solid var(--blue); outline-offset: 1px; }
+/* 折叠态时给标题一条下边线 + 「已装/总数」留在右侧：合起来后这一行就是摘要 */
+.tts-lang-group.open .tts-lang-head { margin-bottom: 8px; }
+.tts-caret {
+  flex: none; font-size: 10px; line-height: 1; color: var(--text-3);
+  transition: transform .12s ease;
+}
+.tts-lang-group.open .tts-caret { color: var(--text-2); }
 .tts-lang-name {
   font-size: 12px; font-weight: 600; color: var(--text-2);
   /* 与系统音色下拉里的 optgroup 视觉同源：语言名就是这一层的分组标题 */
 }
+/* `margin-left:auto` 把「已装/总数」推到行尾 —— 换成 justify-content 会
+   让插入符号与语言名之间出现一道随组名长度变化的空隙。 */
 .tts-lang-count {
+  margin-left: auto; flex: none;
   font-size: 11px; padding: 0 7px; border-radius: 20px;
   background: var(--border-2); color: var(--text-3);
   font-variant-numeric: tabular-nums;
 }
+.tts-lang-group.open .tts-lang-count { background: var(--blue-soft); color: var(--blue-dark); }
 .tts-lang-body { display: flex; flex-direction: column; gap: 6px; }
 /* 没有本地语音包的语言必须**明说**，否则用户会以为软件漏做了 */
 .tts-missing {

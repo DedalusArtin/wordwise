@@ -2498,6 +2498,95 @@ const cases = [
     return 'en/zh 分组 + 4 门缺包语言';
   }],
 
+  // ---- 语音包分组可折叠 ----
+  //
+  // 现场：分组之后整页还是太长 —— 用户真正在意的通常只有「正在学的那门语言」。
+  // 折叠默认只展开那一组，其余靠标题上的「已装/总数」摘要存线索。
+  ['设置：语音包分组可折叠，默认只展开正在学的语言', async () => {
+    // 注：冒烟用的是极简假 DOM，querySelector 一律返回 null，所以这里直接
+    // 解析渲染出来的 HTML 字符串 —— 断言的是**生成结果**，不是 DOM 行为。
+    await sandbox.Settings.loadTts();
+    const html = String(elById('tts-voice-list').innerHTML);
+
+    const groups = html.match(/<div class="tts-lang-group/g) || [];
+    if (groups.length < 2) throw new Error(`分组数不足，无法验证折叠：${groups.length}`);
+
+    const opens = (html.match(/aria-expanded="true"/g) || []).length;
+    const closes = (html.match(/aria-expanded="false"/g) || []).length;
+    if (opens + closes !== groups.length) {
+      throw new Error(`aria-expanded 没写全：${groups.length} 组里只有 ${opens + closes} 个`);
+    }
+    if (opens !== 1) {
+      throw new Error(`默认应只展开「正在学的语言」那一组，实际展开 ${opens} 组`);
+    }
+
+    // 折叠态的两个可见要件：标题可点（是 button）+ 摘要仍在
+    const heads = (html.match(/<button type="button" class="tts-lang-head" data-tts-fold="/g) || []).length;
+    if (heads !== groups.length) throw new Error('分组标题不是可点击的 button');
+    const counts = (html.match(/class="tts-lang-count"/g) || []).length;
+    if (counts !== groups.length) throw new Error('折叠态下必须保留「已装/总数」摘要');
+
+    // 折叠的组内容容器必须真的带 hidden，否则等于没折叠
+    const hiddenBodies = (html.match(/class="tts-lang-body" hidden/g) || []).length;
+    if (hiddenBodies !== groups.length - opens) {
+      throw new Error(`隐藏的内容容器数应为 ${groups.length - opens}，实际 ${hiddenBodies}`);
+    }
+    const openMark = (html.match(/<div class="tts-lang-group open"/g) || []).length;
+    if (openMark !== opens) throw new Error('展开的组缺 open 标记，样式组挂不上');
+
+    // 点击处理必须就地改 DOM 且不触发重渲染（重渲染会丢焦点，连按会失效）
+    const src = fs.readFileSync(path.join(ROOT, 'src/js/settings.js'), 'utf8');
+    if (!/ttsLangOpen\.set\(lang, next\)/.test(src)) throw new Error('折叠状态没有被记住');
+    if (!/body\.hidden = !next/.test(src)) throw new Error('折叠没有就地切换显隐');
+    return `${groups.length} 组，默认展开 1 组`;
+  }],
+
+  // ---- 系统音色：缺什么必须说清楚，不能只报「检测到 N 个」 ----
+  //
+  // 现场：用户机器上一共 7 个音色（日语 4 + 中文 3），一个英语都没有，而他在
+  // 学英语。旧文案「检测到 7 个系统音色」让人以为一切正常，「点了朗读没声音
+  // / 下拉里选不到英语」于是成了悬案。
+  ['设置：系统音色缺哪门语言要说清楚', async () => {
+    const src = fs.readFileSync(path.join(ROOT, 'src/js/settings.js'), 'utf8');
+    if (/检测到 \$\{list\.length\} 个系统音色/.test(src)) {
+      throw new Error('仍是「检测到 N 个」这种没有信息量的文案');
+    }
+    if (!/set-speak-voices-hint/.test(src)) throw new Error('提示节点丢了');
+    if (!/currentStudyLang\(\)/.test(src)) {
+      throw new Error('提示没有针对「正在学的语言」做判断');
+    }
+    if (!/添加语音|时间和语言/.test(src)) throw new Error('没给出 Windows 的安装路径');
+
+    // 朗读侧：挑不出音色时不能假装是「系统语音」
+    const sp = fs.readFileSync(path.join(ROOT, 'src/js/speak.js'), 'utf8');
+    if (!/notifyVoice\('none'/.test(sp)) throw new Error('无音色可用时仍在谎报系统语音');
+    if (!/hintMissingVoice/.test(sp)) throw new Error('无音色可用时没有任何提示');
+    if (!/missingVoiceWarned/.test(sp)) throw new Error('缺音色提示没有做同会话去重');
+    return '缺语言 + 安装路径 + 无音色如实上报';
+  }],
+
+  // ---- 词条语言：列 lang 与 entry_json 里的 lang 必须同源 ----
+  //
+  // 这是「英语词显示『日语』标签」「切了 piper 却还是系统音色」的共同根因：
+  // 历史上迁移只改了列的 lang，JSON 里那份原样带走，全库漂了 5037 行。
+  ['存储：词条语言不许在列与 JSON 上各存一份', async () => {
+    const dbmod = fs.readFileSync(path.join(ROOT, 'src-tauri/src/db/mod.rs'), 'utf8');
+    if (!/fn entry_from_stored/.test(dbmod)) throw new Error('缺少读取侧的语言兜底');
+    if (!/fn rewrite_entry_json_lang/.test(dbmod)) throw new Error('缺少写入侧的 JSON lang 改写');
+    if (!/pub fn repair_entry_json_langs/.test(dbmod)) throw new Error('缺少存量数据的一次性清洗');
+    if (!/json_valid/.test(dbmod)) throw new Error('清洗没有用 json_valid 挡住坏 JSON');
+    if (!/CASE WHEN json_valid/.test(dbmod)) {
+      throw new Error('json_valid 必须写在 CASE 里保证短路，否则一个坏词条会让整次迁移失败');
+    }
+    // 迁移搬行时必须连 JSON 一起改，否则继续制造新的漂移
+    if (!/let fixed_json = rewrite_entry_json_lang/.test(dbmod)) {
+      throw new Error('migrate_words_lang 仍在原样搬运 entry_json');
+    }
+    const state = fs.readFileSync(path.join(ROOT, 'src-tauri/src/state.rs'), 'utf8');
+    if (!/repair_entry_json_langs/.test(state)) throw new Error('启动时没有调用清洗');
+    return '读取兜底 + 写入改写 + 存量清洗';
+  }],
+
   ['Plan.load()', () => sandbox.Plan.load()],
 ];
 
