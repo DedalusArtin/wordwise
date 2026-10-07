@@ -211,6 +211,7 @@ fn build_invoke_handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync +
         commands::tts::cmd_tts_prefs,
         commands::tts::cmd_set_tts_prefs,
         commands::tts::cmd_tts_speak,
+        commands::tts::cmd_audio_devices,
         commands::tts::cmd_tts_clear_cache,
         // 窗口
         //

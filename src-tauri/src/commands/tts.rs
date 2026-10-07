@@ -447,6 +447,52 @@ pub async fn cmd_tts_speak(
     Ok(out)
 }
 
+/// 枚举本机音频输出设备（读 Windows 注册表 MMDevices，绕过 WebView2 的
+/// enumerateDevices 权限限制——那边拿不到设备真名，本命令能拿到全部
+/// 渲染终结点的名字与状态）。DeviceState：1=活动 2=禁用 4=未插入 8=拔出。
+#[tauri::command]
+pub fn cmd_audio_devices() -> Result<serde_json::Value, String> {
+    use winreg::enums::HKEY_LOCAL_MACHINE;
+    use winreg::RegKey;
+
+    const FRIENDLY: &str = "{a45c254e-df1c-4efd-8020-67d146a850e0},2";
+    let hk = RegKey::predef(HKEY_LOCAL_MACHINE);
+    let root = hk
+        .open_subkey_with_flags(
+            r"SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\Render",
+            winreg::enums::KEY_READ,
+        )
+        .map_err(|e| format!("读注册表失败：{e}"))?;
+
+    let mut devs: Vec<serde_json::Value> = Vec::new();
+    for guid in root.enum_keys().flatten() {
+        let ep = match root.open_subkey_with_flags(&guid, winreg::enums::KEY_READ) {
+            Ok(k) => k,
+            Err(_) => continue,
+        };
+        let state: u32 = ep.get_value("DeviceState").unwrap_or(0);
+        let name: String = ep
+            .open_subkey_with_flags("Properties", winreg::enums::KEY_READ)
+            .and_then(|p| p.get_value(FRIENDLY))
+            .unwrap_or_else(|_| format!("未知设备（{guid}）"));
+        // 只报状态 1（活动）与 4（未插入，插上就能用）；禁用/拔出的噪音不进列表
+        if state != 1 && state != 4 {
+            continue;
+        }
+        devs.push(serde_json::json!({
+            "name": name,
+            "active": state == 1,
+        }));
+    }
+    // 活动的排前面
+    devs.sort_by(|a, b| {
+        let ka = if a["active"].as_bool().unwrap_or(false) { 0 } else { 1 };
+        let kb = if b["active"].as_bool().unwrap_or(false) { 0 } else { 1 };
+        ka.cmp(&kb).then(a["name"].as_str().cmp(&b["name"].as_str()))
+    });
+    Ok(serde_json::json!({ "devices": devs }))
+}
+
 /// 清空 TTS 缓存（设置页的「清理缓存」）。
 #[tauri::command]
 pub fn cmd_tts_clear_cache(state: State<'_, Arc<AppState>>) -> Result<serde_json::Value, String> {

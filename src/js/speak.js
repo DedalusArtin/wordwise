@@ -221,6 +221,10 @@ const Speak = (() => {
 
   let audioCtx = null;
   let webAudioSrc = null;
+  // ★ 按原生采样率缓存上下文：16k 的合成文件用 16k 上下文播放，砍掉
+  //   WebView2 的 16k→48k 重采样环节（破音排查中它是嫌疑之一），由系统
+  //   音频引擎（WASAPI 共享模式）直接对接实际设备（如 Quantum LT 2 @48k）。
+  const ctxByRate = new Map();
 
   /* ---- 朗读输出设备：每台机器的音频设备不同 ----
      实测有的机器上 WebView2 只看得到一个（可能是虚拟/失效的）输出设备，
@@ -258,6 +262,13 @@ const Speak = (() => {
     return audioCtx;
   }
 
+  /** 当前播放上下文的采样率（诊断面板展示用）。 */
+  function activeCtxRate() {
+    let best = 0;
+    ctxByRate.forEach((_ac, r) => { best = Math.max(best, r); });
+    return best || (audioCtx ? audioCtx.sampleRate : 0);
+  }
+
   function dataUriToBuffer(dataUri) {
     const b64 = String(dataUri || '').split(',')[1] || '';
     const bin = atob(b64);
@@ -266,13 +277,40 @@ const Speak = (() => {
     return u8.buffer;
   }
 
+  /** 从 WAV 字节头读原生采样率（offset 24，小端 u32）。读不到返回 0。 */
+  function wavNativeRate(bytes) {
+    try {
+      const v = new DataView(bytes);
+      if (v.getUint32(0, true) !== 0x46464952) return 0;   // 'RIFF'
+      if (v.getUint32(8, true) !== 0x45564157) return 0;   // 'WAVE'
+      return v.getUint32(24, true);
+    } catch (e) { return 0; }
+  }
+
+  /** 取（并缓存）指定采样率的 AudioContext；该采样率下 decodeAudioData 不再做重采样。 */
+  function ctxFor(rate) {
+    const r = rate > 8000 ? rate : 48000;
+    let ac = ctxByRate.get(r);
+    if (!ac) {
+      const AC = window.AudioContext || window.webkitAudioContext;
+      if (!AC) return null;
+      try { ac = new AC({ sampleRate: r }); } catch (e) { return null; }
+      ctxByRate.set(r, ac);
+    }
+    try { if (ac.state === 'suspended') ac.resume(); } catch (e) { /* 忽略 */ }
+    applySink(ac);
+    return ac;
+  }
+
   /** 用 WebAudio 播一段 data URI 音频。返回 Promise<boolean>（true = 已接手）。 */
   function playViaWebAudio(dataUri, anchor) {
-    const ac = ensureAudioCtx();
-    if (!ac || !ac.decodeAudioData) return Promise.resolve(false);
     let bytes;
     try { bytes = dataUriToBuffer(dataUri); } catch (e) { return Promise.resolve(false); }
-    return ac.decodeAudioData(bytes).then((audioBuf) => {
+    // ★ 适配：按文件原生采样率建上下文（16k 文件 → 16k 上下文），解码零重采样
+    const native = wavNativeRate(bytes);
+    const ac = ctxFor(native);
+    if (!ac || !ac.decodeAudioData) return Promise.resolve(false);
+    return ac.decodeAudioData(bytes.slice(0)).then((audioBuf) => {
       return new Promise((resolve) => {
         let src;
         try {
@@ -873,6 +911,7 @@ const Speak = (() => {
     playUrl, playTts, voices, availableLang,
     playViaWebAudio,   // 导出：冒烟测试直接断言 WebAudio 兜底
     outputPref, setOutputPref,   // 导出：朗读输出设备偏好（设置页读写）
+    activeCtxRate,               // 导出：当前 WebAudio 上下文采样率（诊断用）
     voicePref, setVoicePref, ratePref, setRatePref, resetPrefs,
     enginePref, setEnginePref, setLocalReady, isLocalReady, playLocalTts,
     // 本地语音门面：切换 / 同步 / 读取当前生效的语音包

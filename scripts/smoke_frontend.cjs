@@ -3087,6 +3087,26 @@ const cases = [
     return '关闭双路径认开关 + 浏览器进程隔离与导航守卫';
   }],
 
+  // ---- 音频设备检测 + 原生采样率适配（用户点名：设备不同要适配）----
+  ['音频：注册表设备检测 + WebAudio 按原生采样率适配', () => {
+    const tts = fs.readFileSync(path.join(ROOT, 'src-tauri/src/commands/tts.rs'), 'utf8');
+    const win = fs.readFileSync(path.join(ROOT, 'src-tauri/src/windows.rs'), 'utf8');
+    const sp = fs.readFileSync(path.join(ROOT, 'src/js/speak.js'), 'utf8');
+    const apijs = fs.readFileSync(path.join(ROOT, 'src/js/api.js'), 'utf8');
+    const html = fs.readFileSync(path.join(ROOT, 'src/index.html'), 'utf8');
+    const setjs = fs.readFileSync(path.join(ROOT, 'src/js/settings.js'), 'utf8');
+    if (!/cmd_audio_devices/.test(tts) || !/cmd_audio_devices/.test(win))
+      throw new Error('缺设备检测命令或未注册');
+    if (!/MMDevices/.test(tts)) throw new Error('设备检测没有读 Windows 注册表');
+    if (!/audioDevices/.test(apijs)) throw new Error('api.js 缺 audioDevices');
+    if (!/tts-devices/.test(html) || !/tts-devices/.test(setjs)) throw new Error('朗读面板缺设备检测展示');
+    // 原生采样率适配：16k 文件 → 16k 上下文（decodeAudioData 零重采样）
+    if (!/wavNativeRate/.test(sp)) throw new Error('缺 WAV 头采样率解析');
+    if (!/sampleRate: r/.test(sp)) throw new Error('缺按采样率建上下文');
+    if (!/ctxFor\(native\)/.test(sp)) throw new Error('播放没有走采样率适配');
+    return '注册表设备检测 + 原生采样率上下文适配';
+  }],
+
   // ---- 外部链接：默认在软件内打开，设置里可关；更新下载永远走系统浏览器 ----
   ['链接：命令层分流 + 更新下载强制外部', async () => {
     const rs = fs.readFileSync(path.join(ROOT, 'src-tauri/src/commands/mod.rs'), 'utf8');

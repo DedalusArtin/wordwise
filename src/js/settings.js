@@ -1222,6 +1222,19 @@ const Settings = (() => {
       }).catch(() => { /* 枚举失败就只留系统默认 */ });
     }
 
+    // 本机输出设备检测：读 Windows 注册表（WebView2 的 enumerateDevices
+    // 拿不到设备真名与列表，这里绕过它），帮助确认默认设备是否正确
+    const devLine = ttsEl('tts-devices');
+    if (devLine && API.audioDevices) {
+      API.audioDevices().then((r) => {
+        const devs = (r && r.devices) || [];
+        if (!devs.length) { devLine.textContent = '本机输出设备：未检测到'; return; }
+        devLine.textContent = '本机输出设备：' + devs.map((d) =>
+          d.name + (d.active ? '' : '（未插入）')).join('、')
+          + '。默认设备若不是你想用的，请到 Windows「设置 → 系统 → 声音」切换。';
+      }).catch(() => { /* 忽略 */ });
+    }
+
     // 底部「当前语音模型」跟着一起刷新（它是 sticky 的，内容变了也要改）
     renderTtsFooter();
     // 侧边栏的「语音载入情况」同步刷新 —— 下载/删除语音包后不用等下次启动
