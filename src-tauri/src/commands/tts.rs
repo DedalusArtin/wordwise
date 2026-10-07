@@ -343,12 +343,6 @@ pub async fn cmd_tts_speak(
     text: String,
     lang: Option<String>,
     accent: Option<String>,
-    // 目标采样率（前端传设备采样率，0 = 用语音包原生率）。
-    //
-    // ★ 为什么后端要管播放设备的采样率：piper 的语音包是 16 kHz，而多数
-    //   声卡是 48 kHz。交给浏览器升采样会振铃过冲（实测 0.875 → 1.4589），
-    //   过冲就是「爆音」。后端按设备率重采样后，前端解码时零重采样。
-    target_rate: Option<u32>,
 ) -> Result<tts::SynthOut, String> {
     let text = text.trim().to_string();
     if text.is_empty() {
@@ -396,13 +390,9 @@ pub async fn cmd_tts_speak(
     };
 
     let rate = cfg.tts.rate.clamp(0.5, 2.0);
-    // 目标采样率：只接受 sane 范围，越界/缺省就用语音包原生率（不重采样）
-    let dst = match target_rate.unwrap_or(0) {
-        r if (8000..=192000).contains(&r) => r,
-        _ => 0,
-    };
     let cache = tts::cache_dir(&state.data_dir);
-    let key = tts::cache_key_at(&chosen, &text, rate, dst);
+    // ★ 键里不带目标采样率：缓存只存语音包原生率，磁盘占用才是 1 倍
+    let key = tts::cache_key(&chosen, &text, rate);
     let wav_path = cache.join(format!("{key}.wav"));
 
     let t0 = std::time::Instant::now();
@@ -412,12 +402,7 @@ pub async fn cmd_tts_speak(
         if bytes.len() > 64 {
             // ★ 旧缓存可能是 piper 流式写坏的（尺寸字段与实际不符）——
             //   命中后先规范化，修好的版本回写缓存，坏缓存由此自愈。
-            let mut bytes = tts::normalize_wav(&bytes);
-            // 键里带了目标采样率，所以命中的这份本来就该是目标率；磁盘上
-            // 若还是旧版留下的 16k 产物（键里没率），就地补一次转换。
-            if dst > 0 && tts::wav_sample_rate(&bytes) != dst {
-                bytes = tts::resample_wav(&bytes, dst);
-            }
+            let bytes = tts::normalize_wav(&bytes);
             let _ = std::fs::write(&wav_path, &bytes);
             let out = tts::SynthOut {
                 audio: encode_wav(&bytes),
@@ -444,8 +429,6 @@ pub async fn cmd_tts_speak(
     //   直接缓存的话，下次命中还是播不出来（重新下载语音包也无解——
     //   坏产物会原样再生成）。规范化后尺寸字段与数据严格一致。
     let wav = tts::normalize_wav(&wav);
-    // ★ 按设备采样率重采样，且压峰值在重采样之后（顺序反了就压不到过冲）
-    let wav = if dst > 0 { tts::resample_wav(&wav, dst) } else { wav };
 
     // 写缓存（失败不影响这次播放）
     let _ = std::fs::create_dir_all(&cache);

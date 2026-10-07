@@ -889,16 +889,11 @@ pub fn cache_dir(data_dir: &Path) -> PathBuf {
 }
 
 /// 缓存键：语音 + 文本 + 语速，三者任一不同都要重新合成。
-pub fn cache_key(voice: &str, text: &str, rate: f32) -> String {
-    cache_key_at(voice, text, rate, 0)
-}
-
-/// 缓存键（带目标采样率）。
 ///
-/// ★ 采样率必须进键：产物是按「设备采样率」重采样过的。不进键的话，
-///   在 48k 机器上缓存的音频会被 44.1k 的机器命中，那台机器上就又要
-///   被浏览器重采样一次 —— 过冲照旧，爆音照旧，而且极难复现。
-pub fn cache_key_at(voice: &str, text: &str, rate: f32, dst_rate: u32) -> String {
+/// ★ 目标采样率**故意不进键**：缓存只存语音包原生率（16k / 22.05k），
+///   投递时再按设备率转换。按 48k 缓存会让每条语音的磁盘占用变 3 倍 ——
+///   用户原话「这个音频占用太高了，用低一点码率」。
+pub fn cache_key(voice: &str, text: &str, rate: f32) -> String {
     use sha2::{Digest, Sha256};
     let mut h = Sha256::new();
     h.update(voice.as_bytes());
@@ -906,8 +901,6 @@ pub fn cache_key_at(voice: &str, text: &str, rate: f32, dst_rate: u32) -> String
     h.update(text.as_bytes());
     h.update(b"\x1f");
     h.update(format!("{rate:.3}").as_bytes());
-    h.update(b"\x1f");
-    h.update(dst_rate.to_le_bytes());
     let d = h.finalize();
     d.iter().map(|b| format!("{b:02x}")).collect::<String>()
 }
@@ -936,13 +929,36 @@ pub fn synth_blocking(exe: &Path, model: &Path, text: &str, rate: f32) -> Result
     let r = rate.clamp(0.5, 2.0);
     let length_scale = 1.0 / r;
 
+    // ★ 必须让 piper 写**真实文件**，不能写 stdout（`--output_file -`）。
+    //
+    //   实测（同一模型、同一文本，只差这一个参数）：
+    //     写真实文件 → 谱平坦度 0.0027、浊音帧 39/40、跳变 p99=9032   = 干净语音
+    //     写 stdout  → 谱平坦度 0.5382、浊音帧  1/40、跳变 p99=55040  = 噪声
+    //   而且走 stdout 时尾部还会多出 554 字节残渣。piper 1.2.0 的 stdout
+    //   那条写出路径就是坏的 —— 前端于是拿到「合成成功却一片杂音」。
+    //
+    //   所以：写临时文件 → 等进程结束 → 读回来 → 删掉。文件名带 pid + 纳秒
+    //   + 原子计数，并发合成也不会撞车。
+    static SYNTH_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let seq = SYNTH_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let tmp = std::env::temp_dir().join(format!(
+        "ww-piper-{}-{}-{}.wav",
+        std::process::id(),
+        nanos,
+        seq
+    ));
+
     let mut cmd = Command::new(exe);
     cmd.arg("--model")
         .arg(model)
         .arg("--length_scale")
         .arg(format!("{length_scale:.3}"))
         .arg("--output_file")
-        .arg("-") // stdout
+        .arg(&tmp)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -964,13 +980,20 @@ pub fn synth_blocking(exe: &Path, model: &Path, text: &str, rate: f32) -> Result
 
     let out = child.wait_with_output().context("语音引擎执行失败")?;
     if !out.status.success() {
+        // 临时文件留不留都无所谓，失败路径优先把原因说清楚
+        let _ = std::fs::remove_file(&tmp);
         let err = String::from_utf8_lossy(&out.stderr);
         return Err(anyhow!("语音合成失败：{}", err.trim().chars().take(300).collect::<String>()));
     }
-    if out.stdout.len() < 64 {
+
+    let bytes = std::fs::read(&tmp).context("读取语音引擎的输出失败")?;
+    // 用完即删：不然 temp 目录会堆一地 wav
+    let _ = std::fs::remove_file(&tmp);
+
+    if bytes.len() < 64 {
         return Err(anyhow!("语音引擎没有输出音频（文本可能是空的或不受支持）"));
     }
-    Ok(out.stdout)
+    Ok(bytes)
 }
 
 /// 从 WAV 字节里读采样率（第 24~27 字节，小端）。
@@ -1075,10 +1098,14 @@ const PEAK_CEIL: i32 = 28672;
 
 /// 把 PCM 峰值等比压到上限以内，保持原来的动态关系。
 ///
-/// ★ piper 的合成幅度会打满 16bit（实测峰值 100% FS）。压峰值这件事本身
-///   不稀奇，稀奇的是**压在哪一步**：升采样会振铃过冲，压在重采样之前等于
-///   白压（实测 0.875 升到 48k 后变成 1.4589）。所以 `resample_wav` 会在
-///   重采样之后**再调一次**这个函数。
+/// ★ piper 直出的幅度会打满 16bit（命令行实测峰值 100% FS、3 个贴顶样本）。
+///   打满就意味着已经有样本被削平，等比压低救不回那些样本，但整体电平下来
+///   之后不再刺耳，也不会再往后级（重采样 / 播放增益）递一个满刻度的信号。
+///
+/// 注：早先这里写过「升采样会过冲到 1.4589，所以要在重采样之后再压一次」。
+/// 那个数字是在一份**其实是噪声**的文件上测出来的（噪声来自 piper 写 stdout，
+/// 见 `synth_blocking`）。在干净语音上重测，16k 与 48k 解码峰值分别是 0.8750
+/// 与 0.8742，过冲比 0.999 —— 干净语音升采样不过冲。重采样那套已整个撤掉。
 fn limit_peak(p: &mut WavParts) {
     if p.bits != 16 || p.pcm.len() < 2 {
         return;
@@ -1100,113 +1127,6 @@ fn limit_peak(p: &mut WavParts) {
     }
 }
 
-fn gcd_u32(a: u32, b: u32) -> u32 {
-    if b == 0 { a } else { gcd_u32(b, a % b) }
-}
-
-/// 加窗 sinc（多相）重采样 16bit PCM。
-///
-/// ★ 为什么自己写，不交给浏览器：实测 16 kHz 的 piper 输出升到 48 kHz 时，
-///   **任何**升采样都会振铃过冲 —— Chromium 的 decodeAudioData 是 1.4589，
-///   我们自己写的加窗 sinc（taps=16 / 32）是 1.4044 / 1.4741。数字这么接近
-///   说明这是**这份音频的固有特性**（奈奎斯特附近能量足），不是谁的 bug。
-///   既然躲不掉，就得把重采样拿回自己手里，才能压掉那一下过冲。
-pub fn resample_i16(pcm: &[i16], src: u32, dst: u32, channels: u16) -> Vec<i16> {
-    let ch = channels.max(1) as usize;
-    if src == dst || src == 0 || dst == 0 || pcm.len() < ch {
-        return pcm.to_vec();
-    }
-    let frames = pcm.len() / ch;
-    if frames == 0 {
-        return pcm.to_vec();
-    }
-
-    let g = gcd_u32(src, dst);
-    let up = (dst / g) as usize;
-    let down = (src / g) as usize;
-
-    // 截止频率（按输入 Nyquist 归一化）：升采样取 1.0，降采样取 dst/src
-    // （降采样必须抗混叠，否则高频会折回来变成杂音）
-    let fc = (std::cmp::min(src, dst) as f64) / (src as f64);
-
-    const TAPS: usize = 16; // 每侧 16 抽头 → 32 抽头核
-    // 多相系数表：up 个相位，每相 2*TAPS 个抽头。每相的系数和归一到 1，
-    // 这样直流增益恒为 1，不会随相位起伏产生幅度调制。
-    let mut table: Vec<Vec<f64>> = Vec::with_capacity(up);
-    for ph in 0..up {
-        let off = ph as f64 / up as f64;
-        let mut coef = Vec::with_capacity(2 * TAPS);
-        let mut sum = 0.0;
-        for k in -(TAPS as i64) + 1..=(TAPS as i64) {
-            let tt = off + k as f64;
-            let a = std::f64::consts::PI * tt * fc;
-            let sinc = if a.abs() < 1e-9 { 1.0 } else { a.sin() / a };
-            let u = (tt + TAPS as f64) / (2.0 * TAPS as f64); // ∈ [0,1]
-            let blackman = 0.42
-                - 0.5 * (2.0 * std::f64::consts::PI * u).cos()
-                + 0.08 * (4.0 * std::f64::consts::PI * u).cos();
-            let v = sinc * blackman;
-            coef.push(v);
-            sum += v;
-        }
-        if sum.abs() > 1e-9 {
-            for v in coef.iter_mut() {
-                *v /= sum;
-            }
-        }
-        table.push(coef);
-    }
-
-    let out_frames = (frames as u64 * dst as u64 / src as u64) as usize;
-    let mut out = Vec::with_capacity(out_frames * ch);
-    for i in 0..out_frames {
-        let num = i as u64 * down as u64;
-        let base = (num / up as u64) as i64; // 整点位置
-        let ph = (num % up as u64) as usize; // 相位 = 小数部分
-        let coef = &table[ph];
-        for ci in 0..ch {
-            let mut acc = 0.0f64;
-            for (idx, w) in coef.iter().enumerate() {
-                let j = base + idx as i64 - (TAPS as i64) + 1;
-                if j < 0 || j >= frames as i64 {
-                    continue;
-                }
-                acc += pcm[(j as usize) * ch + ci] as f64 * w;
-            }
-            out.push(acc.round().clamp(-32768.0, 32767.0) as i16);
-        }
-    }
-    out
-}
-
-/// 把一段 WAV 重采样到目标采样率，**并在重采样之后重新压峰值**。
-///
-/// 这个顺序是整个「爆音」修复的命门：升采样必然振铃过冲（实测 1.40~1.47
-/// 倍），峰值只在重采样之后压，才能真正压住送到耳朵里的那一下。
-/// 目标率与当前一致、或非 PCM16 时原样返回。
-pub fn resample_wav(bytes: &[u8], dst_rate: u32) -> Vec<u8> {
-    let Some(mut p) = parse_wav_pcm(bytes) else {
-        return bytes.to_vec();
-    };
-    if dst_rate == 0 || p.sample_rate == dst_rate {
-        return bytes.to_vec();
-    }
-    // 保守：只处理 PCM16（piper 只产这个格式，别的格式不重采样）
-    if p.audio_format != 1 || p.bits != 16 {
-        return bytes.to_vec();
-    }
-    let src_i16: Vec<i16> = p
-        .pcm
-        .chunks_exact(2)
-        .map(|c| i16::from_le_bytes([c[0], c[1]]))
-        .collect();
-    let out_i16 = resample_i16(&src_i16, p.sample_rate, dst_rate, p.channels);
-    p.pcm = out_i16.iter().flat_map(|v| v.to_le_bytes()).collect();
-    p.sample_rate = dst_rate;
-    // ★ 先重采样后压峰值 —— 顺序反了就压不到振铃那一下
-    limit_peak(&mut p);
-    build_wav(&p)
-}
 
 pub fn normalize_wav(bytes: &[u8]) -> Vec<u8> {
     let Some(mut p) = parse_wav_pcm(bytes) else {
@@ -1610,121 +1530,6 @@ mod tests {
     /// 尺寸字段写得比实际小 123 字节（还是奇数），Chromium 拒播 ——
     /// 规范化后尺寸必须与数据严格一致，PCM 内容不变。
     // ------------------------------------------------------------------
-    // 重采样：爆音治本的关键一环。 piper 的语音包是 16 kHz，多数声卡 48 kHz，
-    // 升采样必然振铃过冲（实测 1.40~1.47 倍）。过冲只能靠「重采样之后压峰值」
-    // 压住，所以顺序必须钉死。
-    // ------------------------------------------------------------------
-
-    fn tone(rate: u32, hz: f64, frames: usize, amp: f64) -> Vec<i16> {
-        (0..frames)
-            .map(|i| ((i as f64 * 2.0 * std::f64::consts::PI * hz / rate as f64).sin() * amp) as i16)
-            .collect()
-    }
-
-    fn peak_of(pcm: &[i16]) -> i32 {
-        pcm.iter().map(|v| (*v as i32).abs()).max().unwrap_or(0)
-    }
-
-    #[test]
-    fn resample_is_identity_when_rates_match_or_are_invalid() {
-        let src: Vec<i16> = vec![1, 2, 3, -4, 32767];
-        assert_eq!(resample_i16(&src, 16000, 16000, 1), src, "率相同应原样返回");
-        assert_eq!(resample_i16(&src, 0, 48000, 1), src, "源率 0 应原样返回");
-        assert_eq!(resample_i16(&src, 16000, 0, 1), src, "目标率 0 应原样返回");
-    }
-
-    #[test]
-    fn resample_upsample_scales_length_without_ringing_a_slow_tone() {
-        let n = 1600usize;
-        let src = tone(16000, 1000.0, n, 26000.0);
-        let out = resample_i16(&src, 16000, 48000, 1);
-        assert!(
-            (out.len() as i64 - (n as i64 * 3)).abs() <= 3,
-            "16k→48k 长度应约 3 倍，实际 {}",
-            out.len()
-        );
-        // 1kHz 离奈奎斯特很远，慢信号不该被振铃抬高（400 是量化+归一的余量）
-        let d = peak_of(&out) - peak_of(&src);
-        assert!(d <= 400, "慢正弦重采样后过冲过大：{} → {}", peak_of(&src), peak_of(&out));
-    }
-
-    #[test]
-    fn resample_downsample_shrinks_length() {
-        let src: Vec<i16> = (0..4800)
-            .map(|i| (((i % 40) as i32) * 100 - 2000) as i16)
-            .collect();
-        let out = resample_i16(&src, 48000, 16000, 1);
-        assert!(
-            (out.len() as i64 - 1600).abs() <= 3,
-            "48k→16k 长度应约 1/3，实际 {}",
-            out.len()
-        );
-    }
-
-    /// 命门用例：压峰值必须在**重采样之后**。
-    #[test]
-    fn resample_wav_relimits_after_resampling_not_before() {
-        // 阶跃信号：升采样会在跳变处产生吉布斯振铃，是一次可预期的过冲
-        let mut pcm: Vec<i16> = Vec::with_capacity(800);
-        for i in 0..800 {
-            pcm.push(if i < 400 { 0 } else { 28000 });
-        }
-        // ① 先证明前提成立：不压峰值的话，重采样后确实超限
-        let raw = resample_i16(&pcm, 16000, 48000, 1);
-        let raw_peak = peak_of(&raw);
-        assert!(
-            raw_peak > PEAK_CEIL,
-            "前提不成立：重采样后并未过冲（峰值 {}），换一个信号",
-            raw_peak
-        );
-
-        // ② 再验证 resample_wav 把那一下过冲压住了
-        let parts = WavParts {
-            audio_format: 1,
-            channels: 1,
-            sample_rate: 16000,
-            bits: 16,
-            pcm: pcm.iter().flat_map(|v| v.to_le_bytes()).collect(),
-        };
-        let out = resample_wav(&build_wav(&parts), 48000);
-        assert_eq!(wav_sample_rate(&out), 48000, "头里的采样率没改成 48k");
-        let got = parse_wav_pcm(&out).expect("重采样结果应是合法 wav");
-        assert_eq!(got.sample_rate, 48000, "解析出来的采样率不对");
-        let peak = got
-            .pcm
-            .chunks_exact(2)
-            .map(|c| i16::from_le_bytes([c[0], c[1]]).abs() as i32)
-            .max()
-            .unwrap_or(0);
-        assert!(
-            peak <= PEAK_CEIL,
-            "重采样后才压峰值：输出峰值 {} 仍超过 {}（顺序反了就压不住）",
-            peak,
-            PEAK_CEIL
-        );
-        let n_in = parts.pcm.len() / 2;
-        let n_out = got.pcm.len() / 2;
-        assert!(
-            (n_out as i64 - (n_in as i64 * 3)).abs() <= 3,
-            "16k→48k 长度应约 3 倍：{} → {}",
-            n_in,
-            n_out
-        );
-    }
-
-    #[test]
-    fn cache_key_varies_with_target_sample_rate() {
-        assert_ne!(
-            cache_key_at("v", "hi", 1.0, 0),
-            cache_key_at("v", "hi", 1.0, 48000),
-            "目标采样率必须进缓存键：否则 48k 产物会被 44.1k 的机器命中，那台机器上又要被浏览器重采样一次"
-        );
-        assert_eq!(
-            cache_key("v", "hi", 1.0),
-            cache_key_at("v", "hi", 1.0, 0),
-            "cache_key 应等于目标率为 0 的版本"
-        );
-    }
 
     #[test]
     fn normalize_wav_repairs_piper_size_fields() {

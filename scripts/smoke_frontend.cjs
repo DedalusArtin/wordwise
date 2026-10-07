@@ -3425,59 +3425,45 @@ const cases = [
     return 'name: 前缀不会流进 setSinkId';
   }],
 
-  // ---- 爆音治本：按设备采样率重采样，且**先重采样、后压峰值** ----
+  // ---- 朗读音质：piper 必须写真实文件，绝不能写 stdout ----
   //
-  // 实测链（真实应用内 + 本地离线对照，都有数）：
-  //   磁盘 wav       峰值 87.5% FS，最长贴顶平台 1 个样本 → 文件不是削波源
-  //   16k 上下文解码 峰值 0.875，削波 0
-  //   48k 上下文解码 峰值 1.4589，削波 827
-  //   自写加窗 sinc 重采样 16k→48k（taps=16/32）峰值 1.4044 / 1.4741
-  // 最后一条是关键：过冲不是浏览器的 bug，是**这份音频升采样必然振铃**
-  // （piper 16k 输出在奈奎斯特附近能量足）。用户设备 48 kHz，升采样躲不掉 →
-  // 重采样必须握在自己手里，压峰值必须在重采样之后。
-  ['朗读：按设备采样率重采样，压峰值在重采样之后（爆音治本）', () => {
+  // 实测（同一模型 en_US-lessac-low、同一文本，只差一个参数）：
+  //     --output_file <真实文件>   谱平坦度 0.0027  浊音帧 39/40  跳变 p99=9032
+  //     --output_file -（stdout）  谱平坦度 0.5382  浊音帧  1/40  跳变 p99=55040
+  // 前一个是干净语音，后一个是噪声（还多出 554 字节尾部残渣）。
+  // piper 1.2.0 写 stdout 的那条路径就是坏的 —— 表现是「合成成功却一片杂音」。
+  ['朗读：piper 输出走真实文件（写 stdout 会吐噪声）', () => {
     const tt = fs.readFileSync(path.join(ROOT, 'src-tauri/src/tts/mod.rs'), 'utf8');
-    const rs = fs.readFileSync(path.join(ROOT, 'src-tauri/src/commands/tts.rs'), 'utf8');
-    const sp = fs.readFileSync(path.join(ROOT, 'src/js/speak.js'), 'utf8');
     const apijs = fs.readFileSync(path.join(ROOT, 'src/js/api.js'), 'utf8');
+    const sp = fs.readFileSync(path.join(ROOT, 'src/js/speak.js'), 'utf8');
 
-    if (!/pub fn resample_i16/.test(tt)) throw new Error('缺 PCM 重采样函数');
-    if (!/pub fn resample_wav/.test(tt)) throw new Error('缺 WAV 重采样函数');
-    // 多相 + 加窗，不是最近邻/线性插值那种糊弄实现
-    if (!/let mut table: Vec<Vec<f64>>/.test(tt)) throw new Error('重采样不是多相实现');
-    if (!/blackman/.test(tt)) throw new Error('sinc 没有加窗（会有严重振铃）');
-
-    // ★ 顺序命门：resample_wav 里必须是「先重采样，再 limit_peak」
-    const i0 = tt.indexOf('pub fn resample_wav');
-    if (i0 < 0) throw new Error('找不到 resample_wav');
-    const body = tt.slice(i0, i0 + 2000);
-    const iRes = body.indexOf('resample_i16(&src_i16');
-    const iLim = body.indexOf('limit_peak(&mut p);');
-    if (iRes < 0) throw new Error('resample_wav 没有真的重采样');
-    if (iLim < 0) throw new Error('resample_wav 重采样后没有压峰值');
-    if (iLim < iRes) throw new Error('压峰值在重采样之前：过冲压不住（实测会到 1.4 倍）');
-
-    // 缓存键必须带目标采样率，否则 48k 产物会被 44.1k 机器命中
-    if (!/pub fn cache_key_at/.test(tt)) throw new Error('缓存键没有区分采样率');
-    if (!/cache_key_at\(&chosen, &text, rate, dst\)/.test(rs)) {
-      throw new Error('合成命令没有把目标采样率写进缓存键');
+    // ★ 命门：不得再出现 `--output_file -`
+    const i0 = tt.indexOf('pub fn synth_blocking');
+    if (i0 < 0) throw new Error('找不到 synth_blocking');
+    const body = tt.slice(i0, i0 + 4000);
+    const iArg = body.indexOf('.arg("--output_file")');
+    if (iArg < 0) throw new Error('synth_blocking 没有指定输出文件');
+    const after = body.slice(iArg, iArg + 200);
+    if (/\.arg\("-"\)/.test(after)) {
+      throw new Error('piper 仍在写 stdout（--output_file -）：实测会吐噪声而不是语音');
     }
-    if (!/tts::resample_wav\(&wav, dst\)/.test(rs)) throw new Error('合成结果没有按设备率重采样');
-    if (!/target_rate: Option<u32>/.test(rs)) throw new Error('合成命令不接收目标采样率');
+    // 写完要读回并删除临时文件，别在 temp 里堆一地 wav
+    if (!/std::fs::read\(&tmp\)/.test(body)) throw new Error('没有把 piper 写的文件读回来');
+    if (!/std::fs::remove_file\(&tmp\)/.test(body)) throw new Error('临时文件没有清理');
+    // 并发安全：文件名要带唯一后缀
+    if (!/SYNTH_SEQ/.test(body)) throw new Error('临时文件名没有唯一化，并发合成会撞车');
 
-    // 前端要把设备采样率传下去
-    if (!/devRate/.test(sp)) throw new Error('speak.js 没有取设备采样率');
-    if (!/API\.ttsSpeak\(text, lang, accent, devRate\)/.test(sp)) {
-      throw new Error('合成请求没有带上设备采样率');
+    // 重采样整套已经撤掉（干净语音升采样不过冲，实测过冲比 0.999）
+    if (/resample_wav|resample_i16/.test(tt)) {
+      throw new Error('重采样代码还在：干净语音上实测不过冲，这段只会平添风险与体积');
     }
-    // ★ 参数名必须 camelCase：#[tauri::command] 默认 rename_all = camelCase。
-    //   写成 target_rate 会静默丢失（Option 参数不报错），重采样就不发生 ——
-    //   这条正是本次踩到的坑，必须钉死。
-    if (!/targetRate:/.test(apijs)) throw new Error('api.js 没有以 camelCase 透传 targetRate');
-    if (/target_rate:/.test(apijs)) {
-      throw new Error('api.js 用了 snake_case 的 target_rate：Tauri 默认按 camelCase 匹配，会静默丢失');
+    // 前端也不该再传设备采样率了（投递回原生率，体积才是 1 倍）
+    if (/targetRate|devRate/.test(apijs) || /devRate/.test(sp)) {
+      throw new Error('前端还在传设备采样率：投递应按语音包原生率（用户要的低码率）');
     }
-    return '后端重采样 + 采样率后压峰值 + 前端按 camelCase 传设备率';
+    // 峰值限制仍要保留：piper 直出峰值会打满 16bit
+    if (!/const PEAK_CEIL: i32 = 28672;/.test(tt)) throw new Error('缺峰值限制（piper 直出实测峰值 100% FS）');
+    return '写真实文件 + 读回即删 + 文件名唯一 + 峰值限制在岗';
   }],
 
   ['Plan.load()', () => sandbox.Plan.load()],

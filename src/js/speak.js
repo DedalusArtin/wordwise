@@ -588,22 +588,7 @@ const Speak = (() => {
       });
     }
 
-    // ★ 设备采样率：AudioContext 默认就是设备率（本机实测 48000）。
-    //   让后端按这个率出音频，前端解码时就零重采样 —— 而 16k→48k 的升采样
-    //   实测会振铃过冲到 1.40~1.47 倍（我们自己的加窗 sinc 也一样，不是
-    //   浏览器的 bug），过冲就是「爆音」。压峰值只能在重采样之后做，所以
-    //   重采样必须握在我们自己手里。
-    let devRate = (audioCtx && audioCtx.sampleRate) ? audioCtx.sampleRate : 0;
-    if (!devRate) {
-      // 兜底：上下文还没建起来时临时问一次（sampleRate 在 suspended 状态下也读得到）
-      try {
-        const AC = window.AudioContext || window.webkitAudioContext;
-        const tmp = new AC();
-        devRate = tmp.sampleRate || 0;
-        if (tmp.close) tmp.close();
-      } catch (e) { devRate = 0; }
-    }
-    return API.ttsSpeak(text, lang, accent, devRate)
+    return API.ttsSpeak(text, lang, accent)
       .then((res) => {
         if (!res || !res.audio) return false;
         // 合成期间用户可能已经点了别的词 —— 那就别出声了
