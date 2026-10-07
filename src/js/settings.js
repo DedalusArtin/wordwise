@@ -1361,7 +1361,57 @@ const Settings = (() => {
     }
   }
 
+  /* ---- 设置页折叠整理 ----
+     面板太多，一屏全是细节，用户原话「设置页太乱，全部整理一下，
+     折叠或苹果式那种美观一点」。整理规则：
+       · 每个面板的标题就是折叠头（点标题收起/展开，带箭头指示）；
+       · 「高级」类面板（演示模式 / 网络 / 词典源 / 数据库 / 存储位置）
+         默认收起，常用的全部展开；
+       · 用户的手动选择按面板标题记在 localStorage，跨启动保留。 */
+  const LS_PANEL_FOLD = 'ww.settings.fold';
+
+  function setupPanelFolds() {
+    const page = document.getElementById('page-settings');
+    if (!page || page.__foldsBound) return;
+    page.__foldsBound = true;
+    let folded = {};
+    try { folded = JSON.parse(localStorage.getItem(LS_PANEL_FOLD) || '{}'); } catch (e) {}
+    const COLLAPSED_BY_DEFAULT = ['演示模式', '网络与代理', '词典与翻译源（可扩展小语种）', '数据库', '数据与模型的存放位置'];
+    page.querySelectorAll(':scope > .panel').forEach((panel) => {
+      const title = panel.querySelector(':scope > .panel-title');
+      if (!title) return;
+      const name = (title.textContent || '').trim();
+      panel.classList.add('foldable');
+      const caret = document.createElement('span');
+      caret.className = 'pt-caret';
+      caret.setAttribute('aria-hidden', 'true');
+      title.appendChild(caret);
+      title.setAttribute('role', 'button');
+      title.setAttribute('tabindex', '0');
+      const apply = (on) => {
+        panel.classList.toggle('collapsed', on);
+        caret.textContent = on ? '▸' : '▾';
+        title.setAttribute('aria-expanded', on ? 'true' : 'false');
+      };
+      const init = Object.prototype.hasOwnProperty.call(folded, name)
+        ? !!folded[name]
+        : COLLAPSED_BY_DEFAULT.includes(name);
+      apply(init);
+      const toggle = () => {
+        const on = !panel.classList.contains('collapsed');
+        apply(on);
+        folded[name] = on;
+        try { localStorage.setItem(LS_PANEL_FOLD, JSON.stringify(folded)); } catch (e) { /* 忽略 */ }
+      };
+      title.addEventListener('click', toggle);
+      title.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(); }
+      });
+    });
+  }
+
   function bind() {
+    setupPanelFolds();
     document.getElementById('btn-save-settings')?.addEventListener('click', save);
     document.getElementById('btn-add-source')?.addEventListener('click', addSource);
     document.getElementById('btn-reset-sources')?.addEventListener('click', resetSources);

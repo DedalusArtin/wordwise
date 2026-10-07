@@ -91,6 +91,8 @@ const API = {
   llmStatus: () => invoke('cmd_llm_status'),
   // N 卡 / GPU 加速状态（nvidia-smi 探测 + Vulkan 引擎）
   gpuStatus: () => invoke('cmd_gpu_status'),
+  // 真正退出应用（关闭行为设为「直接退出」时用）
+  appExit: () => invoke('cmd_app_exit'),
   llmAutoconnect: () => invoke('cmd_llm_autoconnect'),
   // ★ 返回 ExplainResult { word, text, original, lang, translated, note }
   //   而不是字符串：text 是最终展示文本，original 是模型原文（供「查看原文」对照）。

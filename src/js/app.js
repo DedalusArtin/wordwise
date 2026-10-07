@@ -278,9 +278,13 @@ const App = (() => {
       });
     });
 
-    // 关闭 = 隐藏到托盘（不是退出程序）。退出请用托盘菜单。
-    document.getElementById('btn-close-win')?.addEventListener('click', () =>
-      winAction('隐藏窗口', () => WIN.hide()));
+    // 关闭行为可选（设置 → 记忆辅助内容）：默认缩小到托盘（后台词库增强、
+    // 复习提醒继续跑）；关掉开关则真正退出（设置 → 关于与更新也可退出）。
+    document.getElementById('btn-close-win')?.addEventListener('click', () => {
+      const toTray = !(config && config.study && config.study.close_to_tray === false);
+      if (toTray) winAction('隐藏窗口', () => WIN.hide());
+      else winAction('退出', () => API.appExit());
+    });
 
     document.getElementById('btn-open-sidebar')?.addEventListener('click', async () => {
       try {

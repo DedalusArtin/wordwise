@@ -84,6 +84,8 @@ fn build_invoke_handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync +
         commands::explain::cmd_enrich_status,
         // N 卡 / GPU 加速状态（Vulkan 后端 + nvidia-smi 探测）
         commands::localllm::cmd_gpu_status,
+        // 关闭行为可选：直接退出（默认是缩小到托盘）
+        commands::localllm::cmd_app_exit,
         // 词库
         commands::cmd_list_words,
         commands::cmd_add_word,

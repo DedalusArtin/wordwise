@@ -3452,6 +3452,21 @@ h1 .ver-chip { font-size: 11px; padding: 2px 8px; vertical-align: 4px; }
 }
 .tts-topbar .panel-title { margin-bottom: 0; }
 
+/* ---- 设置页折叠：标题即折叠头，收起时只留标题一行 ----
+   「高级」类面板默认收起（演示模式 / 网络 / 词典源 / 数据库 / 存储位置），
+   常用面板全展开 —— 一屏不再全是细节。caret 由 settings.js 插入。 */
+.panel.foldable > .panel-title {
+  display: flex; align-items: center; gap: 7px;
+  cursor: pointer; user-select: none;
+}
+.panel.foldable > .panel-title .pt-caret {
+  font-size: 10px; line-height: 1; color: var(--text-3);
+  transition: transform .12s ease;
+}
+.panel.foldable > .panel-title:hover .pt-caret { color: var(--text-2); }
+.panel.foldable.collapsed > *:not(.panel-title) { display: none !important; }
+.panel.foldable.collapsed { padding-bottom: 14px; }
+
 /* ---- 语音健康行：朗读链路失败的常驻出口 ----
    toast 5 秒消失，这里的错误**一直挂着**，直到下一次成功朗读把它盖掉。
    正常态显示中性小字（最近一次朗读用的是谁），错误态红字 + 可读原因。 */

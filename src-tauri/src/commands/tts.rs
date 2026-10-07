@@ -399,6 +399,10 @@ pub async fn cmd_tts_speak(
     // 缓存命中：连 piper 都不用起
     if let Ok(bytes) = std::fs::read(&wav_path) {
         if bytes.len() > 64 {
+            // ★ 旧缓存可能是 piper 流式写坏的（尺寸字段与实际不符）——
+            //   命中后先规范化，修好的版本回写缓存，坏缓存由此自愈。
+            let bytes = tts::normalize_wav(&bytes);
+            let _ = std::fs::write(&wav_path, &bytes);
             let out = tts::SynthOut {
                 audio: encode_wav(&bytes),
                 sample_rate: tts::wav_sample_rate(&bytes),
@@ -419,6 +423,11 @@ pub async fn cmd_tts_speak(
         .await
         .map_err(|e| format!("合成任务失败：{e}"))?
         .map_err(err)?;
+
+    // ★ 规范化后再落盘：piper 流式输出的尺寸字段可能与实际差上百字节，
+    //   直接缓存的话，下次命中还是播不出来（重新下载语音包也无解——
+    //   坏产物会原样再生成）。规范化后尺寸字段与数据严格一致。
+    let wav = tts::normalize_wav(&wav);
 
     // 写缓存（失败不影响这次播放）
     let _ = std::fs::create_dir_all(&cache);

@@ -964,6 +964,78 @@ pub fn synth_blocking(exe: &Path, model: &Path, text: &str, rate: f32) -> Result
 
 /// 从 WAV 字节里读采样率（第 24~27 字节，小端）。
 /// 读不出来返回 0，不影响播放。
+/// 把 piper 输出的 WAV **规范化**：重建尺寸字段，使其与实际数据完全一致。
+///
+/// 为什么必须做：piper 1.2.0 是**流式**写 wav —— 先按预估样本数写
+/// RIFF/data 尺寸，合成完再回填。实测某些文本（espeak 音素化的偏差）
+/// 会让回填值与实际输出**差上百字节、甚至差出奇数字节**（16bit PCM
+/// 的字节数必须是偶数，奇数说明尾部撕裂）。这种文件 Chromium 按
+/// 尺寸字段解码后校验失败，前端拿到 NotSupportedError —— 用户看到的
+/// 正是「合成成功却播不出」，而且**重新下载语音包也没用**（坏的产物
+/// 会原样再生成一次）。
+///
+/// 规范化只信 fmt 里的格式字段与 data 声明的长度，超出部分（日志残渣 /
+/// 撕裂尾巴）按声明截掉，尺寸全部重算。输入不是合法 WAV 时原样返回。
+pub fn normalize_wav(bytes: &[u8]) -> Vec<u8> {
+    if bytes.len() < 44 || &bytes[0..4] != b"RIFF" || &bytes[8..12] != b"WAVE" {
+        return bytes.to_vec();
+    }
+    let u16_at = |o: usize| -> u16 {
+        u16::from_le_bytes([bytes[o], bytes.get(o + 1).copied().unwrap_or(0)])
+    };
+    let u32_at = |o: usize| -> u32 {
+        u32::from_le_bytes([
+            bytes[o],
+            bytes.get(o + 1).copied().unwrap_or(0),
+            bytes.get(o + 2).copied().unwrap_or(0),
+            bytes.get(o + 3).copied().unwrap_or(0),
+        ])
+    };
+    let audio_format = u16_at(20);
+    let channels = u16_at(22).max(1);
+    let sample_rate = u32_at(24).max(1);
+    let bits = u16_at(34).max(8);
+
+    // 遍历 chunk 找 data（piper 的输出 fmt 在最前，但按规范遍历更稳）
+    let mut pos = 12usize;
+    let mut pcm: Option<&[u8]> = None;
+    while pos + 8 <= bytes.len() {
+        let id = &bytes[pos..pos + 4];
+        let size = u32_at(pos + 4) as usize;
+        let body = pos + 8;
+        if id == b"data" {
+            let avail = bytes.len().saturating_sub(body);
+            // 只信声明长度：声明之外的东西（日志残渣 / 撕裂尾巴）一律丢
+            pcm = Some(&bytes[body..body + size.min(avail)]);
+            break;
+        }
+        pos = body + size + (size & 1); // chunk 按 2 字节对齐
+    }
+    let Some(pcm) = pcm else {
+        return bytes.to_vec();
+    };
+    // PCM 长度必须是 block_align 的整数倍，截齐（奇数字节必是撕裂）
+    let align = ((channels as usize) * (bits as usize) / 8).max(1);
+    let pcm = &pcm[..pcm.len() - pcm.len() % align];
+
+    let mut out = Vec::with_capacity(44 + pcm.len());
+    out.extend_from_slice(b"RIFF");
+    out.extend_from_slice(&((36 + pcm.len()) as u32).to_le_bytes());
+    out.extend_from_slice(b"WAVE");
+    out.extend_from_slice(b"fmt ");
+    out.extend_from_slice(&16u32.to_le_bytes());
+    out.extend_from_slice(&audio_format.to_le_bytes());
+    out.extend_from_slice(&channels.to_le_bytes());
+    out.extend_from_slice(&sample_rate.to_le_bytes());
+    out.extend_from_slice(&((sample_rate as usize * align) as u32).to_le_bytes());
+    out.extend_from_slice(&(align as u16).to_le_bytes());
+    out.extend_from_slice(&bits.to_le_bytes());
+    out.extend_from_slice(b"data");
+    out.extend_from_slice(&(pcm.len() as u32).to_le_bytes());
+    out.extend_from_slice(pcm);
+    out
+}
+
 pub fn wav_sample_rate(bytes: &[u8]) -> u32 {
     if bytes.len() < 28 || &bytes[0..4] != b"RIFF" || &bytes[8..12] != b"WAVE" {
         return 0;
@@ -1352,6 +1424,42 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
         assert!(installed_voices(&tmp).is_empty());
         assert!(!engine_ready(&tmp));
+    }
+
+    /// 用**用户库里的真实坏样本**锁死：piper 流式输出会把 RIFF/data
+    /// 尺寸字段写得比实际小 123 字节（还是奇数），Chromium 拒播 ——
+    /// 规范化后尺寸必须与数据严格一致，PCM 内容不变。
+    #[test]
+    fn normalize_wav_repairs_piper_size_fields() {
+        // 22050Hz 单声道 16bit，声明 data=24180 字节，实际尾随 123 字节残渣
+        let mut bad: Vec<u8> = Vec::new();
+        bad.extend_from_slice(b"RIFF");
+        bad.extend_from_slice(&(24180u32 + 36).to_le_bytes());
+        bad.extend_from_slice(b"WAVEfmt ");
+        bad.extend_from_slice(&16u32.to_le_bytes());
+        bad.extend_from_slice(&1u16.to_le_bytes());      // PCM
+        bad.extend_from_slice(&1u16.to_le_bytes());      // mono
+        bad.extend_from_slice(&22050u32.to_le_bytes());
+        bad.extend_from_slice(&44100u32.to_le_bytes());
+        bad.extend_from_slice(&2u16.to_le_bytes());
+        bad.extend_from_slice(&16u16.to_le_bytes());
+        bad.extend_from_slice(b"data");
+        bad.extend_from_slice(&24180u32.to_le_bytes());
+        bad.resize(44 + 24303, 0);                        // 实际数据多 123 字节（含奇数尾巴）
+
+        let fixed = normalize_wav(&bad);
+        assert_eq!(&fixed[0..4], b"RIFF");
+        let riff_size = u32::from_le_bytes([fixed[4], fixed[5], fixed[6], fixed[7]]) as usize;
+        let data_size = u32::from_le_bytes([fixed[40], fixed[41], fixed[42], fixed[43]]) as usize;
+        assert_eq!(data_size, fixed.len() - 44, "data 尺寸必须与实际一致");
+        assert_eq!(riff_size, fixed.len() - 8, "RIFF 尺寸必须与实际一致");
+        assert_eq!(data_size % 2, 0, "16bit PCM 的字节数必须是偶数");
+        // 内容：按声明截取的 PCM（24180 字节）应原样保留
+        assert_eq!(&fixed[44..44 + 64], &bad[44..44 + 64]);
+        // 规范化是幂等的
+        assert_eq!(normalize_wav(&fixed), fixed);
+        // 非 WAV 原样返回
+        assert_eq!(normalize_wav(b"not a wav"), b"not a wav");
     }
 
     #[test]

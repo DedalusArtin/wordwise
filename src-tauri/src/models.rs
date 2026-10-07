@@ -98,6 +98,10 @@ fn default_open_links_in_app() -> bool {
     true
 }
 
+fn default_close_to_tray() -> bool {
+    true
+}
+
 /// 文本里是否含汉字（CJK 统一表意文字）。用于区分「中文释义」与「原文释义」。
 fn contains_han(s: &str) -> bool {
     s.chars()
@@ -615,6 +619,10 @@ pub struct StudyOptions {
     /// 「下载安装包」这类必须离开软件的动作不受它管（走 openExternal）。
     #[serde(default = "default_open_links_in_app")]
     pub open_links_in_app: bool,
+    /// 点窗口关闭按钮时：true = 缩小到托盘（后台词库增强、复习提醒继续跑）；
+    /// false = 直接退出。默认 true，与既有行为一致。
+    #[serde(default = "default_close_to_tray")]
+    pub close_to_tray: bool,
     /// 每轮题量
     pub batch_size: i64,
     /// 每日复习上限
@@ -664,6 +672,7 @@ impl Default for StudyOptions {
             auto_popup_on_wrong: true,
             ai_explain: true,
             open_links_in_app: default_open_links_in_app(),
+            close_to_tray: default_close_to_tray(),
             batch_size: 20,
             daily_limit: 120,
             option_count: default_option_count(),

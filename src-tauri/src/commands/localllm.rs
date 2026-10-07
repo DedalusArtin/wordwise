@@ -608,3 +608,14 @@ fn locate_nvidia_smi() -> Option<PathBuf> {
     }
     None
 }
+
+
+/// 真正退出应用（托盘菜单的 quit 与它等价）。
+///
+/// 「关闭 = 缩小到托盘」是默认行为，但用户可以在设置里改成「直接退出」；
+/// 前端据此决定调 hide 还是这里。退出走 app.exit 让 Tauri 跑完清理
+/// （托盘注销、子进程回收 —— cleanup_on_exit 挂在退出钩子上）。
+#[tauri::command]
+pub fn cmd_app_exit(app: tauri::AppHandle) {
+    app.exit(0);
+}
