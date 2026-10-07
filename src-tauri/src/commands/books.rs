@@ -43,7 +43,7 @@ fn builtin_roots() -> Vec<Wordbook> {
 }
 
 /// 列出全部词库（含内置根节点 + 用户导入的），并附带学习进度。
-#[tauri::command]
+#[tauri::command(async)]
 pub fn cmd_list_wordbooks(
     state: State<'_, Arc<AppState>>,
     lang: Option<String>,
@@ -88,7 +88,7 @@ pub fn cmd_list_wordbooks(
 }
 
 /// 取单个词库详情。
-#[tauri::command]
+#[tauri::command(async)]
 pub fn cmd_get_wordbook(
     state: State<'_, Arc<AppState>>,
     id: String,
@@ -100,7 +100,7 @@ pub fn cmd_get_wordbook(
 }
 
 /// 新建一个空词库（用户自建，如「我的生词本」）。
-#[tauri::command]
+#[tauri::command(async)]
 pub fn cmd_create_wordbook(
     state: State<'_, Arc<AppState>>,
     name: String,
@@ -137,7 +137,7 @@ pub fn cmd_create_wordbook(
 }
 
 /// 删除词库（内置根节点不可删）。
-#[tauri::command]
+#[tauri::command(async)]
 pub fn cmd_delete_wordbook(state: State<'_, Arc<AppState>>, id: String) -> Result<(), String> {
     if builtin_roots().iter().any(|b| b.id == id) {
         return Err("内置词库不可删除".into());
@@ -150,7 +150,7 @@ pub fn cmd_delete_wordbook(state: State<'_, Arc<AppState>>, id: String) -> Resul
 /// - `content` 原始文本（JSON / CSV / TSV / 纯文本皆可，自动识别）
 /// - `book_id` 目标词库；不存在会自动创建
 /// - `auto_create` 为 true 且 book_id 为空时，按内容推断词库名
-#[tauri::command]
+#[tauri::command(async)]
 pub fn cmd_import_words_to_book(
     state: State<'_, Arc<AppState>>,
     content: String,
@@ -289,7 +289,7 @@ pub fn cmd_import_words_to_book(
 
 /// 内置可下载词库目录（需求 5）。
 /// 会把「已安装」状态回填，方便界面区分。
-#[tauri::command]
+#[tauri::command(async)]
 pub fn cmd_remote_catalog(
     state: State<'_, Arc<AppState>>,
     category: Option<String>,
@@ -544,7 +544,7 @@ async fn fetch_book_text_once(client: &reqwest::Client, url: &str) -> Result<Str
 }
 
 /// 查看「已背过的单词」（需求 4）。
-#[tauri::command]
+#[tauri::command(async)]
 pub fn cmd_reviewed_words(
     state: State<'_, Arc<AppState>>,
     lang: Option<String>,
@@ -558,7 +558,7 @@ pub fn cmd_reviewed_words(
 }
 
 /// 列出某个词库里的单词（需求 5：进词库看内容）。
-#[tauri::command]
+#[tauri::command(async)]
 pub fn cmd_words_in_book(
     state: State<'_, Arc<AppState>>,
     book_id: String,

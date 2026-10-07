@@ -916,12 +916,19 @@
           </label>
 
           <!-- 朗读输出设备：每台机器的音频设备不同（有的机器默认设备失效
-               会让 <audio> 全部播不出），这里可把朗读指到任意输出设备 -->
+               会让 <audio> 全部播不出），这里可把朗读指到任意输出设备。
+               下拉由「Windows 注册表真名」填充 —— WebView2 的
+               enumerateDevices 没拿到媒体权限时只给一个匿名默认设备。 -->
           <label class="field"><span>朗读输出设备</span>
             <select id="tts-output">
               <option value="">系统默认</option>
             </select>
           </label>
+          <div class="btn-row" style="margin-top:6px">
+            <button class="ghost-btn xs" id="tts-output-pick" type="button">在系统中挑选…</button>
+            <span class="muted" style="font-size:12px">应用内切换要浏览器授权；
+              拿不到授权时请到 Windows「设置 → 系统 → 声音」里改默认设备</span>
+          </div>
           <!-- 本机输出设备检测（读 Windows 注册表，绕过 WebView2 权限限制） -->
           <div class="muted" id="tts-devices" style="font-size:12px;margin-top:6px"></div>
 

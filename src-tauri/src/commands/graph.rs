@@ -28,7 +28,7 @@ const FOCUS_EDGE_LIMIT: usize = 160;
 ///
 /// 幂等：`upsert_edges` 用的是 `ON CONFLICT DO NOTHING`，重复跑不会
 /// 覆盖 AI 发散出来的边，也不会产生重复行。
-#[tauri::command]
+#[tauri::command(async)]
 pub fn cmd_graph_build(state: State<'_, Arc<AppState>>, lang: Option<String>) -> Result<usize, String> {
     let cfg = state.cfg();
     let lang = lang.unwrap_or(cfg.target_lang.clone());
@@ -53,7 +53,7 @@ pub fn cmd_graph_build(state: State<'_, Arc<AppState>>, lang: Option<String>) ->
 ///
 /// - 传 `center`：以该词为中心做 N 跳 BFS（`depth` 默认 1，最大 2）
 /// - 不传：全局视图，取连接度最高的一批边
-#[tauri::command]
+#[tauri::command(async)]
 pub fn cmd_graph_view(
     state: State<'_, Arc<AppState>>,
     lang: Option<String>,
@@ -211,7 +211,7 @@ pub async fn cmd_graph_expand(
 }
 
 /// 搜索图谱里的节点（图谱页搜索框）。
-#[tauri::command]
+#[tauri::command(async)]
 pub fn cmd_graph_search(
     state: State<'_, Arc<AppState>>,
     q: String,
@@ -234,13 +234,13 @@ pub fn cmd_graph_search(
 }
 
 /// 关系类型清单（前端图例与筛选器直接用，保证与后端同一份）。
-#[tauri::command]
+#[tauri::command(async)]
 pub fn cmd_graph_rels() -> Vec<serde_json::Value> {
     graph::all_rels()
 }
 
 /// 清空某语言的图谱（重新构建前的「重置」）。
-#[tauri::command]
+#[tauri::command(async)]
 pub fn cmd_graph_clear(state: State<'_, Arc<AppState>>, lang: Option<String>) -> Result<usize, String> {
     let cfg = state.cfg();
     let lang = lang.unwrap_or(cfg.target_lang.clone());
@@ -248,7 +248,7 @@ pub fn cmd_graph_clear(state: State<'_, Arc<AppState>>, lang: Option<String>) ->
 }
 
 /// 图谱概览统计（导航角标 / 空状态提示用）。
-#[tauri::command]
+#[tauri::command(async)]
 pub fn cmd_graph_stats(
     state: State<'_, Arc<AppState>>,
     lang: Option<String>,

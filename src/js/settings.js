@@ -1202,25 +1202,8 @@ const Settings = (() => {
       if (window.Speak && window.Speak.setEnginePref) window.Speak.setEnginePref(e);
     }
 
-    // 朗读输出设备：枚举本机所有输出设备（每台机器不同；有的机器默认设备
-    // 失效会让 <audio> 全部播不出，指到别的设备即可绕开）
-    const outSel = ttsEl('tts-output');
-    if (outSel && navigator.mediaDevices && navigator.mediaDevices.enumerateDevices) {
-      navigator.mediaDevices.enumerateDevices().then((devs) => {
-        const outs = devs.filter((d) => d.kind === 'audiooutput');
-        const cur = (window.Speak && window.Speak.outputPref) ? window.Speak.outputPref() : '';
-        while (outSel.options.length > 1) outSel.remove(1);
-        outs.forEach((d, i) => {
-          const o = document.createElement('option');
-          o.value = d.deviceId;
-          // 设备名要媒体权限才拿得到；拿不到就用序号，至少能选
-          o.textContent = d.label || ('输出设备 ' + (i + 1));
-          outSel.appendChild(o);
-        });
-        outSel.value = cur;
-        if (outSel.value !== cur) outSel.value = '';   // 记住的设备已不在了 → 回默认
-      }).catch(() => { /* 枚举失败就只留系统默认 */ });
-    }
+    // 朗读输出设备：两路合并填充（细节见 refreshTtsOutputs 上的说明）
+    refreshTtsOutputs();
 
     // 本机输出设备检测：读 Windows 注册表（WebView2 的 enumerateDevices
     // 拿不到设备真名与列表，这里绕过它），帮助确认默认设备是否正确
@@ -1267,6 +1250,82 @@ const Settings = (() => {
     el.title = '';
   }
 
+  /**
+   * 填「朗读输出设备」下拉。
+   *
+   * ★ 为什么不能只靠 navigator.mediaDevices.enumerateDevices()：
+   *   WebView2 没拿到媒体权限时，它只返回一个空的「默认」设备 —— 下拉里就
+   *   只剩「系统默认」可挑（用户截图就是这个症状）。设备真名在 Windows
+   *   注册表里（cmd_audio_devices 实测能全部读出来，19 个终结点带真名）。
+   *
+   * 所以两路数据合并，各取所长：
+   *   注册表   → 设备真名 + 是否插入，决定下拉**看得到什么**
+   *   WebView2 → deviceId，决定这一项**能不能在应用内切换**（setSinkId 只认 id）
+   * 有 id 的项直接用；没有 id 的项也列出来，但如实标「需到系统设置切换」，
+   * 绝不假装能切 —— 骗人的下拉比只有一项更糟。
+   */
+  async function refreshTtsOutputs() {
+    const outSel = ttsEl('tts-output');
+    if (!outSel) return;
+
+    const cur = (window.Speak && window.Speak.outputPref) ? window.Speak.outputPref() : '';
+
+    // ① WebView2 认得的 deviceId（label 多半是空字符串）
+    let ids = [];
+    try {
+      if (navigator.mediaDevices && navigator.mediaDevices.enumerateDevices) {
+        const devs = await navigator.mediaDevices.enumerateDevices();
+        ids = devs.filter((d) => d.kind === 'audiooutput' && d.deviceId);
+      }
+    } catch (e) { ids = []; }
+
+    // ② 注册表里的设备真名
+    let named = [];
+    try {
+      const r = await API.audioDevices();
+      named = (r && r.devices) || [];
+    } catch (e) { named = []; }
+
+    // 只留第一项（「系统默认」）。真实 DOM 里 select.remove(i) 有效，但这里
+    // 加个上限兜底：万一某个环境认不下这个重载，下面的循环会变成死循环，
+    // 界面表现是「打开设置页直接卡住」——比只显示一项糟得多。
+    let guard = 0;
+    while (outSel.options.length > 1 && guard++ < 200) outSel.remove(1);
+    if (outSel.options.length > 1) outSel.options.length = 1;
+
+    const seen = new Set();
+    named.forEach((d) => {
+      const name = String((d && d.name) || '').trim();
+      if (!name || seen.has(name)) return;       // 注册表里有重名项，去重
+      seen.add(name);
+      // 名字能对上一个 deviceId，这一项就能在应用内切
+      const hit = ids.find((x) => x.label && name.indexOf(x.label) >= 0);
+      const o = document.createElement('option');
+      o.value = hit ? hit.deviceId : ('name:' + name);
+      o.textContent = name + (d.active ? '' : '（未插入）')
+        + (hit ? '' : ' · 需到系统设置切换');
+      outSel.appendChild(o);
+    });
+
+    // 注册表一路都没读到（非 Windows 或注册表被挡）：退回 WebView2 的清单
+    if (!named.length) {
+      ids.forEach((d, i) => {
+        const o = document.createElement('option');
+        o.value = d.deviceId;
+        o.textContent = d.label || ('输出设备 ' + (i + 1));
+        outSel.appendChild(o);
+      });
+    }
+
+    // 记住的设备还在列表里就选中；不在了（比如拔了）就回默认
+    if (cur) {
+      outSel.value = cur;
+      if (outSel.value !== cur) outSel.value = '';
+    } else {
+      outSel.value = '';
+    }
+  }
+
   function bindTts() {
     const sel = ttsEl('set-tts-engine');
     sel?.addEventListener('change', async () => {
@@ -1282,8 +1341,42 @@ const Settings = (() => {
     // 朗读输出设备：写进 Speak 偏好，元素与 WebAudio 两条通道都跟着走
     const outSel = ttsEl('tts-output');
     outSel?.addEventListener('change', () => {
-      if (window.Speak && window.Speak.setOutputPref) window.Speak.setOutputPref(outSel.value || '');
-      U().toast(outSel.value ? '朗读输出设备已切换' : '朗读输出设备已恢复系统默认', 'ok');
+      const v = outSel.value || '';
+      if (window.Speak && window.Speak.setOutputPref) window.Speak.setOutputPref(v);
+      if (!v) { U().toast('朗读输出设备已恢复系统默认', 'ok'); return; }
+      if (v.indexOf('name:') === 0) {
+        // 只有名字没有 deviceId：setSinkId 用不了，如实告诉用户去哪切
+        U().toast('已记下「' + v.slice(5) + '」。这台机器上浏览器不开放应用内切换，'
+          + '请到 Windows「设置 → 系统 → 声音」把它设为默认设备', 'warn');
+        return;
+      }
+      U().toast('朗读输出设备已切换', 'ok');
+    });
+
+    // 「在系统中挑选…」：走 navigator.mediaDevices.selectAudioOutput()。
+    // 这是唯一能合法拿到 deviceId + 真名的正路（必须用户手势触发）。成功之后
+    // 浏览器会把音频输出权限给到本站，enumerateDevices 也会开始带 label，
+    // setSinkId 才真正可用 —— 下拉就不再只剩「系统默认」了。
+    ttsEl('tts-output-pick')?.addEventListener('click', async () => {
+      const md = navigator.mediaDevices;
+      if (!md || typeof md.selectAudioOutput !== 'function') {
+        U().toast('当前运行环境不支持在应用内挑选输出设备，请到 Windows「设置 → 系统 → 声音」里切换默认设备', 'warn');
+        return;
+      }
+      let picked = null;
+      try {
+        picked = await md.selectAudioOutput();
+      } catch (err) {
+        const nm = (err && err.name) || '';
+        if (nm === 'NotAllowedError') U().toast('已取消挑选输出设备', 'warn');
+        else U().toast('挑选输出设备失败：' + String((err && err.message) || err), 'err');
+        return;
+      }
+      if (picked && picked.deviceId) {
+        if (window.Speak && window.Speak.setOutputPref) window.Speak.setOutputPref(picked.deviceId);
+        await refreshTtsOutputs();
+        U().toast('朗读输出设备已切到：' + (picked.label || '所选设备'), 'ok');
+      }
     });
 
     // 语音包列表是重渲染的，所以用事件委托而不是逐个绑定
@@ -1621,6 +1714,9 @@ const Settings = (() => {
   return {
     bind, load, save,
     renderSpeakVoices, loadSpeak, loadTts, renderTtsFooter,
+    // 输出设备下拉的填充函数也导出：冒烟测试要能直接断言「下拉里有注册表
+    // 真名」，而不是去猜 DOM 里到底长出了几个 option。
+    refreshTtsOutputs,
     // 折叠状态写入函数也导出：冒烟测试要能直接断言「开合后 body 用的是
     // `.hidden` class 而不是 `hidden` 属性」，而不是去猜 DOM 长什么样
     applyLangOpen,

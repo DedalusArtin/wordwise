@@ -51,7 +51,7 @@ pub(crate) fn load_entry(state: &AppState, word: &str, lang: &str) -> Option<Wor
 }
 
 /// 带筛选的错题列表。
-#[tauri::command]
+#[tauri::command(async)]
 pub fn cmd_leech_query(
     state: State<'_, Arc<AppState>>,
     lang: Option<String>,
@@ -91,7 +91,7 @@ pub fn cmd_leech_query(
 }
 
 /// 错题本概览（顶部统计条）。
-#[tauri::command]
+#[tauri::command(async)]
 pub fn cmd_leech_summary(
     state: State<'_, Arc<AppState>>,
     lang: Option<String>,
@@ -117,7 +117,7 @@ pub fn cmd_leech_summary(
 }
 
 /// 批量移出强化队列。
-#[tauri::command]
+#[tauri::command(async)]
 pub fn cmd_leech_remove_many(
     state: State<'_, Arc<AppState>>,
     words: Vec<String>,
@@ -288,7 +288,7 @@ fn to_csv(rows: &[LeechRow], now: i64) -> String {
 ///
 /// `format` 取 `md`（默认）或 `csv`。不传 `path` 时写到数据目录下的
 /// `exports/`，导完把完整路径回给前端，由前端提示并可一键打开所在文件夹。
-#[tauri::command]
+#[tauri::command(async)]
 pub fn cmd_leech_export(
     state: State<'_, Arc<AppState>>,
     format: Option<String>,

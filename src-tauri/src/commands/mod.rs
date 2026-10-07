@@ -50,7 +50,7 @@ pub struct AppInfo {
     pub db_path: String,
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn cmd_app_info(state: State<'_, Arc<AppState>>) -> Result<AppInfo, String> {
     let now = timeutil::now_ts();
     Ok(AppInfo {
@@ -66,13 +66,13 @@ pub fn cmd_app_info(state: State<'_, Arc<AppState>>) -> Result<AppInfo, String> 
 }
 
 /// 读取配置。
-#[tauri::command]
+#[tauri::command(async)]
 pub fn cmd_get_config(state: State<'_, Arc<AppState>>) -> AppConfig {
     state.cfg()
 }
 
 /// 保存配置。
-#[tauri::command]
+#[tauri::command(async)]
 pub fn cmd_save_config(state: State<'_, Arc<AppState>>, config: AppConfig) -> Result<(), String> {
     let old_network = state.cfg().network;
     state
@@ -98,7 +98,7 @@ pub fn cmd_save_config(state: State<'_, Arc<AppState>>, config: AppConfig) -> Re
 }
 
 /// 只更新记忆辅助开关（需求 3），前端设置面板高频调用。
-#[tauri::command]
+#[tauri::command(async)]
 pub fn cmd_set_study_options(
     state: State<'_, Arc<AppState>>,
     options: StudyOptions,
@@ -110,7 +110,7 @@ pub fn cmd_set_study_options(
 }
 
 /// 更新 LM Studio 配置。
-#[tauri::command]
+#[tauri::command(async)]
 pub fn cmd_set_llm_config(
     state: State<'_, Arc<AppState>>,
     llm: LlmConfig,
@@ -491,7 +491,7 @@ pub async fn cmd_translate_text(
 }
 
 /// 切换 AI 讲解语言并**立即落盘**（需求 5：选择后即时生效、记住上次选择）。
-#[tauri::command]
+#[tauri::command(async)]
 pub fn cmd_set_explain_lang(
     state: State<'_, Arc<AppState>>,
     lang: String,
@@ -544,7 +544,7 @@ pub struct Derivative {
 /// 凭规则写出 happiness 很容易，但用户点下去发现查不到，比不显示更糟。
 ///
 /// 上限 8 条：同族词是**补充信息**，塞满一屏就把释义挤没了。
-#[tauri::command]
+#[tauri::command(async)]
 pub fn cmd_word_family(
     state: State<'_, Arc<AppState>>,
     word: String,
@@ -921,7 +921,7 @@ pub async fn cmd_wiki(
 }
 
 /// 生成辞书跳转链接（需求 14）：本地没有的释义，一键去权威辞书查看。
-#[tauri::command]
+#[tauri::command(async)]
 pub fn cmd_dict_links(
     state: State<'_, Arc<AppState>>,
     word: String,
@@ -933,7 +933,7 @@ pub fn cmd_dict_links(
 }
 
 /// 用系统默认浏览器打开外部链接（辞书跳转用）。
-#[tauri::command]
+#[tauri::command(async)]
 pub fn cmd_open_url(
     state: State<'_, Arc<AppState>>,
     app: tauri::AppHandle,
@@ -987,7 +987,7 @@ pub(crate) fn open_in_browser(app: &tauri::AppHandle, url: &str) -> anyhow::Resu
 }
 
 /// 读取本地词库中的词。
-#[tauri::command]
+#[tauri::command(async)]
 pub fn cmd_get_word(
     state: State<'_, Arc<AppState>>,
     word: String,
@@ -998,7 +998,7 @@ pub fn cmd_get_word(
 }
 
 /// 检索本地词库。
-#[tauri::command]
+#[tauri::command(async)]
 pub fn cmd_search_words(
     state: State<'_, Arc<AppState>>,
     query: String,
@@ -1015,7 +1015,7 @@ pub fn cmd_search_words(
 }
 
 /// 最近搜索记录。
-#[tauri::command]
+#[tauri::command(async)]
 pub fn cmd_recent_searches(state: State<'_, Arc<AppState>>) -> Result<Vec<String>, String> {
     state.db.recent_searches(20).map_err(err)
 }
@@ -1025,7 +1025,7 @@ pub fn cmd_recent_searches(state: State<'_, Arc<AppState>>) -> Result<Vec<String
 // ============================================================
 
 /// 分页读取词库。
-#[tauri::command]
+#[tauri::command(async)]
 pub fn cmd_list_words(
     state: State<'_, Arc<AppState>>,
     lang: Option<String>,
@@ -1040,7 +1040,7 @@ pub fn cmd_list_words(
 }
 
 /// 新增/更新一个词条到词库。
-#[tauri::command]
+#[tauri::command(async)]
 pub fn cmd_add_word(state: State<'_, Arc<AppState>>, entry: WordEntry) -> Result<(), String> {
     let now = timeutil::now_ts();
     state.db.upsert_word(&entry, now).map_err(err)?;
@@ -1118,7 +1118,7 @@ pub struct ImportReport {
 }
 
 /// 删除词。
-#[tauri::command]
+#[tauri::command(async)]
 pub fn cmd_delete_word(
     state: State<'_, Arc<AppState>>,
     word: String,
@@ -1129,7 +1129,7 @@ pub fn cmd_delete_word(
 }
 
 /// 词库总量。
-#[tauri::command]
+#[tauri::command(async)]
 pub fn cmd_word_count(state: State<'_, Arc<AppState>>, lang: Option<String>) -> Result<i64, String> {
     let lang = lang.unwrap_or_else(|| state.cfg().target_lang);
     state.db.word_count(&lang).map_err(err)
@@ -1146,7 +1146,7 @@ pub fn cmd_word_count(state: State<'_, Arc<AppState>>, lang: Option<String>) -> 
 /// 2. 精确到期的词
 /// 3. 若不够，用「熟练度最低的词」补足
 /// 4. 若还不够，用词库中的新词补足（首次学习）
-#[tauri::command]
+#[tauri::command(async)]
 pub fn cmd_start_session(
     state: State<'_, Arc<AppState>>,
     mode: Option<QuizMode>,
@@ -1258,7 +1258,7 @@ pub fn cmd_start_session(
 /// - `size` 只作为**截断上限**（`None` = 全部到期词），绝不用于补足。
 /// - 一个到期的词都没有时返回 `total: 0`（前端据此提示「今天没有要复习的词」），
 ///   而不是报错 —— 「今天没到期」是正常状态。
-#[tauri::command]
+#[tauri::command(async)]
 pub fn cmd_start_review_session(
     state: State<'_, Arc<AppState>>,
     // 复习不单独选模式，但**必须让调用方传**：原来是从背诵槽里读
@@ -1400,7 +1400,7 @@ fn load_entry(
 }
 
 /// 取当前题目（含干扰项）。
-#[tauri::command]
+#[tauri::command(async)]
 pub fn cmd_current_question(
     state: State<'_, Arc<AppState>>,
     lang: Option<String>,
@@ -1735,7 +1735,7 @@ fn requeue_wrong(s: &mut crate::state::Session, word: &str) -> bool {
 }
 
 /// 提交答案 —— 驱动 SRS 调度（需求 4）。
-#[tauri::command]
+#[tauri::command(async)]
 pub fn cmd_submit_answer(
     state: State<'_, Arc<AppState>>,
     word: Option<String>,
@@ -1850,7 +1850,7 @@ fn grade_str(g: Grade) -> &'static str {
 }
 
 /// 跳过当前题。
-#[tauri::command]
+#[tauri::command(async)]
 pub fn cmd_skip(
     state: State<'_, Arc<AppState>>,
     // 会话类型：缺省 / `"study"` → 背诵槽；`"review"` → 复习槽（需求 14）。
@@ -1869,7 +1869,7 @@ pub fn cmd_skip(
 }
 
 /// 结束当前会话。
-#[tauri::command]
+#[tauri::command(async)]
 pub fn cmd_end_session(
     state: State<'_, Arc<AppState>>,
     // 会话类型：缺省 / `"study"` → 背诵槽；`"review"` → 复习槽（需求 14）。
@@ -1919,7 +1919,7 @@ pub struct AnswerResult {
 }
 
 /// 查询某个词的学习状态与记忆强度。
-#[tauri::command]
+#[tauri::command(async)]
 pub fn cmd_word_state(
     state: State<'_, Arc<AppState>>,
     word: String,
@@ -1957,7 +1957,7 @@ pub struct WordStateView {
 // ============================================================
 
 /// 学习总览。
-#[tauri::command]
+#[tauri::command(async)]
 pub fn cmd_stats(state: State<'_, Arc<AppState>>, lang: Option<String>) -> Result<Stats, String> {
     let lang = lang.unwrap_or_else(|| state.cfg().target_lang);
     let now = timeutil::now_ts();
@@ -1994,7 +1994,7 @@ pub fn cmd_stats(state: State<'_, Arc<AppState>>, lang: Option<String>) -> Resul
 }
 
 /// 未来 N 天复习计划（记忆周期表可视化）。
-#[tauri::command]
+#[tauri::command(async)]
 pub fn cmd_review_plan(
     state: State<'_, Arc<AppState>>,
     days: Option<i64>,
@@ -2278,7 +2278,7 @@ fn compute_study_goal(
 }
 
 /// 读取当前学习目标（前端据此渲染进度环与庆祝弹窗）。
-#[tauri::command]
+#[tauri::command(async)]
 pub fn cmd_study_goal(
     state: State<'_, Arc<AppState>>,
     book_id: Option<String>,
@@ -2288,7 +2288,7 @@ pub fn cmd_study_goal(
 }
 
 /// 设置学习目标（保存后立刻回传最新 goal，前端一次往返就够）。
-#[tauri::command]
+#[tauri::command(async)]
 pub fn cmd_set_study_goal(
     state: State<'_, Arc<AppState>>,
     mode: String,
@@ -2361,7 +2361,7 @@ pub fn cmd_set_study_goal(
 /// 被多背的词**必须进入复习轮**：这一点由 `cmd_submit_answer` → `srs::schedule`
 /// 保证（答完就会写入未来的 `due_at`），返回的 `pressure` 供前端提示
 /// 「加量会抬高轮次复习压力」。
-#[tauri::command]
+#[tauri::command(async)]
 pub fn cmd_extra_study(
     state: State<'_, Arc<AppState>>,
     extra: u32,
@@ -2387,7 +2387,7 @@ pub fn cmd_extra_study(
 }
 
 /// 错词本（需求 5）。
-#[tauri::command]
+#[tauri::command(async)]
 pub fn cmd_leech_list(
     state: State<'_, Arc<AppState>>,
     limit: Option<i64>,
@@ -2417,7 +2417,7 @@ pub struct LeechItem {
 }
 
 /// 把词移出强化记忆队列。
-#[tauri::command]
+#[tauri::command(async)]
 pub fn cmd_clear_leech(
     state: State<'_, Arc<AppState>>,
     word: String,
@@ -2438,13 +2438,13 @@ pub fn cmd_clear_leech(
 // 七、词典源管理（需求 6）
 // ============================================================
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn cmd_get_sources(state: State<'_, Arc<AppState>>) -> Vec<DictSourceConfig> {
     state.cfg().dict_sources
 }
 
 /// 保存词典源配置（支持自定义小语种 API）。
-#[tauri::command]
+#[tauri::command(async)]
 pub fn cmd_save_sources(
     state: State<'_, Arc<AppState>>,
     sources: Vec<DictSourceConfig>,
@@ -2524,7 +2524,7 @@ pub struct SourceTestResult {
 }
 
 /// 重置为内置词典源。
-#[tauri::command]
+#[tauri::command(async)]
 pub fn cmd_reset_sources(state: State<'_, Arc<AppState>>) -> Result<Vec<DictSourceConfig>, String> {
     let defaults = dict::builtin::default_sources();
     state
@@ -2535,7 +2535,7 @@ pub fn cmd_reset_sources(state: State<'_, Arc<AppState>>) -> Result<Vec<DictSour
 }
 
 /// 清空词典缓存。
-#[tauri::command]
+#[tauri::command(async)]
 pub fn cmd_clear_cache(state: State<'_, Arc<AppState>>) -> Result<(), String> {
     state.db.clear_cache().map_err(err)
 }
@@ -2545,7 +2545,7 @@ pub fn cmd_clear_cache(state: State<'_, Arc<AppState>>) -> Result<(), String> {
 // ============================================================
 
 /// 导出全部数据。
-#[tauri::command]
+#[tauri::command(async)]
 pub fn cmd_export(state: State<'_, Arc<AppState>>, path: Option<String>) -> Result<String, String> {
     let data = state.db.export_all().map_err(err)?;
     let json = serde_json::to_string_pretty(&data).map_err(err)?;
@@ -2564,7 +2564,7 @@ pub fn cmd_export(state: State<'_, Arc<AppState>>, path: Option<String>) -> Resu
 }
 
 /// 导入备份（词库 + 学习进度）。
-#[tauri::command]
+#[tauri::command(async)]
 pub fn cmd_import(state: State<'_, Arc<AppState>>, path: String) -> Result<ImportReport, String> {
     let text = std::fs::read_to_string(&path).map_err(err)?;
     let v: serde_json::Value = serde_json::from_str(&text).map_err(err)?;
@@ -2593,7 +2593,7 @@ pub fn cmd_import(state: State<'_, Arc<AppState>>, path: String) -> Result<Impor
 }
 
 /// 生成一份内置示例词库，让用户开箱即用。
-#[tauri::command]
+#[tauri::command(async)]
 pub fn cmd_seed_demo(state: State<'_, Arc<AppState>>, lang: Option<String>) -> Result<i64, String> {
     let lang = lang.unwrap_or_else(|| state.cfg().target_lang.clone());
     let now = timeutil::now_ts();

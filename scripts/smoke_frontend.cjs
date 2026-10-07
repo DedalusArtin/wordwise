@@ -91,13 +91,49 @@ function fakeEl(tag) {
     enumerable: true, configurable: true,
   });
 
+  // <select> 要有 options，且 value 只收 options 里存在的值 —— 真实 DOM
+  // 正是这个语义。朗读输出设备下拉靠它做「记住的设备已经不在 → 回默认」，
+  // 假 DOM 不还原这条分支就永远测不到。
+  if ((tag || '').toLowerCase() === 'select') {
+    el.options = [];
+    el.options.remove = function (i) { this.splice(i, 1); };
+    // 真实 DOM 的 HTMLSelectElement.remove(i) 会删掉第 i 个 option。
+    // 不实现这个重载的话，`while (sel.options.length > 1) sel.remove(1)`
+    // 在假 DOM 里就是死循环（Plan.load() 触发二次填充时真的卡死过）。
+    el.remove = function (i) { if (typeof i === 'number') el.options.splice(i, 1); };
+    const baseAppend = el.appendChild;
+    el.appendChild = function (ch) { el.options.push(ch); if (baseAppend) baseAppend(ch); return ch; };
+    Object.defineProperty(el, 'value', {
+      get() { return _value; },
+      set(v) {
+        const s = (v === undefined || v === null) ? '' : String(v);
+        // 只在已经填过 options 时才套用「值必须存在于 options」的真实语义：
+        // 沙箱里大量下拉的 options 是空的，一律从严会让筛选类用例全部失效。
+        const ok = !s || !el.options.length || el.options.some((o) => String(o.value) === s);
+        _value = ok ? s : '';
+      },
+      enumerable: true, configurable: true,
+    });
+  }
+
   return el;
 }
+
+// index.html 里声明成 <select id="..."> 的元素，elById 要按 select 造，
+// 否则拿到的是 div 语义（没有 options、value 随便收），下拉相关逻辑测不准。
+const SELECT_IDS = new Set(
+  [...fs.readFileSync(path.join(ROOT, 'src/index.html'), 'utf8')
+    .matchAll(/<select[^>]*\bid="([^"]+)"/g)].map((m) => m[1]),
+);
 
 /** 同一个 id 每次返回同一个元素，行为更接近真实 DOM。 */
 const elCache = new Map();
 function elById(id) {
-  if (!elCache.has(id)) { const e = fakeEl(); e.id = id; elCache.set(id, e); }
+  if (!elCache.has(id)) {
+    const e = fakeEl(SELECT_IDS.has(id) ? 'select' : 'div');
+    e.id = id;
+    elCache.set(id, e);
+  }
   return elCache.get(id);
 }
 
@@ -2988,16 +3024,44 @@ const cases = [
     }
   }],
 
-  // ---- WebAudio 兜底播放（2026-10-07 破案：本机 WebView2 的 <audio> 播放管线
-  //      整体失灵——任何来源 play() 都 NotSupportedError 或永久挂起，连 188 字节
-  //      标准静音 PCM 都失败；WebAudio 解码与发声完全正常。元素播不出必须降级） ----
-  ['朗读：WebAudio 兜底——元素播不出时用 decodeAudioData + BufferSource 出声', async () => {
+  // ---- 朗读播放通路（2026-10-07 两轮破案，都有实锤）----
+  //
+  //  第一轮：本机 WebView2 的 <audio> 播放管线整体失灵 —— 任何来源 play() 都
+  //          NotSupportedError 或永久挂起，连 188 字节标准静音 PCM 都失败；
+  //          WebAudio 解码与发声完全正常 → 必须有 WebAudio 这条通路。
+  //  第二轮：磁盘上的 wav 是干净的（峰值 87.5% FS、零削波、cv=0.516），
+  //          破音其实出在重采样。真实应用内同一段 16 kHz 音频对照解码：
+  //              16 kHz 上下文（按文件原生率建） → 峰值 0.875，削波 0
+  //              48 kHz 上下文（默认，会重采样） → 峰值 1.4589，削波 827
+  //          过冲到满刻度 145.9% = 「喷麦很炸」。<audio> 无法指定上下文采样率，
+  //          只能按设备率（本机 48k）重采样，必然踩坑 → WebAudio 必须是主通路。
+  ['朗读：主通路是 WebAudio（原生采样率，零削波），<audio> 只作兜底', async () => {
     const sp = fs.readFileSync(path.join(ROOT, 'src/js/speak.js'), 'utf8');
-    // 文本守卫：降级链路的三要素必须在
+    // 文本守卫：两条通路的三要素都在
     if (!/decodeAudioData/.test(sp)) throw new Error('缺 WebAudio 解码');
     if (!/createBufferSource/.test(sp)) throw new Error('缺 BufferSource 播放');
     if (!/__stalled/.test(sp)) throw new Error('play() 挂起没有超时判定（本机实测会永久挂起）');
-    if (!/playViaWebAudio\(res\.audio/.test(sp)) throw new Error('合成结果没有接入 WebAudio 兜底');
+    if (!/function playViaElement/.test(sp)) throw new Error('缺 <audio> 兜底函数');
+    // ★ 关键顺序：playLocalTts 里 WebAudio 必须在前，<audio> 只能是它的兜底
+    const i0 = sp.indexOf('function playLocalTts');
+    if (i0 < 0) throw new Error('找不到 playLocalTts');
+    const iEnd = sp.indexOf('/* ---------------- 朗读', i0);
+    const region = sp.slice(i0, iEnd > 0 ? iEnd : i0 + 5000);
+    const iWeb = region.indexOf('playViaWebAudio(res.audio');
+    const iEl = region.indexOf('playViaElement(res.audio');
+    if (iWeb < 0) throw new Error('合成结果没有接入 WebAudio');
+    if (iEl < 0) throw new Error('WebAudio 失败后没有 <audio> 兜底');
+    if (iWeb > iEl) throw new Error('主通路仍是 <audio>：会按设备率重采样削波（实测峰值 1.4589）');
+    if (!/playViaWebAudio\(res\.audio, anchor\)\.then\(\(ok\) => \{[\s\S]{0,400}playViaElement\(res\.audio/.test(region)) {
+      throw new Error('<audio> 不是「WebAudio 失败后的兜底」，而是并行/优先通路');
+    }
+    // 按文件原生率建上下文：这是零重采样的前提
+    if (!/wavNativeRate\(bytes\)/.test(sp)) throw new Error('没有读 WAV 头采样率');
+    if (!/ctxFor\(native\)/.test(sp)) throw new Error('播放没有按原生采样率建上下文');
+    // 诊断值必须是真实的 ac.sampleRate，不是「请求时传的那个值」
+    if (!/const r = ac && ac\.sampleRate;/.test(sp)) {
+      throw new Error('activeCtxRate 仍在报请求值：浏览器可以不认请求，那是假数据');
+    }
     // 输出设备适配：每台机器音频设备不同（本机实测 WebView2 只见 1 个疑似失效设备）
     const html = fs.readFileSync(path.join(ROOT, 'src/index.html'), 'utf8');
     const setjs = fs.readFileSync(path.join(ROOT, 'src/js/settings.js'), 'utf8');
@@ -3009,8 +3073,16 @@ const cases = [
     const origAudio = sandbox.Audio;
     const origCtx = sandbox.AudioContext;
     let started = 0;
+    // audioEl 在 speak.js 里是模块级复用的（只 new 一次），所以 play 的行为
+    // 得用开关控制，不能靠换掉 sandbox.Audio —— 换了也不生效，元素还是旧的。
+    let elMode = 'reject';
     sandbox.Audio = function () {
-      return { play: () => Promise.reject(Object.assign(new Error('no'), { name: 'NotSupportedError' })), pause() {}, addEventListener() {}, currentTime: 0 };
+      return {
+        play: () => (elMode === 'reject'
+          ? Promise.reject(Object.assign(new Error('no'), { name: 'NotSupportedError' }))
+          : Promise.resolve()),
+        pause() {}, addEventListener() {}, currentTime: 0,
+      };
     };
     sandbox.AudioContext = function () {
       this.state = 'running';
@@ -3030,9 +3102,17 @@ const cases = [
     if (!sandbox.atob) sandbox.atob = (s) => Buffer.from(s, 'base64').toString('binary');
     try {
       const ok = await sandbox.Speak.playViaWebAudio('data:audio/wav;base64,' + Buffer.from('RIFFdummydata').toString('base64'));
-      if (ok !== true) throw new Error('WebAudio 兜底没有接手播放');
+      if (ok !== true) throw new Error('WebAudio 没有接手播放');
       if (started !== 1) throw new Error('BufferSource.start 没有被调用');
-      return '解码 + start + onended 全链路 OK';
+
+      // <audio> 兜底：play 被拒要快速返回 false，不能把调用方挂住
+      const rejected = await sandbox.Speak.playViaElement('data:audio/wav;base64,AAAA', 'k');
+      if (rejected !== false) throw new Error('<audio> 播不出时没有如实返回 false');
+      // 同一个元素，play 改成能出声 → 应返回 true
+      elMode = 'ok';
+      const okEl = await sandbox.Speak.playViaElement('data:audio/wav;base64,AAAA', 'k');
+      if (okEl !== true) throw new Error('<audio> 能出声时没有返回 true');
+      return 'WebAudio 主通路 + <audio> 兜底收尾都正常';
     } finally {
       sandbox.Audio = origAudio;
       sandbox.AudioContext = origCtx;
@@ -3207,6 +3287,197 @@ const cases = [
     const state = fs.readFileSync(path.join(ROOT, 'src-tauri/src/state.rs'), 'utf8');
     if (!/repair_entry_json_langs/.test(state)) throw new Error('启动时没有调用清洗');
     return '读取兜底 + 写入改写 + 存量清洗';
+  }],
+
+  // ---- 「程序未响应」治本：同步 IPC 命令不许占住主线程 ----
+  //
+  // 现场：Windows 应用日志 15:41:48 wordwise.exe 0.45.8.0 AppHangB1
+  // 「已停止与 Windows 交互并被关闭」。panic 改 unwind 之后 0xc0000409 硬
+  // 崩溃确实没了，但主线程被命令堵住这件事原样留了下来 —— 症状从「闪退」
+  // 变成了「卡死」。
+  //
+  // 根因是 Tauri 的默认执行上下文，源码级可查，不是推测：
+  //   tauri-macros-2.7.1 wrapper.rs:50   默认 execution_context = Blocking
+  //   tauri-macros-2.7.1 wrapper.rs:398  body_blocking → 命令体在「收到 IPC
+  //                                      消息的线程」= Tauri 主线程上同步跑
+  //   tauri-macros-2.7.1 wrapper.rs:258  #[tauri::command(async)] + 同步 fn
+  //                                      → kind = "sync_threadpool"
+  //   tauri-2.12.1  ipc/mod.rs:375       respond_async_serialized →
+  //                                      crate::async_runtime::spawn（离主线程）
+  ['响应：同步 IPC 命令一律搬离主线程（AppHangB1 治本）', () => {
+    const dir = path.join(ROOT, 'src-tauri/src/commands');
+    const files = fs.readdirSync(dir).filter((f) => f.endsWith('.rs'))
+      .map((f) => path.join(dir, f));
+    files.push(path.join(ROOT, 'src-tauri/src/logging.rs'));
+    // 白名单：这三个必须留在主线程 —— 建 WebView2 窗口 / exit / restart，
+    // wry 在 Windows 上要求这些操作发生在拥有事件循环的那个线程上。
+    const KEEP = new Set(['cmd_open_in_app', 'cmd_app_exit', 'cmd_restart_app']);
+    const onMain = [];
+    let moved = 0;
+    for (const f of files) {
+      const lines = fs.readFileSync(f, 'utf8').split('\n');
+      for (let i = 0; i < lines.length; i++) {
+        const m = /^pub fn (cmd_\w+)\s*\(/.exec(lines[i]);
+        if (!m) continue;
+        const name = m[1];
+        if (KEEP.has(name)) continue;
+        let j = i - 1;
+        while (j >= 0 && (lines[j].trim() === '' || lines[j].trimStart().startsWith('//'))) j--;
+        const attr = j >= 0 ? lines[j].trim() : '';
+        if (attr === '#[tauri::command(async)]') { moved++; continue; }
+        if (attr === '#[tauri::command]') { onMain.push(path.basename(f) + ':' + name); continue; }
+        throw new Error(path.basename(f) + ' 的 ' + name + ' 上方属性行异常：' + attr);
+      }
+    }
+    if (onMain.length) throw new Error('这些同步命令仍在主线程上跑：' + onMain.slice(0, 8).join('、'));
+    if (moved < 100) throw new Error('只改造了 ' + moved + ' 个，数量异常');
+    return moved + ' 个同步命令已搬到线程池，' + KEEP.size + ' 个按需要留主线程';
+  }],
+
+  // 光搬走还不够：下次再卡，得能一眼看出是哪个命令。所以 IPC 入口包一层计时。
+  ['响应：IPC 入口装了慢命令计时哨兵', () => {
+    const win = fs.readFileSync(path.join(ROOT, 'src-tauri/src/windows.rs'), 'utf8');
+    if (!/const SLOW_CMD_MS/.test(win)) throw new Error('缺慢命令阈值常量');
+    // generate_handler 展开出的闭包不带类型标注，绑定时必须显式钉类型，
+    // 不钉就会 E0282（已经踩过一次）
+    if (!/let inner: fn\(tauri::ipc::Invoke\) -> bool = tauri::generate_handler!/.test(win))
+      throw new Error('generate_handler 没有显式钉类型（会 E0282）');
+    if (!/move \|invoke: tauri::ipc::Invoke\| -> bool \{/.test(win)) throw new Error('缺计时包装');
+    if (!/std::time::Instant::now\(\)/.test(win)) throw new Error('缺计时起点');
+    if (!/慢命令 \{\} 占用主线程 \{\}ms/.test(win)) throw new Error('缺慢命令日志');
+    return '慢命令告警在岗 + 类型钉死';
+  }],
+
+  // ---- 「朗读输出设备只能选默认」：下拉不能只靠 enumerateDevices ----
+  //
+  // 现场（用户截图）：下拉里只有「系统默认」一项。
+  // 根因：WebView2 没拿到媒体权限时 enumerateDevices() 只返回一个匿名默认
+  // 设备 —— 不是代码写错，是浏览器不给。设备真名在 Windows 注册表里
+  // （cmd_audio_devices 实测能读出全部 19 个终结点的真名）。
+  ['设备：输出设备下拉用注册表真名填充（不再只剩系统默认）', async () => {
+    const setjs = fs.readFileSync(path.join(ROOT, 'src/js/settings.js'), 'utf8');
+    const sp = fs.readFileSync(path.join(ROOT, 'src/js/speak.js'), 'utf8');
+    const html = fs.readFileSync(path.join(ROOT, 'src/index.html'), 'utf8');
+    if (!/API\.audioDevices\(\)/.test(setjs)) throw new Error('下拉没有用注册表设备清单');
+    if (!/function refreshTtsOutputs/.test(setjs)) throw new Error('缺统一的填充函数');
+    // 只有名字、没有 deviceId 的项必须如实标注，不能假装能切
+    if (!/'name:' \+ name/.test(setjs)) throw new Error('缺「仅名字」约定');
+    if (!/需到系统设置切换/.test(setjs)) throw new Error('没有如实标注不可切换的设备');
+    // setSinkId 只认 deviceId，'name:' 前缀不能硬传
+    if (!/function isRealDeviceId/.test(sp)) throw new Error('speak.js 没有区分真 deviceId');
+    if (!/if \(!isRealDeviceId\(id\)\) return Promise\.resolve\(\);/.test(sp))
+      throw new Error('applySink 会把设备名当 deviceId 传给 setSinkId');
+    // 正路：selectAudioOutput 才有权限拿到 deviceId + 真名
+    if (!/selectAudioOutput/.test(setjs)) throw new Error('缺「在系统中挑选」入口');
+    if (!/id="tts-output-pick"/.test(html)) throw new Error('缺挑选按钮');
+
+    // ---- 行为级：WebView2 只给 1 个匿名设备，注册表给 3 个真名 ----
+    const origMd = sandbox.navigator.mediaDevices;
+    const origDev = sandbox.WordWiseAPI.API.audioDevices;
+    const sel = sandbox.document.getElementById('tts-output');
+    try {
+      sandbox.navigator.mediaDevices = {
+        enumerateDevices: async () => [{ kind: 'audiooutput', deviceId: '', label: '' }],
+      };
+      sandbox.WordWiseAPI.API.audioDevices = async () => ({
+        devices: [
+          { name: 'Quantum LT 2', active: true },
+          { name: 'Speakers', active: true },
+          { name: 'Mi Monitor', active: false },
+        ],
+      });
+      await sandbox.Settings.refreshTtsOutputs();
+      const labels = (sel.options || []).map((o) => o.textContent);
+      if (labels.length !== 3) throw new Error('下拉只有 ' + labels.length + ' 项，应为 3 项');
+      if (!labels.some((l) => /Quantum LT 2/.test(l))) throw new Error('下拉里没有注册表真名');
+      if (!labels.some((l) => /未插入/.test(l))) throw new Error('没有标出未插入的设备');
+      if (!labels.every((l) => /需到系统设置切换/.test(l)))
+        throw new Error('没有 deviceId 却没标注需到系统设置切换');
+    } finally {
+      sandbox.navigator.mediaDevices = origMd;
+      sandbox.WordWiseAPI.API.audioDevices = origDev;
+    }
+    return '注册表真名填充 + 无 deviceId 如实标注';
+  }],
+
+  // setSinkId 只认 deviceId。设备名硬传会在真机上抛错（而且抛在播放链路里，
+  // 表现是「点了朗读没声音」，很难查）。
+  ['设备：设备名不冒充 deviceId 传给 setSinkId', async () => {
+    const calls = [];
+    const origAC = sandbox.AudioContext;
+    try {
+      sandbox.AudioContext = function () {
+        return {
+          state: 'running', sampleRate: 16000, destination: {},
+          setSinkId: (id) => { calls.push(id); return Promise.resolve(); },
+          resume() {},
+          decodeAudioData: () => Promise.reject(new Error('冒烟测试数据')),
+          createBufferSource() { return { connect() {}, start() {} }; },
+        };
+      };
+      sandbox.Speak.setOutputPref('name:Quantum LT 2');
+      await sandbox.Speak.playViaWebAudio('data:audio/wav;base64,AAAA', null);
+      if (calls.length) throw new Error('把设备名当 deviceId 传给了 setSinkId：' + calls[0]);
+    } finally {
+      sandbox.AudioContext = origAC;
+      sandbox.Speak.setOutputPref('');
+    }
+    return 'name: 前缀不会流进 setSinkId';
+  }],
+
+  // ---- 爆音治本：按设备采样率重采样，且**先重采样、后压峰值** ----
+  //
+  // 实测链（真实应用内 + 本地离线对照，都有数）：
+  //   磁盘 wav       峰值 87.5% FS，最长贴顶平台 1 个样本 → 文件不是削波源
+  //   16k 上下文解码 峰值 0.875，削波 0
+  //   48k 上下文解码 峰值 1.4589，削波 827
+  //   自写加窗 sinc 重采样 16k→48k（taps=16/32）峰值 1.4044 / 1.4741
+  // 最后一条是关键：过冲不是浏览器的 bug，是**这份音频升采样必然振铃**
+  // （piper 16k 输出在奈奎斯特附近能量足）。用户设备 48 kHz，升采样躲不掉 →
+  // 重采样必须握在自己手里，压峰值必须在重采样之后。
+  ['朗读：按设备采样率重采样，压峰值在重采样之后（爆音治本）', () => {
+    const tt = fs.readFileSync(path.join(ROOT, 'src-tauri/src/tts/mod.rs'), 'utf8');
+    const rs = fs.readFileSync(path.join(ROOT, 'src-tauri/src/commands/tts.rs'), 'utf8');
+    const sp = fs.readFileSync(path.join(ROOT, 'src/js/speak.js'), 'utf8');
+    const apijs = fs.readFileSync(path.join(ROOT, 'src/js/api.js'), 'utf8');
+
+    if (!/pub fn resample_i16/.test(tt)) throw new Error('缺 PCM 重采样函数');
+    if (!/pub fn resample_wav/.test(tt)) throw new Error('缺 WAV 重采样函数');
+    // 多相 + 加窗，不是最近邻/线性插值那种糊弄实现
+    if (!/let mut table: Vec<Vec<f64>>/.test(tt)) throw new Error('重采样不是多相实现');
+    if (!/blackman/.test(tt)) throw new Error('sinc 没有加窗（会有严重振铃）');
+
+    // ★ 顺序命门：resample_wav 里必须是「先重采样，再 limit_peak」
+    const i0 = tt.indexOf('pub fn resample_wav');
+    if (i0 < 0) throw new Error('找不到 resample_wav');
+    const body = tt.slice(i0, i0 + 2000);
+    const iRes = body.indexOf('resample_i16(&src_i16');
+    const iLim = body.indexOf('limit_peak(&mut p);');
+    if (iRes < 0) throw new Error('resample_wav 没有真的重采样');
+    if (iLim < 0) throw new Error('resample_wav 重采样后没有压峰值');
+    if (iLim < iRes) throw new Error('压峰值在重采样之前：过冲压不住（实测会到 1.4 倍）');
+
+    // 缓存键必须带目标采样率，否则 48k 产物会被 44.1k 机器命中
+    if (!/pub fn cache_key_at/.test(tt)) throw new Error('缓存键没有区分采样率');
+    if (!/cache_key_at\(&chosen, &text, rate, dst\)/.test(rs)) {
+      throw new Error('合成命令没有把目标采样率写进缓存键');
+    }
+    if (!/tts::resample_wav\(&wav, dst\)/.test(rs)) throw new Error('合成结果没有按设备率重采样');
+    if (!/target_rate: Option<u32>/.test(rs)) throw new Error('合成命令不接收目标采样率');
+
+    // 前端要把设备采样率传下去
+    if (!/devRate/.test(sp)) throw new Error('speak.js 没有取设备采样率');
+    if (!/API\.ttsSpeak\(text, lang, accent, devRate\)/.test(sp)) {
+      throw new Error('合成请求没有带上设备采样率');
+    }
+    // ★ 参数名必须 camelCase：#[tauri::command] 默认 rename_all = camelCase。
+    //   写成 target_rate 会静默丢失（Option 参数不报错），重采样就不发生 ——
+    //   这条正是本次踩到的坑，必须钉死。
+    if (!/targetRate:/.test(apijs)) throw new Error('api.js 没有以 camelCase 透传 targetRate');
+    if (/target_rate:/.test(apijs)) {
+      throw new Error('api.js 用了 snake_case 的 target_rate：Tauri 默认按 camelCase 匹配，会静默丢失');
+    }
+    return '后端重采样 + 采样率后压峰值 + 前端按 camelCase 传设备率';
   }],
 
   ['Plan.load()', () => sandbox.Plan.load()],

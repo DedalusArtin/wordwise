@@ -276,7 +276,7 @@ fn drives_json() -> Vec<serde_json::Value> {
    ============================================================ */
 
 /// 数据与模型的存放位置总览。
-#[tauri::command]
+#[tauri::command(async)]
 pub fn cmd_storage_info(state: State<'_, Arc<AppState>>) -> Result<serde_json::Value, String> {
     let data_dir = state.data_dir.clone();
     let src = state.data_dir_source;

@@ -29,7 +29,7 @@ pub struct EngineOption {
 ///
 /// 顺序即推荐顺序：必应走 RSS 接口最稳，360 作为国内兜底，
 /// 百度受反爬限制（会跳验证码页）所以排在后面。
-#[tauri::command]
+#[tauri::command(async)]
 pub fn cmd_search_engines() -> Vec<EngineOption> {
     vec![
         EngineOption { id: "bing".into(), label: "必应".into(), cn_friendly: true },
@@ -79,7 +79,7 @@ pub struct LookupLink {
     pub cn_friendly: bool,
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn cmd_lookup_links(word: String, lang: Option<String>) -> Vec<LookupLink> {
     crate::search::dict_links(&word, lang.as_deref().unwrap_or("en"))
         .into_iter()
@@ -93,7 +93,7 @@ pub fn cmd_lookup_links(word: String, lang: Option<String>) -> Vec<LookupLink> {
 }
 
 /// 设置「查询方向」：源语言与目标语言（需求 7）。
-#[tauri::command]
+#[tauri::command(async)]
 pub fn cmd_set_direction(
     state: State<'_, Arc<AppState>>,
     source_lang: Option<String>,
@@ -123,7 +123,7 @@ pub struct DirectionInfo {
     pub search_engine: String,
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn cmd_get_direction(state: State<'_, Arc<AppState>>) -> DirectionInfo {
     let c = state.cfg();
     DirectionInfo {
@@ -148,7 +148,7 @@ pub fn pick_example_entry(state: &AppState, lang: &str, seed: &str) -> Option<Wo
 }
 
 /// 统计某语言下「有例句」的词数量，供界面提示。
-#[tauri::command]
+#[tauri::command(async)]
 pub fn cmd_example_coverage(
     state: State<'_, Arc<AppState>>,
     lang: Option<String>,
@@ -181,7 +181,7 @@ pub struct ModeInfo {
 }
 
 /// 列出全部练习模式（拼写 / 例句 / 听音拼写等）。
-#[tauri::command]
+#[tauri::command(async)]
 pub fn cmd_quiz_modes() -> Vec<ModeInfo> {
     let mk = |id: &str, label: &str, desc: &str, m: QuizMode| ModeInfo {
         id: id.into(),
@@ -204,7 +204,7 @@ pub fn cmd_quiz_modes() -> Vec<ModeInfo> {
 /// 按词库开始一轮背诵（需求 4 / 5）：只从指定词库抽词。
 ///
 /// `book_id` 为空或 "root" 时退化为全库出题。
-#[tauri::command]
+#[tauri::command(async)]
 pub fn cmd_start_book_session(
     state: State<'_, Arc<AppState>>,
     book_id: Option<String>,
@@ -307,7 +307,7 @@ pub fn cmd_start_book_session(
 /// 拼写题判分（需求 4）：忽略大小写与首尾空格；给出提示字符。
 ///
 /// 返回 (是否正确, 规范化后的用户输入, 规范化后的正确答案)
-#[tauri::command]
+#[tauri::command(async)]
 pub fn cmd_check_spelling(input: String, answer: String, strict: Option<bool>) -> SpellingCheck {
     let norm = |s: &str| {
         let t = s.trim().to_string();
@@ -349,7 +349,7 @@ pub struct SpellingCheck {
 }
 
 /// 生成拼写提示（需求 4）：按难度给出掩码，如 a _ _ l e。
-#[tauri::command]
+#[tauri::command(async)]
 pub fn cmd_spell_hint(word: String, reveal: Option<i64>) -> String {
     let chars: Vec<char> = word.chars().collect();
     let n = chars.len();
@@ -380,7 +380,7 @@ pub fn cmd_spell_hint(word: String, reveal: Option<i64>) -> String {
 }
 
 /// 例句挖空（需求 4）：把例句里的目标词替换为 ____，用于「例句识词」。
-#[tauri::command]
+#[tauri::command(async)]
 pub fn cmd_mask_example(sentence: String, word: String) -> String {
     let s = &sentence;
     if word.trim().is_empty() {
@@ -413,7 +413,7 @@ pub fn cmd_mask_example(sentence: String, word: String) -> String {
 
 /// 构造一道进阶题（需求 4）：支持拼写 / 例句 / 听音。
 /// 与 `cmd_current_question` 不同，这里会确保例句类题目真的带例句。
-#[tauri::command]
+#[tauri::command(async)]
 pub fn cmd_build_advanced_card(
     state: State<'_, Arc<AppState>>,
     mode: QuizMode,
@@ -460,7 +460,7 @@ pub fn cmd_build_advanced_card(
    ============================================================ */
 
 /// 当前生效的代理信息（设置页展示用）。
-#[tauri::command]
+#[tauri::command(async)]
 pub fn cmd_network_info(state: State<'_, Arc<AppState>>) -> crate::net::ProxyResolution {
     state.proxy_info()
 }
@@ -468,7 +468,7 @@ pub fn cmd_network_info(state: State<'_, Arc<AppState>>) -> crate::net::ProxyRes
 /// 按最新配置重建 HTTP 客户端。
 ///
 /// 用户在设置页改完代理后调用，无需重启应用。
-#[tauri::command]
+#[tauri::command(async)]
 pub fn cmd_reload_network(
     state: State<'_, Arc<AppState>>,
 ) -> Result<crate::net::ProxyResolution, String> {

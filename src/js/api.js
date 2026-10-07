@@ -459,8 +459,14 @@ const API = {
     voiceOnline: (opts && opts.voiceOnline != null) ? String(opts.voiceOnline) : null,
     rate: (opts && typeof opts.rate === 'number') ? opts.rate : null,
   }),
-  ttsSpeak: (text, lang, accent) => invoke('cmd_tts_speak', {
+  // targetRate = 设备采样率：后端据此重采样，前端解码时零重采样
+  // （16k→48k 的升采样会振铃过冲到 1.40~1.47 倍 = 爆音，见 §34）
+  ttsSpeak: (text, lang, accent, targetRate) => invoke('cmd_tts_speak', {
     text, lang: lang || null, accent: accent || null,
+    // ★ 必须 camelCase：#[tauri::command] 默认 rename_all = camelCase，
+    //   写成 target_rate 的话参数根本传不进去，而 Rust 侧是 Option<u32>，
+    //   拿不到就静默变 None —— 不报错、不重采样，爆音原样留着。
+    targetRate: (targetRate && targetRate > 0) ? targetRate : null,
   }),
   ttsClearCache: () => invoke('cmd_tts_clear_cache'),
   // 后台词库内容增强的进度（AI 空闲时把单薄词条补成详解）

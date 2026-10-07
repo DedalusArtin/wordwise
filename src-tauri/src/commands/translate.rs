@@ -305,7 +305,7 @@ pub async fn cmd_translate_ai(
 /* ---------------- 历史 / 收藏（需求 5） ---------------- */
 
 /// 列出翻译历史。
-#[tauri::command]
+#[tauri::command(async)]
 pub fn cmd_translate_history(
     state: State<'_, Arc<AppState>>,
     limit: Option<i64>,
@@ -318,7 +318,7 @@ pub fn cmd_translate_history(
 }
 
 /// 收藏 / 取消收藏。
-#[tauri::command]
+#[tauri::command(async)]
 pub fn cmd_translate_favorite(
     state: State<'_, Arc<AppState>>,
     id: i64,
@@ -327,13 +327,13 @@ pub fn cmd_translate_favorite(
     state.db.set_translation_favorite(id, on).map_err(err)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn cmd_translate_delete(state: State<'_, Arc<AppState>>, id: i64) -> Result<(), String> {
     state.db.delete_translation(id).map_err(err)
 }
 
 /// 清空历史。`keep_favorite` 为真时保留收藏项。
-#[tauri::command]
+#[tauri::command(async)]
 pub fn cmd_translate_clear(
     state: State<'_, Arc<AppState>>,
     keep_favorite: Option<bool>,
@@ -350,7 +350,7 @@ pub fn cmd_translate_clear(
 ///
 /// 源语言为「自动检测」时无法互换（不知道该换成什么），
 /// 此时按「用户想反向翻译」的意图，把目标语言当作新的源语言。
-#[tauri::command]
+#[tauri::command(async)]
 pub fn cmd_swap_direction(state: State<'_, Arc<AppState>>) -> Result<Vec<String>, String> {
     let cur = state.cfg();
     let from = if cur.source_lang.trim().is_empty() {
@@ -378,7 +378,7 @@ pub fn cmd_swap_direction(state: State<'_, Arc<AppState>>) -> Result<Vec<String>
 }
 
 /// 可用的语言清单，供方向选择器渲染下拉。
-#[tauri::command]
+#[tauri::command(async)]
 pub fn cmd_translate_langs() -> Vec<serde_json::Value> {
     let mut out = vec![serde_json::json!({
         "code": translate::AUTO,
@@ -394,7 +394,7 @@ pub fn cmd_translate_langs() -> Vec<serde_json::Value> {
 }
 
 /// 当前限频冷却状态，供界面提示「在线翻译繁忙，已切到本地模型」。
-#[tauri::command]
+#[tauri::command(async)]
 pub fn cmd_translate_status() -> serde_json::Value {
     let cooling = translate::cooldown_remaining();
     serde_json::json!({

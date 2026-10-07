@@ -36,7 +36,7 @@ pub(crate) fn human_size(n: u64) -> String {
 }
 
 /// 数据库基本信息。
-#[tauri::command]
+#[tauri::command(async)]
 pub fn cmd_db_info(state: State<'_, Arc<AppState>>) -> Result<serde_json::Value, String> {
     let (main, wal) = state.db.disk_usage();
     let tables: Vec<serde_json::Value> = state
@@ -117,7 +117,7 @@ pub struct MaintResult {
 /// - `vacuum`   整理数据库（回收删除留下的空洞）
 /// - `check`    完整性检查
 /// - `backup`   导出一份一致性快照到数据目录
-#[tauri::command]
+#[tauri::command(async)]
 pub fn cmd_db_maintain(
     state: State<'_, Arc<AppState>>,
     action: String,
@@ -182,7 +182,7 @@ pub fn cmd_db_maintain(
 /// 单独做一个 `cmd_open_dir` 而不是复用 `cmd_open_url`：那个命令只允许
 /// 打开 http(s)（防止被当成任意命令执行），这里要开的是本地路径。
 /// 实现上仍然只把它交给系统 shell，且**强制要求路径存在**。
-#[tauri::command]
+#[tauri::command(async)]
 pub fn cmd_open_dir(path: String) -> Result<(), String> {
     let p = std::path::PathBuf::from(&path);
     if !p.exists() {

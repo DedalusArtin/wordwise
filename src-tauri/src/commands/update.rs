@@ -445,7 +445,7 @@ fn cancel_flag() -> Arc<AtomicBool> {
 }
 
 /// 取消正在进行的更新下载。
-#[tauri::command]
+#[tauri::command(async)]
 pub fn cmd_update_cancel() {
     cancel_flag().store(true, AtomicOrdering::Relaxed);
 }
@@ -601,7 +601,7 @@ fn open_dir(p: &Path) -> Result<(), String> {
 }
 
 /// 打开更新包的存放目录。
-#[tauri::command]
+#[tauri::command(async)]
 pub fn cmd_open_update_dir(
     state: State<'_, Arc<AppState>>,
 ) -> Result<serde_json::Value, String> {
@@ -615,7 +615,7 @@ pub fn cmd_open_update_dir(
 ///
 /// ★ 路径白名单是这个命令存在的**前提**：它接收一个来自前端的路径并执行。
 ///   少了下面这层校验，任何能调用它的代码都能在本机跑任意程序。
-#[tauri::command]
+#[tauri::command(async)]
 pub fn cmd_run_update(
     app: AppHandle,
     state: State<'_, Arc<AppState>>,
@@ -667,7 +667,7 @@ pub fn cmd_run_update(
 ///
 /// 单独一个命令而不是走整份 `cmd_save_config`：跳过版本是点一下就生效的
 /// 轻量动作，走整份保存会把设置页里其它未提交的编辑一并写下去。
-#[tauri::command]
+#[tauri::command(async)]
 pub fn cmd_set_update_prefs(
     state: State<'_, Arc<AppState>>,
     check_on_start: Option<bool>,
@@ -700,7 +700,7 @@ pub fn cmd_set_update_prefs(
 }
 
 /// 当前更新相关偏好（前端初始化时读一次，免得为了两个布尔量拉整份配置）。
-#[tauri::command]
+#[tauri::command(async)]
 pub fn cmd_update_prefs(state: State<'_, Arc<AppState>>) -> serde_json::Value {
     let cfg = state.cfg();
     serde_json::json!({

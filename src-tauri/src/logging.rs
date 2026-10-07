@@ -303,7 +303,7 @@ fn analyze() -> serde_json::Value {
 }
 
 /// 自动分析运行日志（设置页「日志诊断」面板）。
-#[tauri::command]
+#[tauri::command(async)]
 pub fn cmd_log_analysis() -> serde_json::Value {
     analyze()
 }
@@ -312,7 +312,7 @@ pub fn cmd_log_analysis() -> serde_json::Value {
 ///
 /// 级别只认 error / warn / info，其余按 info；消息截断到 500 字符，
 /// 防止异常数据把日志刷爆。
-#[tauri::command]
+#[tauri::command(async)]
 pub fn cmd_log_write(level: String, message: String) {
     let msg: String = message.chars().take(500).collect();
     match level.as_str() {

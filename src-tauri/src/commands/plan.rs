@@ -40,7 +40,7 @@ fn first_gloss(e: &WordEntry) -> String {
 }
 
 /// 到期复习清单：逾期最久的排最前，然后才是今天到期、明天到期。
-#[tauri::command]
+#[tauri::command(async)]
 pub fn cmd_due_words(
     state: State<'_, Arc<AppState>>,
     lang: Option<String>,

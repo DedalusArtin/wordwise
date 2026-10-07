@@ -57,7 +57,7 @@ fn explain_lang_of(state: &AppState, lang: Option<String>) -> String {
 /// 前端在流式讲解**正常结束**后调用它。之所以不让后端在流里直接落库：
 /// 流式过程中用户可能中途关掉面板或换词，只有前端知道「这次讲解到底
 /// 有没有正常结束」，落一条半截的讲解比不落更糟。
-#[tauri::command]
+#[tauri::command(async)]
 pub fn cmd_save_explain(
     state: State<'_, Arc<AppState>>,
     word: String,
@@ -97,7 +97,7 @@ pub fn cmd_save_explain(
 }
 
 /// 读取某词在指定讲解语言下的存档。
-#[tauri::command]
+#[tauri::command(async)]
 pub fn cmd_get_explain(
     state: State<'_, Arc<AppState>>,
     word: String,
@@ -115,7 +115,7 @@ pub fn cmd_get_explain(
 }
 
 /// 列出某个词的全部讲解存档（可能同时有中文版和英文版）。
-#[tauri::command]
+#[tauri::command(async)]
 pub fn cmd_list_explains(
     state: State<'_, Arc<AppState>>,
     word: String,
@@ -131,7 +131,7 @@ pub fn cmd_list_explains(
 ///
 /// 词库页顶部的搜索框会把它并进来，这样「讲解过但还没导入成词条」的内容
 /// 也能被搜出来 —— 否则用户会以为讲解白讲了。
-#[tauri::command]
+#[tauri::command(async)]
 pub fn cmd_search_explains(
     state: State<'_, Arc<AppState>>,
     query: String,
@@ -147,7 +147,7 @@ pub fn cmd_search_explains(
 }
 
 /// 删除一条讲解存档。
-#[tauri::command]
+#[tauri::command(async)]
 pub fn cmd_delete_explain(
     state: State<'_, Arc<AppState>>,
     word: String,
@@ -165,7 +165,7 @@ pub fn cmd_delete_explain(
 }
 
 /// 清空讲解存档。`keep_saved = true` 时保留已并入词库的那些。
-#[tauri::command]
+#[tauri::command(async)]
 pub fn cmd_clear_explains(
     state: State<'_, Arc<AppState>>,
     keep_saved: Option<bool>,
@@ -177,7 +177,7 @@ pub fn cmd_clear_explains(
 }
 
 /// 讲解存档数量（数据库面板展示用）。
-#[tauri::command]
+#[tauri::command(async)]
 pub fn cmd_explain_count(state: State<'_, Arc<AppState>>) -> Result<i64, String> {
     state.db.explain_count().map_err(err)
 }
@@ -187,7 +187,7 @@ pub fn cmd_explain_count(state: State<'_, Arc<AppState>>) -> Result<i64, String>
 /// 增强引擎是纯后台的：软件空闲时用本地大模型把词库里「单薄」的词条
 /// （缺音标、缺释义）逐个补成与在线词典同构的详解。这里只读进度，
 /// 不能也不需要从界面触发 —— 它自己会跑。
-#[tauri::command]
+#[tauri::command(async)]
 pub fn cmd_enrich_status() -> serde_json::Value {
     crate::enrich::status()
 }

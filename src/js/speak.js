@@ -236,18 +236,30 @@ const Speak = (() => {
     try { return localStorage.getItem(LS_OUTPUT) || ''; } catch (e) { return ''; }
   }
 
+  /**
+   * 'name:设备名' 不是 deviceId，只是「注册表里看到的设备名」。
+   * setSinkId 只认 deviceId，硬传会抛错 —— 这类值只用于界面提示与日志，
+   * 播放仍走系统默认设备。
+   */
+  function isRealDeviceId(id) {
+    return !!id && id.indexOf('name:') !== 0;
+  }
+
   function setOutputPref(id) {
     try {
       if (id) localStorage.setItem(LS_OUTPUT, id);
       else localStorage.removeItem(LS_OUTPUT);
     } catch (e) { /* 忽略 */ }
     // 已经活着的 AudioContext 立即跟着换设备
-    try { if (audioCtx && id && audioCtx.setSinkId) audioCtx.setSinkId(id).catch(() => {}); } catch (e) { /* 忽略 */ }
+    try {
+      if (audioCtx && isRealDeviceId(id) && audioCtx.setSinkId) audioCtx.setSinkId(id).catch(() => {});
+    } catch (e) { /* 忽略 */ }
   }
 
   function applySink(el) {
     const id = outputPref();
-    if (!id || !el || typeof el.setSinkId !== 'function') return Promise.resolve();
+    if (!isRealDeviceId(id)) return Promise.resolve();
+    if (!el || typeof el.setSinkId !== 'function') return Promise.resolve();
     return el.setSinkId(id).catch(() => { /* 设备可能已拔出，按默认走 */ });
   }
 
@@ -262,10 +274,19 @@ const Speak = (() => {
     return audioCtx;
   }
 
-  /** 当前播放上下文的采样率（诊断面板展示用）。 */
+  /**
+   * 当前播放上下文的采样率（诊断展示用）。
+   *
+   * ★ 必须读**真实的** ac.sampleRate，不能拿「请求时传的那个值」充数 ——
+   *   new AudioContext({ sampleRate: n }) 只是请求，浏览器完全可以不认。
+   *   拿请求值当实测值，诊断面板就会显示一个假数字，把排查带偏。
+   */
   function activeCtxRate() {
     let best = 0;
-    ctxByRate.forEach((_ac, r) => { best = Math.max(best, r); });
+    ctxByRate.forEach((ac) => {
+      const r = ac && ac.sampleRate;
+      if (r) best = Math.max(best, r);
+    });
     return best || (audioCtx ? audioCtx.sampleRate : 0);
   }
 
@@ -302,7 +323,15 @@ const Speak = (() => {
     return ac;
   }
 
-  /** 用 WebAudio 播一段 data URI 音频。返回 Promise<boolean>（true = 已接手）。 */
+  /**
+   * 用 WebAudio 播一段 data URI 音频。返回 Promise<boolean>（true = 已开始出声）。
+   *
+   * ★ 这是朗读的**主通路**，不是兜底。真实应用内对照实测（同一段 16 kHz 音频）：
+   *     16 kHz 上下文（按文件原生率建） → 峰值 0.875，削波样本 0
+   *     48 kHz 上下文（默认，会重采样） → 峰值 1.4589，削波样本 827
+   *   重采样过冲到满刻度的 145.9%，听起来就是「喷麦很炸」。按文件原生率建
+   *   上下文可以直接绕开这一步。
+   */
   function playViaWebAudio(dataUri, anchor) {
     let bytes;
     try { bytes = dataUriToBuffer(dataUri); } catch (e) { return Promise.resolve(false); }
@@ -319,16 +348,28 @@ const Speak = (() => {
           src.connect(ac.destination);
         } catch (e) { resolve(false); return; }
         webAudioSrc = src;
-        src.onended = () => {
+        let done = false;
+        const finish = () => {
+          if (done) return;
+          done = true;
           speaking = false;
           if (webAudioSrc === src) webAudioSrc = null;
-          resolve(true);
         };
-        try { src.start(); } catch (e) {
-          speaking = false;
-          if (webAudioSrc === src) webAudioSrc = null;
+        src.onended = finish;
+        try {
+          src.start();
+        } catch (e) {
+          finish();
           resolve(false);
+          return;
         }
+        // 真的开播了就算成功。不等 onended —— 那要等整段读完（好几秒），
+        // 「要不要回退 <audio>」这个决策没必要跟着等。
+        resolve(true);
+        // 兜底清状态：个别环境不派发 onended，speaking 会永久为真，之后所有
+        // 朗读都被当成「正在播」而点不动。按时长 + 余量收尾。
+        const tail = ((audioBuf && audioBuf.duration) || 0) * 1000 + 1500;
+        if (tail > 0) setTimeout(finish, tail);
       });
     }).catch(() => Promise.resolve(false));
   }
@@ -547,52 +588,84 @@ const Speak = (() => {
       });
     }
 
-    return API.ttsSpeak(text, lang, accent)
+    // ★ 设备采样率：AudioContext 默认就是设备率（本机实测 48000）。
+    //   让后端按这个率出音频，前端解码时就零重采样 —— 而 16k→48k 的升采样
+    //   实测会振铃过冲到 1.40~1.47 倍（我们自己的加窗 sinc 也一样，不是
+    //   浏览器的 bug），过冲就是「爆音」。压峰值只能在重采样之后做，所以
+    //   重采样必须握在我们自己手里。
+    let devRate = (audioCtx && audioCtx.sampleRate) ? audioCtx.sampleRate : 0;
+    if (!devRate) {
+      // 兜底：上下文还没建起来时临时问一次（sampleRate 在 suspended 状态下也读得到）
+      try {
+        const AC = window.AudioContext || window.webkitAudioContext;
+        const tmp = new AC();
+        devRate = tmp.sampleRate || 0;
+        if (tmp.close) tmp.close();
+      } catch (e) { devRate = 0; }
+    }
+    return API.ttsSpeak(text, lang, accent, devRate)
       .then((res) => {
         if (!res || !res.audio) return false;
         // 合成期间用户可能已经点了别的词 —— 那就别出声了
         if (currentKey !== key) return true;
-        if (!audioEl) audioEl = new Audio();
-        audioEl.src = res.audio;
-        speaking = true;
         // ★ res.voice 是后端**实际用到的那条语音**（`SynthOut.voice`）。
         //   原来这里把它丢掉了，界面于是没法回答「这句到底是谁读的」。
         notifyVoice('local', res.voice || '', text, anchor);
-        audioEl.onended = () => { speaking = false; };
-        audioEl.onerror = () => { speaking = false; };
-        // 先把输出指到选定设备（如有）再开播 —— setSinkId 完成后才 play
-        const p = Promise.resolve(applySink(audioEl)).then(() => audioEl.play());
-        if (p && p.catch) {
-          // ★ 有些 Windows 环境的 WebView2 播放管线整体失灵：play() 对任何
-          //   来源都抛 NotSupportedError，甚至**永久挂起**（实测机器：能解码、
-          //   不能开播，连 188 字节标准 PCM 都失败）。等 3 秒不结算就视为
-          //   管线故障，降级到 WebAudio 播放（实测可用）。
-          const stalled = new Promise((r) => setTimeout(() => r({ __stalled: true }), 3000));
-          return Promise.race([p.then(() => ({ ok: true })).catch((err) => ({ err })), stalled])
-            .then((got) => {
-              if (got && got.ok) { healthOk(); return true; }
-              if (got && got.__stalled) {
-                try { audioEl.pause(); } catch (e) { /* 忽略 */ }
-              }
-              const err = (got && got.err) || { name: 'NotSupportedError', message: 'play() 挂起' };
-              speaking = false;
-              // ★ 播放管线故障 ≠ 音频损坏 —— 字节已经被 WebAudio 完整解码
-              //   验证过（实测 duration 精确）。先试 WebAudio，真发不出声才报错。
-              return playViaWebAudio(res.audio, anchor).then((ok) => {
-                if (ok) { healthOk(); return true; }
-                reportPlayError(err, anchor);
-                return false;
-              });
-            });
-        }
-        healthOk();
-        return true;
+        // ★ 主通路 = WebAudio（按文件原生采样率建上下文，解码零重采样）。
+        //   <audio> 元素做不到这一点：它只能按设备采样率（本机 48k）重采样，
+        //   而 16k→48k 的重采样实测过冲到 1.4589（827 个样本被削）—— 就是
+        //   用户说的「喷麦很炸」。所以顺序倒过来：<audio> 降级成兜底。
+        return playViaWebAudio(res.audio, anchor).then((ok) => {
+          if (ok) { healthOk(); return true; }
+          // WebAudio 这条路走不通（极少数环境的 WebView2）才回到元素播放
+          return playViaElement(res.audio, key).then((ok2) => {
+            if (ok2) { healthOk(); return true; }
+            reportPlayError(
+              { name: 'NotSupportedError', message: 'WebAudio 与 <audio> 两条通路都没能出声' },
+              anchor);
+            return false;
+          });
+        });
       })
       .catch((err) => {
         // 后端合成失败：原因要留档（回退系统语音若也发不出声，
         // 用户在常驻状态里能看到本地失败的真正原因，而不是只有「没声音」）
         healthError('本地合成失败：' + String((err && (err.message || err)) || '未知原因')
           + '；已改用系统语音');
+        return false;
+      });
+  }
+
+  /**
+   * 用 <audio> 元素播一段 data URI（WebAudio 走不通时的兜底）。
+   *
+   * 只在 WebAudio 失败时才走到这里 —— 元素播放会按设备采样率重采样，16k 的音
+   * 频在 48k 设备上会过冲削波（实测峰值 1.4589），音质不如 WebAudio 通路。
+   * 但它是最后一道保险：有的环境 WebAudio 起不来，能出声总比无声强。
+   *
+   * @returns {Promise<boolean>} true = 已开始出声
+   */
+  function playViaElement(dataUri, key) {
+    if (!dataUri) return Promise.resolve(false);
+    if (!audioEl) audioEl = new Audio();
+    audioEl.src = dataUri;
+    speaking = true;
+    audioEl.onended = () => { speaking = false; };
+    audioEl.onerror = () => { speaking = false; };
+    // 先把输出指到选定设备（如有）再开播 —— setSinkId 完成后才 play
+    const p = Promise.resolve(applySink(audioEl)).then(() => audioEl.play());
+    if (!p || !p.catch) return Promise.resolve(true);
+    // ★ 有些 Windows 环境的 WebView2 播放管线整体失灵：play() 对任何来源都抛
+    //   NotSupportedError，甚至**永久挂起**（实测机器：能解码、不能开播，连
+    //   188 字节标准 PCM 都失败）。等 3 秒不结算就按管线故障处理，不能再等。
+    const stalled = new Promise((r) => setTimeout(() => r({ __stalled: true }), 3000));
+    return Promise.race([p.then(() => ({ ok: true })).catch((err) => ({ err })), stalled])
+      .then((got) => {
+        if (got && got.ok) return true;
+        if (got && got.__stalled) {
+          try { audioEl.pause(); } catch (e) { /* 忽略 */ }
+        }
+        speaking = false;
         return false;
       });
   }
@@ -909,7 +982,8 @@ const Speak = (() => {
   return {
     speak, speakText, preview, stop, resolve, btnHtml, bindDelegate, bcp47,
     playUrl, playTts, voices, availableLang,
-    playViaWebAudio,   // 导出：冒烟测试直接断言 WebAudio 兜底
+    playViaWebAudio,   // 导出：冒烟测试直接断言 WebAudio 播放
+    playViaElement,    // 导出：冒烟测试直接断言 <audio> 兜底
     outputPref, setOutputPref,   // 导出：朗读输出设备偏好（设置页读写）
     activeCtxRate,               // 导出：当前 WebAudio 上下文采样率（诊断用）
     voicePref, setVoicePref, ratePref, setRatePref, resetPrefs,

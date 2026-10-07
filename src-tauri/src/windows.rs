@@ -36,9 +36,22 @@ pub const SIDEBAR_LABEL: &str = "sidebar";
 /// 主窗口标签
 pub const MAIN_LABEL: &str = "main";
 
+/// 命令占用主线程的告警阈值（毫秒）。
+///
+/// 只用于**记录**，不改变任何行为。同步执行的命令会占住主线程，占到 5 秒
+/// Windows 就会把窗口判成「未响应」（事件日志里的 AppHangB1）。
+const SLOW_CMD_MS: u64 = 300;
+
 /// 注册所有 Tauri 命令。
+///
+/// ★ 外面这层计时不是装饰：异步命令在这里几乎瞬时返回（函数体在线程池上
+///   跑），所以量出来的就是**真正堵住界面**的那段时间。下次再出现「未响应」，
+///   日志里会直接点名是哪个命令，不用再靠猜。
 fn build_invoke_handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
-    tauri::generate_handler![
+    // 类型必须写死：`generate_handler!` 展开出的闭包不带任何类型标注，
+    // 直接 `let inner = ...` 会让 rustc 推断不出来（E0282）。它不捕获任何
+    // 东西，所以能安全退化成 fn 指针。
+    let inner: fn(tauri::ipc::Invoke) -> bool = tauri::generate_handler![
         // 系统与配置
         commands::cmd_app_info,
         commands::cmd_get_config,
@@ -225,7 +238,18 @@ fn build_invoke_handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync +
         sidebar_hide,
         sidebar_toggle,
         main_show,
-    ]
+    ];
+
+    move |invoke: tauri::ipc::Invoke| -> bool {
+        let cmd = invoke.message.command().to_string();
+        let t0 = std::time::Instant::now();
+        let handled = inner(invoke);
+        let ms = t0.elapsed().as_millis() as u64;
+        if ms >= SLOW_CMD_MS {
+            log::warn!("慢命令 {} 占用主线程 {}ms（阈值 {}ms）", cmd, ms, SLOW_CMD_MS);
+        }
+        handled
+    }
 }
 
 /// 创建主窗口（仅桌面端）。

@@ -27,7 +27,7 @@ pub(crate) fn app_dir() -> PathBuf {
 }
 
 /// 当前部署状态。
-#[tauri::command]
+#[tauri::command(async)]
 pub fn cmd_local_llm_status(
     state: State<'_, Arc<AppState>>,
     _app: AppHandle,
@@ -149,13 +149,13 @@ fn reject_if_unsupported() -> Result<(), String> {
 }
 
 /// 可选模型清单。
-#[tauri::command]
+#[tauri::command(async)]
 pub fn cmd_local_llm_models() -> Vec<localllm::ModelSpec> {
     localllm::models()
 }
 
 /// 取消进行中的下载。
-#[tauri::command]
+#[tauri::command(async)]
 pub fn cmd_local_llm_cancel() {
     cancel_flag().store(true, Ordering::Relaxed);
 }
@@ -351,7 +351,7 @@ fn start_managed(
 }
 
 /// 启动托管服务，并把 AI 配置指向它。
-#[tauri::command]
+#[tauri::command(async)]
 pub fn cmd_local_llm_start(
     state: State<'_, Arc<AppState>>,
     model_id: Option<String>,
@@ -418,7 +418,7 @@ pub fn spawn_autostart(state: Arc<AppState>) {
 ///
 /// 单独一个命令而不是让前端整体保存配置：设置页以外的入口（左下角弹层）
 /// 也要能改它，走整份 `cmd_save_config` 容易把别处的改动覆盖掉。
-#[tauri::command]
+#[tauri::command(async)]
 pub fn cmd_set_local_llm_auto(
     state: State<'_, Arc<AppState>>,
     enabled: bool,
@@ -438,7 +438,7 @@ pub fn cmd_set_local_llm_auto(
 }
 
 /// 停止托管服务，并把 AI 配置还回「被接管之前」的样子。
-#[tauri::command]
+#[tauri::command(async)]
 pub fn cmd_local_llm_stop(state: State<'_, Arc<AppState>>) -> Result<serde_json::Value, String> {
     localllm::stop_server();
 
@@ -469,7 +469,7 @@ pub fn cmd_local_llm_stop(state: State<'_, Arc<AppState>>) -> Result<serde_json:
 }
 
 /// 删除一个已下载的模型（腾空间）。
-#[tauri::command]
+#[tauri::command(async)]
 pub fn cmd_local_llm_remove_model(
     state: State<'_, Arc<AppState>>,
     model_id: String,
@@ -541,7 +541,7 @@ pub fn cleanup_on_exit() {
 ///
 /// 探测失败一律返回 `accel: false` + 原因，绝不阻塞、绝不报错 ——
 /// 这只是状态显示，不是功能开关。
-#[tauri::command]
+#[tauri::command(async)]
 pub fn cmd_gpu_status() -> serde_json::Value {
     // ★ 缓存结果：显卡是硬件，不会在进程活着的时候换 —— 检测一次就够。
     //   nvidia-smi 每次都是一个子进程（几十到几百毫秒），而面板每次打开
