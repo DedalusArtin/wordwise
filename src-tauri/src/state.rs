@@ -135,7 +135,7 @@ impl AppState {
             log::warn!("词条语言对齐失败（读取时会自行兜底）：{e}");
         }
 
-        Ok(Arc::new(Self {
+        let state = Arc::new(Self {
             db,
             config: RwLock::new(config),
             http: RwLock::new(http),
@@ -144,7 +144,11 @@ impl AppState {
             review: RwLock::new(Session::default()),
             data_dir,
             data_dir_source,
-        }))
+        });
+        // 后台词库内容增强：空闲时用本地大模型把单薄词条补成统一详细的详解。
+        // 引擎内部有自己的启动延迟与节流，这里只管把它拉起来。
+        crate::enrich::spawn(state.clone());
+        Ok(state)
     }
 
     /// 取 HTTP 客户端。reqwest 的 Client 内部是 Arc，克隆很廉价。

@@ -287,7 +287,9 @@ const Update = (() => {
 
   async function openRelease() {
     const url = (last && last.page_url) || RELEASES_PAGE;
-    try { await API.openUrl(url); } catch (e) { U().toast(e.message, 'err'); }
+    // 更新下载必须走系统浏览器：应用内 WebView 接不住安装包下载，
+    // 也拿不到「下载完成后的文件」，所以这里无视「软件内打开」开关
+    try { await API.openExternal(url); } catch (e) { U().toast(e.message, 'err'); }
   }
 
   async function onPanelClick(e) {

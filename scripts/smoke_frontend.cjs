@@ -2710,14 +2710,26 @@ const cases = [
   // 装了多条时用户无从选择。下载了 ≠ 在用，这两件事要能分别看出来。
   ['设置：语音包下载后能选中生效', async () => {
     const src = fs.readFileSync(path.join(ROOT, 'src/js/settings.js'), 'utf8');
+    const sp = fs.readFileSync(path.join(ROOT, 'src/js/speak.js'), 'utf8');
     if (!/data-tts-use=/.test(src)) throw new Error('已安装的语音包没有「使用」入口');
     if (!/class="tag inuse"/.test(src)) throw new Error('看不出哪条正在使用');
-    if (!/voice_local: id/.test(src)) throw new Error('切换语音没有写回后端配置');
+    // 切换必须走全局读音门面（Speak.selectVoice）—— 它是参数名唯一写对的地方
+    if (!/Speak\.selectVoice\(id\)/.test(src)) throw new Error('切换语音没有走全局读音门面');
+    if (!/voiceLocal: currentLocalVoice/.test(sp)) throw new Error('门面没有写回后端配置');
+    // 负向守卫：直接给 setTtsPrefs 手拼 snake_case 参数名一旦回来，
+    // 后端收到 null、配置根本没写，界面上还毫无异常 —— 那就是老病复发
+    if (/setTtsPrefs\(\{\s*voice_local/.test(src) || /setTtsPrefs\(\{\s*voice_local/.test(sp)) {
+      throw new Error('又手拼了 voice_local 参数（IPC 参数名是 camelCase 的 voiceLocal）');
+    }
     if (!/if \(!ttsCurrentVoice\)/.test(src)) throw new Error('下载完没有自动接管（下了却还用不上）');
     // 删掉的正好是「使用中」那条时，要把指向它的配置一起清掉，
     // 否则留下一个指向不存在文件的 voice_local，每次朗读都先失败再回退。
     if (!/ttsCurrentVoice === id/.test(src)) throw new Error('删除使用中的语音后没有清配置');
-    return '使用入口 + 使用中标记 + 下载后自动应用 + 删除时清配置';
+    // 可用性必须在启动后 / 首次朗读前同步一次 —— 只在设置页刷新的话，
+    // 用户查词页直接朗读时 localReady 还是 false，本地通道被整段跳过
+    if (!/function ensureReady/.test(sp)) throw new Error('门面缺少可用性同步（ensureReady）');
+    if (!/return ensureReady\(\)\.then/.test(sp)) throw new Error('朗读前没有做可用性同步');
+    return '使用入口 + 门面切换 + 下载后自动应用 + 启动即同步可用性';
   }],
 
   // ---- 系统音色：刷新不许打断用户的选择 ----
@@ -2747,6 +2759,55 @@ const cases = [
       throw new Error('音色首次读不到时没有重试（下拉会永久停在「未提供可用语音」）');
     }
     return 'addEventListener + 指纹比对 + 选中态同步 + 空列表重试';
+  }],
+
+  // ---- 外部链接：默认在软件内打开，设置里可关；更新下载永远走系统浏览器 ----
+  ['链接：命令层分流 + 更新下载强制外部', async () => {
+    const rs = fs.readFileSync(path.join(ROOT, 'src-tauri/src/commands/mod.rs'), 'utf8');
+    const html = fs.readFileSync(path.join(ROOT, 'src/index.html'), 'utf8');
+    const apijs = fs.readFileSync(path.join(ROOT, 'src/js/api.js'), 'utf8');
+    const upd = fs.readFileSync(path.join(ROOT, 'src/js/update.js'), 'utf8');
+    const models = fs.readFileSync(path.join(ROOT, 'src-tauri/src/models.rs'), 'utf8');
+
+    // 分流收在命令层：前端所有调用点不用各自判断
+    if (!/open_links_in_app\s*\{/.test(rs)) throw new Error('cmd_open_url 没有按开关分流');
+    if (!/force_external\.unwrap_or\(false\)/.test(rs)) throw new Error('缺少强制外部的旁路');
+    if (!/open_links_in_app: bool/.test(models)) throw new Error('配置里缺 open_links_in_app 字段');
+    // 更新下载必须绕过开关（应用内 WebView 接不住安装包下载）
+    if (!/openExternal/.test(apijs)) throw new Error('api.js 缺 openExternal');
+    if (!/API\.openExternal/.test(upd)) throw new Error('更新下载仍在走 openUrl（会被开关分流进应用内窗口）');
+    // 设置页有开关（复用 data-opt 通用机制）
+    if (!/data-opt="open_links_in_app"/.test(html)) throw new Error('设置页缺「链接在软件内打开」开关');
+    return '命令层分流 + openExternal 旁路 + 设置开关';
+  }],
+
+  // ---- 模糊搜索提示：本地词库参与联想，拼写不准也能找到词 ----
+  ['联想：本地模糊候选 + 拼写纠错（不依赖网络）', async () => {
+    const rs = fs.readFileSync(path.join(ROOT, 'src-tauri/src/commands/mod.rs'), 'utf8');
+    const db = fs.readFileSync(path.join(ROOT, 'src-tauri/src/db/mod.rs'), 'utf8');
+    if (!/fuzzy_candidates\(&query, local_lang/.test(rs)) {
+      throw new Error('cmd_suggest 没有先并本地词库候选');
+    }
+    if (!/fn fuzzy_candidates/.test(db)) throw new Error('词库缺模糊候选查询');
+    if (!/fn edit_distance/.test(db)) throw new Error('缺编辑距离（拼写纠错的核心）');
+    // Rust 侧的三层相关性与「短前缀不做纠错」有单测钉死，这里只守接线
+    return '本地候选优先 + 编辑距离纠错 + 离线可用';
+  }],
+
+  // ---- 词库内容增强：后台 AI 把单薄词条补成统一详解 ----
+  ['增强：后台引擎只补缺不覆盖，且不动用户已有内容', async () => {
+    const enr = fs.readFileSync(path.join(ROOT, 'src-tauri/src/enrich.rs'), 'utf8');
+    const st = fs.readFileSync(path.join(ROOT, 'src-tauri/src/state.rs'), 'utf8');
+    if (!/fn merge_entry/.test(enr)) throw new Error('缺合并函数');
+    if (!/fn spawn/.test(enr)) throw new Error('缺后台循环入口');
+    if (!/enrich::spawn\(state\.clone\(\)\)/.test(st)) throw new Error('AppState 启动时没有拉起增强引擎');
+    // 命门：合并方向必须是「现有为准，生成垫底」
+    if (!/base\.phonetic\.uk = fresh\.phonetic\.uk/.test(enr)) {
+      throw new Error('合并没有只在缺失时填充');
+    }
+    // 与用户开关联动：AI 讲解关了就完全不跑
+    if (!/cfg\.study\.ai_explain/.test(enr)) throw new Error('增强没有跟着 AI 开关走');
+    return '启动即跑 + 只补缺不覆盖 + 跟随 AI 开关';
   }],
 
   // ---- 布局：试听钉顶部、当前语音模型钉右下角 ----

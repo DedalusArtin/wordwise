@@ -155,6 +155,63 @@ const Speak = (() => {
   function setLocalReady(v) { localReady = !!v; }
   function isLocalReady() { return localReady; }
 
+  /* ---------------- 本地语音的全局门面 ----------------
+     切换语音 / 可用性同步的**唯一入口**。此前这套逻辑散在设置页里，
+     出过两类只有全局收敛才能根除的事故：
+       · IPC 参数名手写错（`voice_local` vs `voiceLocal`）—— 后端收到
+         null、配置根本没写，界面上却毫无异常，「点了使用却没切换」；
+       · 可用性只在设置页刷新 —— 用户查词页直接朗读时它还是初始值，
+         本地通道被整段跳过，回退系统语音又挑不出音色，就成了
+         「没有可用语音」。 */
+
+  /** 后端当前指定的本地语音包 id（空 = 按词条语言自动挑）。 */
+  let currentLocalVoice = '';
+  /** 是否已经从后端同步过本地语音可用性。 */
+  let readySynced = false;
+  /** 去重的同步 Promise（并发调用共用一次）。 */
+  let syncingReady = null;
+
+  /**
+   * 从后端同步本地语音的可用性与当前选择。
+   *
+   * 应用启动后的**第一次朗读前**必须走到一次，否则 `localReady` 永远是
+   * 初始 false。同步失败不锁死（清掉去重句柄，下次再试）。
+   */
+  function ensureReady() {
+    if (readySynced) return Promise.resolve();
+    if (!syncingReady) {
+      const API = (window.WordWiseAPI && window.WordWiseAPI.API) || null;
+      if (!API || typeof API.ttsStatus !== 'function') {
+        readySynced = true;   // 无后端环境（测试 / 老壳）就别反复试
+        return Promise.resolve();
+      }
+      syncingReady = API.ttsStatus().then((st) => {
+        readySynced = true;
+        localReady = !!st && !!st.engine_ready && (st.installed || []).length > 0;
+        currentLocalVoice = (st && st.config && st.config.voice_local) || '';
+      }).catch(() => { syncingReady = null; });
+    }
+    return syncingReady;
+  }
+
+  /**
+   * 切换「当前使用的本地语音包」。设置页只准走这里，不许自己拼参数。
+   * @param {string} id 语音包 id；空串 = 清除指定（回到按语言自动挑）
+   */
+  function selectVoice(id) {
+    currentLocalVoice = id || '';   // 先改内存：高频读，不能等 IPC 回来
+    const API = (window.WordWiseAPI && window.WordWiseAPI.API) || null;
+    if (!API || typeof API.setTtsPrefs !== 'function') return Promise.resolve(false);
+    return API.setTtsPrefs({ voiceLocal: currentLocalVoice })
+      .then(() => true)
+      .catch(() => false);
+  }
+
+  /** 后端把配置改了（设置页 loadTts 拉到新状态）→ 推给门面。 */
+  function setLocalVoiceId(id) { currentLocalVoice = id || ''; }
+  function localVoiceId() { return currentLocalVoice; }
+
+
   /* ---------------- 当前语音（「刚才这句是用什么读的」） ----------------
 
      需求原文：「朗读时在界面旁显示当前用的是哪种语音（如 AI 或本地语音）」。
@@ -231,7 +288,15 @@ const Speak = (() => {
   function playLocalTts(text, lang, accent, rate, key, anchor) {
     const API = (window.WordWiseAPI && window.WordWiseAPI.API) || null;
     if (!API || typeof API.ttsSpeak !== 'function') return Promise.resolve(false);
-    if (!localReady) return Promise.resolve(false);
+    // 可用性还没同步过 → 先同步一次再决定（应用启动后的第一次朗读走这里）。
+    // 没有这一步，用户装好了语音包也会因为 localReady 停在初始值
+    // 而永远走不上本地通道。
+    if (!localReady) {
+      return ensureReady().then(() => {
+        if (!localReady) return false;
+        return playLocalTts(text, lang, accent, rate, key, anchor);
+      });
+    }
 
     return API.ttsSpeak(text, lang, accent)
       .then((res) => {
@@ -554,6 +619,8 @@ const Speak = (() => {
     playUrl, playTts, voices, availableLang,
     voicePref, setVoicePref, ratePref, setRatePref, resetPrefs,
     enginePref, setEnginePref, setLocalReady, isLocalReady, playLocalTts,
+    // 本地语音门面：切换 / 同步 / 读取当前生效的语音包
+    ensureReady, selectVoice, setLocalVoiceId, localVoiceId,
     // 「当前语音」：onVoice 订阅变化，currentVoice 直接读最新值
     onVoice, currentVoice, voiceLabel, voiceKindLabel,
   };

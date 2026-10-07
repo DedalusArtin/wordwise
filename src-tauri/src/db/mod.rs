@@ -2153,6 +2153,253 @@ impl Db {
         }
         Ok(fixed)
     }
+
+    /// 把词库里某条词条**缺失的音标**补上（词库命中后的在线补全回写）。
+    ///
+    /// 只填 `phonetic` 里**原本为空**的字段，用户已有的数据一律不碰；
+    /// 词条不存在 / JSON 解析失败时静默返回 `false` —— 音标是增强信息，
+    /// 补不上绝不能影响主流程。
+    pub fn update_word_phonetic(
+        &self,
+        word: &str,
+        lang: &str,
+        uk: &str,
+        us: &str,
+        audio: &str,
+    ) -> Result<bool> {
+        let conn = self.conn.lock();
+        let Some(json) = conn
+            .query_row(
+                "SELECT entry_json FROM words WHERE word=?1 AND lang=?2",
+                rusqlite::params![word, lang],
+                |r| r.get::<_, String>(0),
+            )
+            .ok()
+        else {
+            return Ok(false);
+        };
+        let Ok(mut v) = serde_json::from_str::<serde_json::Value>(&json) else {
+            return Ok(false);
+        };
+        let Some(obj) = v.as_object_mut() else {
+            return Ok(false);
+        };
+        let ph = obj
+            .entry("phonetic")
+            .or_insert_with(|| serde_json::json!({}));
+        let Some(po) = ph.as_object_mut() else {
+            return Ok(false);
+        };
+        let mut changed = false;
+        for (k, val) in [("uk", uk), ("us", us), ("audio", audio)] {
+            if val.trim().is_empty() {
+                continue;
+            }
+            let cur = po.get(k).and_then(|x| x.as_str()).unwrap_or("");
+            if cur.trim().is_empty() {
+                po.insert(k.to_string(), serde_json::Value::String(val.to_string()));
+                changed = true;
+            }
+        }
+        if !changed {
+            return Ok(false);
+        }
+        let new_json = serde_json::to_string(&v)?;
+        conn.execute(
+            "UPDATE words SET entry_json=?3 WHERE word=?1 AND lang=?2",
+            rusqlite::params![word, lang, new_json],
+        )?;
+        Ok(true)
+    }
+
+    /// 用一份**合并后的完整词条 JSON** 覆写词库行（后台内容增强的回写）。
+    ///
+    /// 只更新 `entry_json`，不动 `added_at`；行不存在（用户已删）时返回
+    /// `false` 而不是报错 —— 后台任务与用户操作并发，输给用户是正常的。
+    pub fn update_word_entry_json(&self, word: &str, lang: &str, entry_json: &str) -> Result<bool> {
+        let conn = self.conn.lock();
+        let n = conn.execute(
+            "UPDATE words SET entry_json=?3 WHERE word=?1 AND lang=?2",
+            rusqlite::params![word, lang, entry_json],
+        )?;
+        Ok(n > 0)
+    }
+
+    /// 抽一批「内容单薄」的词条 `(word, lang)` 供后台增强。
+    ///
+    /// 「单薄」由 [`word_needs_enrich`] 判定（缺音标或缺释义）。SQL 的
+    /// `RANDOM()` 粗抽一批、再逐个用 JSON 判定细筛 —— 因为「音标为空」
+    /// 无法可靠地下推到 SQL（字段顺序/缩进都不受控），而全表解析一次
+    /// 也就毫秒级。筛满 20 个或扫完即返回；返回空表示词库已够丰满。
+    pub fn pick_words_to_enrich(&self, limit: usize) -> Result<Vec<(String, String)>> {
+        let conn = self.conn.lock();
+        let mut stmt = conn
+            .prepare("SELECT word, lang, entry_json FROM words ORDER BY RANDOM() LIMIT ?1")?;
+        let rows = stmt.query_map(rusqlite::params![limit as i64], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+            ))
+        })?;
+        let mut out = Vec::new();
+        for r in rows {
+            let (w, l, j) = r?;
+            if word_needs_enrich(&j) {
+                out.push((w, l));
+                if out.len() >= 20 {
+                    break;
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// 本地词库的模糊候选：前缀命中 + 包含命中 + **编辑距离拼写纠错**。
+    ///
+    /// 给「拼写不太准」的用户兜底：`signifiance`、`sigNificance` 这类输入
+    /// 也要能找到 `significance`。三层相关性递减：
+    ///   ① 前缀命中（最相关，按词长升序 —— 短词更可能是用户想要的）；
+    ///   ② 包含命中；
+    ///   ③ 编辑距离 ≤ 2 的近似词（只对 ≥3 字符的前缀启用，太短时距离 2
+    ///      的候选会泛滥成噪声）。
+    ///
+    /// 万级词库全表算一遍编辑距离是毫秒级（带早停剪枝），不值得为此
+    /// 建索引；`lang` 传空则不按语言过滤。
+    pub fn fuzzy_candidates(&self, prefix: &str, lang: &str, limit: usize) -> Result<Vec<String>> {
+        let p = prefix.trim().to_lowercase();
+        if p.is_empty() {
+            return Ok(Vec::new());
+        }
+        let conn = self.conn.lock();
+        let sql = if lang.trim().is_empty() {
+            "SELECT DISTINCT word FROM words".to_string()
+        } else {
+            "SELECT DISTINCT word FROM words WHERE lang=?1".to_string()
+        };
+        let mut stmt = conn.prepare(&sql)?;
+        let map = |r: &rusqlite::Row| r.get::<_, String>(0);
+        let rows = if lang.trim().is_empty() {
+            stmt.query_map([], map)?
+                .collect::<std::result::Result<Vec<_>, _>>()?
+        } else {
+            stmt.query_map(rusqlite::params![lang], map)?
+                .collect::<std::result::Result<Vec<_>, _>>()?
+        };
+
+        let mut prefix_hits: Vec<String> = Vec::new();
+        let mut contains_hits: Vec<String> = Vec::new();
+        let mut fuzzy_hits: Vec<(String, usize)> = Vec::new();
+        let want_edit = p.chars().count() >= 3;
+        for w in rows {
+            let w = w.to_lowercase();
+            if w == p {
+                continue; // 精确匹配不需要建议
+            }
+            if w.starts_with(&p) {
+                prefix_hits.push(w);
+            } else if w.contains(&p) {
+                contains_hits.push(w);
+            } else if want_edit {
+                let d = edit_distance(&p, &w, 2);
+                if d <= 2 {
+                    fuzzy_hits.push((w, d));
+                }
+            }
+        }
+        prefix_hits.sort_by_key(|w| w.len());
+        contains_hits.sort_by_key(|w| w.len());
+        fuzzy_hits.sort_by(|a, b| a.1.cmp(&b.1).then(a.0.len().cmp(&b.0.len())));
+
+        let mut out: Vec<String> = Vec::new();
+        let take = |src: &mut Vec<String>, out: &mut Vec<String>| {
+            while out.len() < limit {
+                match src.pop() {
+                    Some(w) => {
+                        if !out.iter().any(|x| *x == w) {
+                            out.push(w);
+                        }
+                    }
+                    None => break,
+                }
+            }
+        };
+        // pop 从尾部取 → 先反转让「短的/距离近的」排前面
+        prefix_hits.reverse();
+        take(&mut prefix_hits, &mut out);
+        if out.len() < limit {
+            contains_hits.reverse();
+            take(&mut contains_hits, &mut out);
+        }
+        if out.len() < limit {
+            take_fuzzy(&mut fuzzy_hits, &mut out, limit);
+        }
+        Ok(out)
+    }
+}
+
+/// 编辑距离候选的合并（带去重与限额），与上面两层共用同一个 `out`。
+fn take_fuzzy(src: &mut Vec<(String, usize)>, out: &mut Vec<String>, limit: usize) {
+    while out.len() < limit {
+        match src.pop() {
+            Some((w, _)) => {
+                if !out.iter().any(|x| *x == w) {
+                    out.push(w);
+                }
+            }
+            None => break,
+        }
+    }
+}
+
+/// 带上限的 Levenshtein 距离：超过 `max` 就提前返回 `max + 1`（逐行早停）。
+fn edit_distance(a: &str, b: &str, max: usize) -> usize {
+    let a: Vec<char> = a.chars().collect();
+    let b: Vec<char> = b.chars().collect();
+    if a.len().abs_diff(b.len()) > max {
+        return max + 1;
+    }
+    let mut prev: Vec<usize> = (0..=b.len()).collect();
+    let mut cur = vec![0usize; b.len() + 1];
+    for i in 1..=a.len() {
+        cur[0] = i;
+        let mut row_min = cur[0];
+        for j in 1..=b.len() {
+            let cost = usize::from(a[i - 1] != b[j - 1]);
+            cur[j] = (prev[j] + 1).min(cur[j - 1] + 1).min(prev[j - 1] + cost);
+            row_min = row_min.min(cur[j]);
+        }
+        if row_min > max {
+            return max + 1;
+        }
+        std::mem::swap(&mut prev, &mut cur);
+    }
+    prev[b.len()]
+}
+
+/// 词条是否「内容单薄」到值得后台增强。
+///
+/// 只看最影响使用体验的两项：**没有音标**（认读与朗读的参照）与
+/// **一个释义都没有**。例句、记忆法缺了不疼，没必要为它们反复烧算力。
+/// 坏 JSON 一律返回 `false` 不碰 —— 否则后台任务会在同一个词上反复失败。
+pub fn word_needs_enrich(json: &str) -> bool {
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(json) else {
+        return false;
+    };
+    let ph_empty = v
+        .get("phonetic")
+        .and_then(|p| {
+            let uk = p.get("uk").and_then(|x| x.as_str()).unwrap_or("").trim();
+            let us = p.get("us").and_then(|x| x.as_str()).unwrap_or("").trim();
+            Some(uk.is_empty() && us.is_empty())
+        })
+        .unwrap_or(true);
+    let senses_empty = v
+        .get("senses")
+        .and_then(|s| s.as_array())
+        .map(|a| a.is_empty())
+        .unwrap_or(true);
+    ph_empty || senses_empty
 }
 
 /// 把 `book_id` 下、当前语言为 `ol` 的词条迁到权威语言 `want`。
@@ -2321,6 +2568,92 @@ mod tests {
             examples: vec![],
         }];
         e
+    }
+
+    /// 音标回写只能**填空**，不能动用户已有的数据 —— 后台补全与用户
+    /// 手头的内容冲突时，输的必须是补全。
+    #[test]
+    fn update_word_phonetic_fills_only_empty_fields() {
+        let db = tmp_db("phonetic");
+        let mut e = entry("en", "significance", "n.", "意义；重要性");
+        e.phonetic.uk = "/已有英音/".to_string();
+        db.bulk_upsert_words(&[e], 1).unwrap();
+
+        // uk 已有 → 不能被覆盖；us 空 → 补上
+        assert!(db
+            .update_word_phonetic("significance", "en", "/模型编的/", "/sɪɡˈnɪfɪkəns/", "")
+            .unwrap());
+        let got = db.get_word("significance", "en").unwrap().unwrap();
+        assert_eq!(got.phonetic.uk, "/已有英音/", "已有音标绝不能被覆盖");
+        assert_eq!(got.phonetic.us, "/sɪɡˈnɪfɪkəns/");
+        assert_eq!(got.senses[0].definition, "意义；重要性", "释义必须原样保留");
+
+        // 再跑一遍：都已非空 → 无变化 → 返回 false（幂等）
+        assert!(!db
+            .update_word_phonetic("significance", "en", "x", "y", "")
+            .unwrap());
+
+        // 词不存在 → false 而不是报错（后台任务与用户删除并发）
+        assert!(!db.update_word_phonetic("ghost", "en", "a", "b", "").unwrap());
+    }
+
+    /// 模糊候选的三层相关性：前缀 > 包含 > 拼写纠错。
+    /// 这是「很多人拼写没这么好」的兜底：signifiance 必须能找到 significance。
+    #[test]
+    fn fuzzy_candidates_handles_prefix_contains_and_typos() {
+        let db = tmp_db("fuzzy");
+        let rows = vec![
+            entry("en", "significance", "n.", "意义"),
+            entry("en", "significant", "adj.", "重要的"),
+            entry("en", "insignificant", "adj.", "不重要的"),
+            entry("en", "apple", "n.", "苹果"),
+        ];
+        db.bulk_upsert_words(&rows, 1).unwrap();
+
+        // ① 前缀命中，且短的排前面
+        let hits = db.fuzzy_candidates("signi", "en", 8).unwrap();
+        assert!(hits.first().map(|w| w.len() == 11).unwrap_or(false), "前缀命中里短词优先：{:?}", hits);
+        assert!(hits.contains(&"significance".to_string()));
+
+        // ② 包含命中（前缀对不上的）
+        let mid = db.fuzzy_candidates("gnifi", "en", 8).unwrap();
+        assert!(mid.contains(&"significance".to_string()), "包含命中：{:?}", mid);
+
+        // ③ 拼写纠错：错一个字母也要能找到
+        let typo = db.fuzzy_candidates("signifiance", "en", 8).unwrap();
+        assert!(
+            typo.contains(&"significance".to_string()),
+            "编辑距离 1 的拼写纠错失败：{:?}",
+            typo
+        );
+
+        // ④ 短前缀（<3 字符）不做纠错 —— 距离 2 的候选会泛滥
+        let short = db.fuzzy_candidates("ap", "en", 8).unwrap();
+        assert!(short.contains(&"apple".to_string()));
+        assert!(!short.iter().any(|w| w != "apple" && !w.starts_with("ap")));
+
+        // ⑤ 空输入直接返回空
+        assert!(db.fuzzy_candidates("", "en", 8).unwrap().is_empty());
+    }
+
+    /// 「内容单薄」的判定口径：缺音标或缺释义才算，坏 JSON 一律不算
+    /// （否则后台任务会在同一个词上反复失败）。
+    #[test]
+    fn word_needs_enrich_flags_thin_entries() {
+        // ① 音标 + 释义都有 → 不需要
+        let full = r#"{"word":"apple","lang":"en","phonetic":{"uk":"/ˈæpl/","us":""},"senses":[{"pos":"n.","definition":"苹果"}]}"#;
+        assert!(!word_needs_enrich(full));
+
+        // ② 音标空 → 需要
+        let no_ph = r#"{"word":"apple","lang":"en","phonetic":{"uk":"","us":""},"senses":[{"pos":"n.","definition":"苹果"}]}"#;
+        assert!(word_needs_enrich(no_ph));
+
+        // ③ 释义空 → 需要
+        let no_senses = r#"{"word":"apple","lang":"en","phonetic":{"uk":"/ˈæpl/","us":""},"senses":[]}"#;
+        assert!(word_needs_enrich(no_senses));
+
+        // ④ 坏 JSON → 不需要（别让后台任务反复撞墙）
+        assert!(!word_needs_enrich("{not json"));
     }
 
     /// 搜索必须同时命中「单词」和「中文释义」。

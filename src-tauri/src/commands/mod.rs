@@ -852,7 +852,38 @@ pub async fn cmd_suggest(
 ) -> Result<Vec<search::Suggestion>, String> {
     let cfg = state.cfg();
     let lang = lang.unwrap_or(cfg.target_lang.clone());
-    Ok(search::suggest(&state.http(), &query, &lang).await)
+
+    // 本地词库的模糊候选排最前。三个理由：
+    //   ① 毫秒级、离线可用（在线联想在无网时是空的）；
+    //   ② 都是用户「正在学 / 学过」的词，相关性天然更高；
+    //   ③ 带编辑距离纠错 —— 用户拼写不准时（signifiance → significance）
+    //      在线联想给的往往是「查不到」。
+    // 语言按**源语言**过滤（输入的语言），而不是 target_lang ——
+    // 后者用于在线联想（它需要知道要联想成哪国话）。
+    let src = cfg.source_lang.trim();
+    let local_lang = if src.is_empty() || src == crate::translate::AUTO { "" } else { src };
+    let mut out: Vec<search::Suggestion> = state
+        .db
+        .fuzzy_candidates(&query, local_lang, 6)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|w| search::Suggestion {
+            word: w,
+            gloss: String::new(),
+            source: "词库".into(),
+        })
+        .collect();
+
+    let online = search::suggest(&state.http(), &query, &lang).await;
+    for s in online {
+        if out.len() >= 10 {
+            break;
+        }
+        if !out.iter().any(|x| x.word.eq_ignore_ascii_case(&s.word)) {
+            out.push(s);
+        }
+    }
+    Ok(out)
 }
 
 /// 综合搜索（候选 + 维基百科知识）。
@@ -903,10 +934,23 @@ pub fn cmd_dict_links(
 
 /// 用系统默认浏览器打开外部链接（辞书跳转用）。
 #[tauri::command]
-pub fn cmd_open_url(app: tauri::AppHandle, url: String) -> Result<(), String> {
+pub fn cmd_open_url(
+    state: State<'_, Arc<AppState>>,
+    app: tauri::AppHandle,
+    url: String,
+    force_external: Option<bool>,
+) -> Result<(), String> {
     let u = url.trim();
     if !(u.starts_with("http://") || u.starts_with("https://")) {
         return Err("只允许打开 http(s) 链接".into());
+    }
+    // 「链接在软件内打开」开关（设置 → 学习偏好）。分流收在**命令层**：
+    // 前端所有调用点（权威辞书、词库资料源、库内链接…）无需各自判断，
+    // 行为随开关全局切换。`force_external` 给「必须离开软件」的动作
+    // （下载安装包更新）留一条直通系统浏览器的路 —— 应用内 WebView
+    // 接不住安装包下载。
+    if !force_external.unwrap_or(false) && state.cfg().study.open_links_in_app {
+        return cmd_open_in_app(app, url);
     }
     open_in_browser(&app, u).map_err(err)
 }

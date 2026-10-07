@@ -1384,7 +1384,15 @@ pub async fn lookup_with_cache(
     let key = word.trim().to_lowercase();
 
     // 1) 词库命中直接返回（用户已导入的高质量词条优先）
-    if let Ok(Some(e)) = db.get_word(&key, lang) {
+    //
+    // ★ 命中**不等于**万事大吉：导入的词库实测有一半词条没有音标
+    //   （9908 行里 4993 行 phonetic 全空），而命中后不再走在线源，
+    //   这些词的音标就永远缺着 —— 界面上只剩一个孤零零的喇叭按钮。
+    //   所以命中后先做一次「尽力而为」的音标补全（见
+    //   [`enrich_wordbook_phonetic`]），补上了就回写词库，
+    //   同一个词一生只发一次请求。
+    if let Ok(Some(mut e)) = db.get_word(&key, lang) {
+        enrich_wordbook_phonetic(db, client, net_cfg, &mut e).await;
         return Ok(LookupResult {
             word: e.word.clone(),
             lang: e.lang.clone(),
@@ -1624,6 +1632,60 @@ pub fn headers(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
         .iter()
         .map(|(k, v)| (k.to_string(), v.to_string()))
         .collect()
+}
+
+/// 哪些语言的词库词条值得补音标。
+///
+/// 有道的 `basic.phonetic` 对拉丁语言给的是 IPA 音标（正是缺的那块）；
+/// 对中/日/韩给的是拼音/假名/罗马音，语义不同且这些语言大多有自己的
+/// 读音字段，先不混进来。
+fn phonetic_gap_lang(lang: &str) -> bool {
+    matches!(
+        lang,
+        "en" | "fr" | "de" | "es" | "ru" | "pt" | "it"
+    )
+}
+
+/// 词库词条缺音标时的在线补全（尽力而为，任何失败都静默跳过）。
+///
+/// 为什么放这里：词库命中后 [`lookup_with_cache`] 不再走在线源，
+/// 导入词条里那 49% 没有音标的词就永远缺着 —— 用户看到的查词结果
+/// 只剩一个喇叭按钮。补全成功就**回写词库**（[`crate::db::Db::update_word_phonetic`]），
+/// 同一个词一生只发一次请求。
+///
+/// 三条保险，保证它永远不会变成「查词变慢」的元凶：
+///   1. 有道内部的限频检查是**直接拒绝**而不是等待 —— 撞上间隔就放弃，
+///      后台增强引擎或下次查询自然会再补；
+///   2. 外面再套一个 2 秒硬超时 —— 网络不通时宁可这条词没音标，
+///      也不能让「本地词库秒回」退化成「等一个注定失败的 HTTP」；
+///   3. 任何错误都被吞掉 —— 音标是增强信息，主结果不受影响。
+async fn enrich_wordbook_phonetic(
+    db: &Db,
+    client: &reqwest::Client,
+    net: &crate::models::NetworkConfig,
+    e: &mut WordEntry,
+) {
+    if !e.phonetic.uk.trim().is_empty() || !e.phonetic.us.trim().is_empty() {
+        return; // 已有音标，无事可做
+    }
+    if !phonetic_gap_lang(&e.lang) || e.word.trim().is_empty() {
+        return;
+    }
+    let fut = crate::translate::youdao_translate(client, net, &e.lang, "zh", &e.word);
+    let Ok(res) = tokio::time::timeout(std::time::Duration::from_secs(2), fut).await else {
+        return;
+    };
+    let Ok(res) = res else { return };
+    let Some(b) = res.dict else { return };
+    let ph = b.phonetic.trim();
+    if ph.is_empty() {
+        return;
+    }
+    // 有道这里只给一个音标（不分英美）→ 放进 us 位，
+    // 与「词典源音标大多先给美音」的既有呈现一致
+    e.phonetic.us = ph.to_string();
+    // 回写失败无妨：本次返回的 entry 已经带上了音标
+    let _ = db.update_word_phonetic(&e.word, &e.lang, "", ph, "");
 }
 
 #[cfg(test)]

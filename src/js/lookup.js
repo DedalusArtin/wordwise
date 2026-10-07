@@ -897,7 +897,7 @@ const Lookup = (() => {
       if (!list || !list.length) { box.innerHTML = ''; return; }
       box.innerHTML = list.slice(0, 10).map(s => `
         <span class="suggest-chip" data-word="${U().esc(s.word)}">
-          ${U().esc(s.word)}${s.gloss ? `<span class="sc-src">${U().esc(s.gloss.slice(0, 18))}</span>` : ''}
+          ${U().esc(s.word)}${s.source === '词库' ? '<span class="sc-src">词库</span>' : ''}${s.gloss ? `<span class="sc-src">${U().esc(s.gloss.slice(0, 18))}</span>` : ''}
         </span>`).join('');
       box.querySelectorAll('.suggest-chip').forEach(c => {
         c.addEventListener('click', () => query(c.dataset.word));

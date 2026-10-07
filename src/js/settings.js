@@ -1053,6 +1053,9 @@ const Settings = (() => {
     // 与后端对齐「当前生效的本地语音」。必须在下面渲染之前取 ——
     // voiceRow 要靠它决定哪一行显示「使用中」。
     ttsCurrentVoice = (st.config && st.config.voice_local) || '';
+    if (window.Speak && window.Speak.setLocalVoiceId) {
+      window.Speak.setLocalVoiceId(ttsCurrentVoice);
+    }
     ttsVoiceLabels = {};
     (st.voices || []).forEach(v => { ttsVoiceLabels[v.id] = v.label; });
 
@@ -1241,13 +1244,16 @@ const Settings = (() => {
         return;
       }
 
-      // 「使用」某条已安装的语音 → 立即生效并记住
+      // 「使用」某条已安装的语音 → 立即生效并记住。
+      // ★ 只准走 Speak.selectVoice 这个全局门面：IPC 参数名是 camelCase
+      //   （voiceLocal），手拼极易错成 snake_case —— 错了后端收到 null、
+      //   配置根本没写，界面上却毫无异常，正是「点了使用却没切换」的根因。
       const use = ev.target.closest?.('[data-tts-use]');
       if (use) {
         const id = use.getAttribute('data-tts-use');
         use.disabled = true;
         try {
-          await API.setTtsPrefs({ voice_local: id });
+          await window.Speak.selectVoice(id);
           ttsCurrentVoice = id;
           U().toast('已切换本地语音，点「试听」确认', 'ok');
         } catch (e) {
@@ -1268,10 +1274,8 @@ const Settings = (() => {
           // 只在「当前还没指定语音」时才自动接管 —— 他已经明确选过另一条的话，
           // 抢过来会把用户的设置改掉。
           if (!ttsCurrentVoice) {
-            try {
-              await API.setTtsPrefs({ voice_local: id });
-              ttsCurrentVoice = id;
-            } catch (e) { /* 接管失败不影响本次下载，用户可手动点「使用」 */ }
+            await window.Speak.selectVoice(id);
+            ttsCurrentVoice = id;
           }
           U().toast((r && r.message) || '语音包已安装', 'ok');
         } catch (e) {
@@ -1286,10 +1290,8 @@ const Settings = (() => {
           // 删掉的正好是「当前使用」的那条 → 一并清掉指定，免得残留一个
           // 指向不存在文件的 voice_local（它会让每次朗读都先失败再回退）
           if (ttsCurrentVoice === id) {
-            try {
-              await API.setTtsPrefs({ voice_local: '' });
-              ttsCurrentVoice = '';
-            } catch (e) { /* 忽略 */ }
+            await window.Speak.selectVoice('');
+            ttsCurrentVoice = '';
           }
           U().toast('已删除语音包', 'ok');
         } catch (e) {

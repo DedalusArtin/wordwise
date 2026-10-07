@@ -139,7 +139,17 @@ const API = {
     invoke('cmd_search', { query, lang: lang || null, withWiki: withWiki !== false }),
   wiki: (word, lang) => invoke('cmd_wiki', { word, lang: lang || null }),
   dictLinks: (word, lang) => invoke('cmd_dict_links', { word, lang: lang || null }),
+  /**
+   * 打开外部链接。
+   *
+   * 分流收在后端命令层：设置里开了「链接在软件内打开」就走应用内浏览窗口，
+   * 否则弹系统浏览器 —— 前端调用点不用各自判断。
+   * `openExternal` 给「必须离开软件」的动作（下载安装包更新）留一条
+   * 直通系统浏览器的路：应用内 WebView 接不住安装包下载。
+   */
   openUrl: (url) => invoke('cmd_open_url', { url }),
+  /** 无视「软件内打开」开关，始终用系统浏览器（更新下载等场景专用）。 */
+  openExternal: (url) => invoke('cmd_open_url', { url, forceExternal: true }),
   /**
    * 在**应用内**打开网页（需求 11）。
    *
@@ -379,6 +389,7 @@ const API = {
   dbMaintain: (action) => invoke('cmd_db_maintain', { action }),
   openDir: (path) => invoke('cmd_open_dir', { path }),
   openUrl: (url) => invoke('cmd_open_url', { url }),
+  openExternal: (url) => invoke('cmd_open_url', { url, forceExternal: true }),
 
   // 数据与模型的存放位置（装到哪，数据就落哪，默认不写 C 盘）
   storageInfo: () => invoke('cmd_storage_info'),
@@ -445,6 +456,8 @@ const API = {
     text, lang: lang || null, accent: accent || null,
   }),
   ttsClearCache: () => invoke('cmd_tts_clear_cache'),
+  // 后台词库内容增强的进度（AI 空闲时把单薄词条补成详解）
+  enrichStatus: () => invoke('cmd_enrich_status'),
   // 语音包下载进度（与更新、本地模型三条流各自独立）
   onTtsProgress: (fn) => listen('tts://progress', fn),
   onTtsDone: (fn) => listen('tts://done', fn),

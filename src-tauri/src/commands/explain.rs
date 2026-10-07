@@ -182,6 +182,16 @@ pub fn cmd_explain_count(state: State<'_, Arc<AppState>>) -> Result<i64, String>
     state.db.explain_count().map_err(err)
 }
 
+/// 后台词库内容增强的进度（设置页 / 维护面板展示用）。
+///
+/// 增强引擎是纯后台的：软件空闲时用本地大模型把词库里「单薄」的词条
+/// （缺音标、缺释义）逐个补成与在线词典同构的详解。这里只读进度，
+/// 不能也不需要从界面触发 —— 它自己会跑。
+#[tauri::command]
+pub fn cmd_enrich_status() -> serde_json::Value {
+    crate::enrich::status()
+}
+
 /// 把一条 AI 讲解**并入词库**：整理成结构化词条 → 写进 `words` 表 → 进复习队列。
 ///
 /// 这是「讲解也是一种存储」的落点：讲解从"一段聊天文字"变成"一个可背的词条"。

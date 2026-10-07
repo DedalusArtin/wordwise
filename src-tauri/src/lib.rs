@@ -20,6 +20,7 @@
 pub mod commands;
 pub mod db;
 pub mod dict;
+pub mod enrich;
 pub mod graph;
 pub mod llm;
 pub mod localllm;

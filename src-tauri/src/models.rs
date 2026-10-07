@@ -94,6 +94,10 @@ fn default_lang() -> String {
     "en".to_string()
 }
 
+fn default_open_links_in_app() -> bool {
+    true
+}
+
 /// 文本里是否含汉字（CJK 统一表意文字）。用于区分「中文释义」与「原文释义」。
 fn contains_han(s: &str) -> bool {
     s.chars()
@@ -606,6 +610,11 @@ pub struct StudyOptions {
     pub auto_popup_on_wrong: bool,
     /// 是否启用 AI 讲解
     pub ai_explain: bool,
+    /// 外部链接（权威辞书、词库资料源等）在**应用内**浏览窗口打开，而不是
+    /// 弹系统浏览器。默认开：应用内窗口不丢上下文，返回也只需关掉。
+    /// 「下载安装包」这类必须离开软件的动作不受它管（走 openExternal）。
+    #[serde(default = "default_open_links_in_app")]
+    pub open_links_in_app: bool,
     /// 每轮题量
     pub batch_size: i64,
     /// 每日复习上限
@@ -654,6 +663,7 @@ impl Default for StudyOptions {
             show_phonetic: true,
             auto_popup_on_wrong: true,
             ai_explain: true,
+            open_links_in_app: default_open_links_in_app(),
             batch_size: 20,
             daily_limit: 120,
             option_count: default_option_count(),
