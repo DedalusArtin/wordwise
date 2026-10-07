@@ -86,6 +86,9 @@ fn build_invoke_handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync +
         commands::localllm::cmd_gpu_status,
         // 关闭行为可选：直接退出（默认是缩小到托盘）
         commands::localllm::cmd_app_exit,
+        // 运行日志诊断（自动分析错误/警告并给建议）+ 前端写日志
+        crate::logging::cmd_log_analysis,
+        crate::logging::cmd_log_write,
         // 词库
         commands::cmd_list_words,
         commands::cmd_add_word,

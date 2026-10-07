@@ -3452,20 +3452,41 @@ h1 .ver-chip { font-size: 11px; padding: 2px 8px; vertical-align: 4px; }
 }
 .tts-topbar .panel-title { margin-bottom: 0; }
 
-/* ---- 设置页折叠：标题即折叠头，收起时只留标题一行 ----
-   「高级」类面板默认收起（演示模式 / 网络 / 词典源 / 数据库 / 存储位置），
-   常用面板全展开 —— 一屏不再全是细节。caret 由 settings.js 插入。 */
-.panel.foldable > .panel-title {
-  display: flex; align-items: center; gap: 7px;
+/* ---- 设置页分组手风琴（苹果式：克制、留白、层级清晰） ----
+   组 = 圆角大卡片；组头是折叠头（大标题 + 箭头），组内面板弱化成
+   带分隔线的列表（去卡片边框），层级是「组名 > 面板标题 > 内容」。 */
+.settings-group {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  margin-bottom: 16px;
+  box-shadow: var(--shadow-1);
+  overflow: hidden;
+}
+.settings-group-head {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 15px 20px;
   cursor: pointer; user-select: none;
 }
-.panel.foldable > .panel-title .pt-caret {
-  font-size: 10px; line-height: 1; color: var(--text-3);
-  transition: transform .12s ease;
+.settings-group-head:hover { background: var(--border-2); }
+.settings-group-head .sg-title { font-size: 13.5px; font-weight: 650; color: var(--text); }
+.settings-group-head .sg-caret {
+  font-size: 11px; color: var(--text-3);
+  transition: transform .16s ease;
 }
-.panel.foldable > .panel-title:hover .pt-caret { color: var(--text-2); }
-.panel.foldable.collapsed > *:not(.panel-title) { display: none !important; }
-.panel.foldable.collapsed { padding-bottom: 14px; }
+.settings-group.collapsed .settings-group-head .sg-caret { transform: rotate(-90deg); }
+.settings-group-body { padding: 2px 20px 8px; }
+.settings-group.collapsed .settings-group-body { display: none; }
+
+/* 组内面板：去卡片壳、用分隔线分区（层级让给组） */
+.settings-group .panel {
+  background: transparent; border: none; box-shadow: none;
+  border-radius: 0; padding: 16px 2px 20px; margin: 0;
+}
+.settings-group .panel + .panel { border-top: 1px solid var(--border-2); }
+.settings-group .panel-title { font-size: 13px; color: var(--text-2); margin-bottom: 12px; }
+/* 朗读面板的 sticky 顶条在组内也要贴住内容区上沿 */
+.settings-group .panel .tts-topbar { margin: -6px -2px 12px; padding: 6px 2px 10px; background: transparent; }
 
 /* ---- 语音健康行：朗读链路失败的常驻出口 ----
    toast 5 秒消失，这里的错误**一直挂着**，直到下一次成功朗读把它盖掉。

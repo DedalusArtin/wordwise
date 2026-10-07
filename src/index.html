@@ -1254,7 +1254,15 @@
         <!-- 关于与更新：版本号 + 在线更新（检测 / 下载 / 安装） -->
         <div class="panel span-2" id="panel-update">
           <div class="panel-head-row">
-            <h3 class="panel-title">关于与更新</h3>
+            <h3 class="panel-title">日志诊断</h3>
+          <p class="muted">自动分析运行日志（保留最近 2000 条，文件在数据目录 logs\ 下），识别错误与警告并给出建议。朗读/查询失败的原因也会记录在这里。</p>
+          <div class="log-summary" id="log-summary"></div>
+          <div class="log-items" id="log-items"></div>
+          <div class="option-row"><button class="ghost-btn sm" id="btn-log-analyze">重新分析</button></div>
+        </div>
+
+        <div class="panel">
+          <h3 class="panel-title">关于与更新</h3>
             <div class="btn-row">
               <button class="primary-btn sm" id="btn-update-check">检查更新</button>
               <button class="ghost-btn sm" id="btn-update-release">打开发布页</button>

@@ -93,6 +93,9 @@ const API = {
   gpuStatus: () => invoke('cmd_gpu_status'),
   // 真正退出应用（关闭行为设为「直接退出」时用）
   appExit: () => invoke('cmd_app_exit'),
+  // 运行日志：自动分析（错误/警告 → 分类 + 建议）与前端写日志
+  logAnalysis: () => invoke('cmd_log_analysis'),
+  logWrite: (level, message) => invoke('cmd_log_write', { level, message }),
   llmAutoconnect: () => invoke('cmd_llm_autoconnect'),
   // ★ 返回 ExplainResult { word, text, original, lang, translated, note }
   //   而不是字符串：text 是最终展示文本，original 是模型原文（供「查看原文」对照）。

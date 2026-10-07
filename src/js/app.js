@@ -365,6 +365,21 @@ const App = (() => {
       window.I18n?.init(config && config.ui_lang);
     } catch (e) { /* 字典出错不该拖垮启动，界面退回中文即可 */ }
 
+    // 全局错误上报到日志：排障诊断的数据源之一（节流 1 条/秒防刷屏）
+    let lastErrLog = 0;
+    window.addEventListener('error', (e) => {
+      const now = Date.now();
+      if (now - lastErrLog < 1000) return;
+      lastErrLog = now;
+      API.logWrite?.('error', '[js] ' + ((e && e.message) || '未知错误'));
+    });
+    window.addEventListener('unhandledrejection', (e) => {
+      const now = Date.now();
+      if (now - lastErrLog < 1000) return;
+      lastErrLog = now;
+      API.logWrite?.('error', '[js promise] ' + String((e && e.reason && (e.reason.message || e.reason)) || '未处理的 Promise 拒绝').slice(0, 300));
+    });
+
     // 检测本地模型
     checkLlm();
     // 语音载入情况（侧边栏常驻，与模型状态并排）

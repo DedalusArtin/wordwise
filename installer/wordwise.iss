@@ -33,7 +33,7 @@
 ; ★ 要改版本号请改 tauri.conf.json —— 两处各写一个版本号必然会漂移，
 ;   表现是「安装包文件名 / 界面显示 / 程序属性」三个版本号对不上。
 #ifndef MyAppVersion
-  #define MyAppVersion "0.45.3"
+  #define MyAppVersion "0.45.4"
 #endif
 
 ; 相对本 .iss 文件定位构建产物；若使用自定义 target 目录，

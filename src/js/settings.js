@@ -192,6 +192,8 @@ const Settings = (() => {
     loadSpeak();
     // 本地语音包与引擎状态（要读后端，异步渲染）
     loadTts();
+    // 日志诊断自动跑一次（打开设置页即见结果，不用手点）
+    if (API.logAnalysis) renderLogAnalysis();
   }
 
   function setVal(id, v) {
@@ -1361,57 +1363,135 @@ const Settings = (() => {
     }
   }
 
-  /* ---- 设置页折叠整理 ----
-     面板太多，一屏全是细节，用户原话「设置页太乱，全部整理一下，
-     折叠或苹果式那种美观一点」。整理规则：
-       · 每个面板的标题就是折叠头（点标题收起/展开，带箭头指示）；
-       · 「高级」类面板（演示模式 / 网络 / 词典源 / 数据库 / 存储位置）
-         默认收起，常用的全部展开；
-       · 用户的手动选择按面板标题记在 localStorage，跨启动保留。 */
-  const LS_PANEL_FOLD = 'ww.settings.fold';
+  /* ---- 设置页分组手风琴（重构） ----
+     面板太多太杂（原话「设置内容过多且杂乱」）。按功能归成六个组，
+     每组一个手风琴：组头点击收起/展开，组内面板弱化成带分隔线的列表；
+     「数据与网络」这类高级组默认收起，常用组全部展开。分组靠 DOM 重组
+     实现（HTML 不动，守卫与既有 id 查找不受影响），手动选择记
+     localStorage 跨启动保留。 */
+  const LS_GROUP_FOLD = 'ww.settings.groupFold';
+
+  const SETTINGS_GROUPS = [
+    { title: '通用', open: true, panels: ['外观与主题', '语言'] },
+    { title: '学习与朗读', open: true, panels: ['记忆辅助内容', '朗读与发音'] },
+    { title: 'AI 与模型', open: true, panels: ['AI 服务（本地模型 / 在线 API）', '演示模式'] },
+    { title: '搜索与词典', open: true, panels: ['语言与搜索', '词典与翻译源（可扩展小语种）'] },
+    { title: '数据与网络', open: false, panels: ['网络与代理', '数据库', '数据与模型的存放位置'] },
+    { title: '关于', open: true, panels: ['日志诊断', '关于与更新'] },
+  ];
+
+  /* ---- 日志诊断：自动分析 + 清晰呈现 ----
+     后端读环形缓冲（最近 2000 条），按规则表归类错误/警告并给建议；
+     同一问题刷屏会合并成一条带计数。这里只负责把结果画清楚。 */
+  let logSeq = 0;
+
+  function esc50(v, n) {
+    return U().esc(String(v || '').slice(0, n || 120));
+  }
+
+  async function renderLogAnalysis() {
+    const sum = ttsEl('log-summary');
+    const box = ttsEl('log-items');
+    if (!sum || !box) return;
+    const my = ++logSeq;
+    sum.innerHTML = U().loadingHtml('正在分析运行日志…');
+    box.innerHTML = '';
+    let r = null;
+    try { r = await API.logAnalysis(); } catch (e) { /* 后端不可用就不展示 */ }
+    if (my !== logSeq || !r) return;
+
+    if (!r.findings || !r.findings.length) {
+      sum.innerHTML = '<span class="tag green">日志健康</span>' +
+        `<span class="muted" style="margin-left:8px">最近 ${r.total_lines || 0} 条日志中没有错误或警告。</span>`;
+      return;
+    }
+    sum.innerHTML = `<span class="tag ${r.errors ? 'orange' : 'green'}">${r.errors} 个错误</span>` +
+      ` <span class="tag ${r.warns ? 'orange' : ''}">${r.warns} 个警告</span>` +
+      `<span class="muted" style="margin-left:8px">来自最近 ${r.total_lines || 0} 条日志，同类问题已合并。</span>`;
+
+    box.innerHTML = r.findings.map(f => `
+      <div class="log-finding">
+        <div class="lf-head">
+          <span class="dot ${f.level === 'error' ? 'offline' : 'checking'}"></span>
+          <b class="lf-cat">${esc50(f.category, 20)}</b>
+          ${f.count > 1 ? `<span class="tag">${f.count} 次</span>` : ''}
+          <span class="lf-time muted">${esc50(f.last_seen, 19)}</span>
+        </div>
+        <div class="lf-msg">${esc50(f.message, 200)}</div>
+        <div class="lf-sug"><i>建议</i>${esc50(f.suggestion, 200)}</div>
+      </div>`).join('');
+  }
 
   function setupPanelFolds() {
     const page = document.getElementById('page-settings');
-    if (!page || page.__foldsBound) return;
-    page.__foldsBound = true;
+    if (!page || page.__groupsBound) return;
+    page.__groupsBound = true;
     let folded = {};
-    try { folded = JSON.parse(localStorage.getItem(LS_PANEL_FOLD) || '{}'); } catch (e) {}
-    const COLLAPSED_BY_DEFAULT = ['演示模式', '网络与代理', '词典与翻译源（可扩展小语种）', '数据库', '数据与模型的存放位置'];
-    page.querySelectorAll(':scope > .panel').forEach((panel) => {
-      const title = panel.querySelector(':scope > .panel-title');
-      if (!title) return;
-      const name = (title.textContent || '').trim();
-      panel.classList.add('foldable');
+    try { folded = JSON.parse(localStorage.getItem(LS_GROUP_FOLD) || '{}'); } catch (e) {}
+
+    // 收集现有面板（按标题文本索引；朗读面板的标题在 .tts-topbar 里）
+    const byTitle = new Map();
+    page.querySelectorAll(':scope > .panel').forEach((p) => {
+      const t = p.querySelector('.panel-title');
+      if (t) byTitle.set((t.textContent || '').trim(), p);
+    });
+
+    // 逐组建手风琴并搬入面板
+    const frag = document.createElement('div');   // 兼容假 DOM：普通容器即可
+    SETTINGS_GROUPS.forEach((g) => {
+      const group = document.createElement('div');
+      group.className = 'settings-group' + (g.open ? '' : ' collapsed');
+      const head = document.createElement('div');
+      head.className = 'settings-group-head';
+      head.setAttribute('role', 'button');
+      head.setAttribute('tabindex', '0');
+      const title = document.createElement('span');
+      title.className = 'sg-title';
+      title.textContent = g.title;
       const caret = document.createElement('span');
-      caret.className = 'pt-caret';
+      caret.className = 'sg-caret';
       caret.setAttribute('aria-hidden', 'true');
-      title.appendChild(caret);
-      title.setAttribute('role', 'button');
-      title.setAttribute('tabindex', '0');
-      const apply = (on) => {
-        panel.classList.toggle('collapsed', on);
-        caret.textContent = on ? '▸' : '▾';
-        title.setAttribute('aria-expanded', on ? 'true' : 'false');
-      };
-      const init = Object.prototype.hasOwnProperty.call(folded, name)
-        ? !!folded[name]
-        : COLLAPSED_BY_DEFAULT.includes(name);
-      apply(init);
+      caret.textContent = '▾';
+      head.appendChild(title);
+      head.appendChild(caret);
+      const body = document.createElement('div');
+      body.className = 'settings-group-body';
+      g.panels.forEach((name) => {
+        const p = byTitle.get(name);
+        if (p) body.appendChild(p);   // appendChild 自带「从原位搬走」语义
+      });
+      group.appendChild(head);
+      group.appendChild(body);
+      frag.appendChild(group);
+
       const toggle = () => {
-        const on = !panel.classList.contains('collapsed');
-        apply(on);
-        folded[name] = on;
-        try { localStorage.setItem(LS_PANEL_FOLD, JSON.stringify(folded)); } catch (e) { /* 忽略 */ }
+        const on = !group.classList.contains('collapsed');
+        group.classList.toggle('collapsed', on);
+        caret.textContent = on ? '▾' : '▸';
+        head.setAttribute('aria-expanded', on ? 'true' : 'false');
+        folded[g.title] = !on;
+        try { localStorage.setItem(LS_GROUP_FOLD, JSON.stringify(folded)); } catch (e) { /* 忽略 */ }
       };
-      title.addEventListener('click', toggle);
-      title.addEventListener('keydown', (e) => {
+      head.addEventListener('click', toggle);
+      head.addEventListener('keydown', (e) => {
         if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(); }
       });
+      const init = Object.prototype.hasOwnProperty.call(folded, g.title)
+        ? !!folded[g.title]
+        : !g.open;
+      if (init) {
+        group.classList.add('collapsed');
+        caret.textContent = '▸';
+        head.setAttribute('aria-expanded', 'false');
+      }
     });
+    page.innerHTML = '';
+    page.appendChild(frag);
   }
 
   function bind() {
     setupPanelFolds();
+    ttsEl('btn-log-analyze')?.addEventListener('click', renderLogAnalysis);
     document.getElementById('btn-save-settings')?.addEventListener('click', save);
     document.getElementById('btn-add-source')?.addEventListener('click', addSource);
     document.getElementById('btn-reset-sources')?.addEventListener('click', resetSources);

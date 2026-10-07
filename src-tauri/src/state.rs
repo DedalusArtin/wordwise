@@ -85,6 +85,9 @@ impl AppState {
 
     /// 带上「目录是怎么来的」一起构造（正常启动路径走这个）。
     pub fn with_source(data_dir: PathBuf, data_dir_source: DataDirSource) -> Result<Arc<Self>> {
+        // logger 必须第一个初始化：后面所有 log::info/warn 只有在
+        // logger 就位后才会真正被记录（没有 logger 时 log crate 静默丢弃）。
+        crate::logging::init(&data_dir);
         let db_path = data_dir.join("wordwise.db");
         let db = Db::open(&db_path)?;
 

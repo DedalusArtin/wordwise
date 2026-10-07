@@ -237,9 +237,14 @@ const Speak = (() => {
     };
   }
 
-  /** 记录一次朗读链路失败（常驻，直到下次成功朗读覆盖）。 */
+  /** 记录一次朗读链路失败（常驻，直到下次成功朗读覆盖）；同时落日志供诊断模块分析。 */
   function healthError(message) {
-    notifyHealth('error', String(message || ''));
+    const msg = String(message || '');
+    notifyHealth('error', msg);
+    try {
+      const API = (window.WordWiseAPI && window.WordWiseAPI.API) || null;
+      if (API && typeof API.logWrite === 'function') API.logWrite('error', '[tts] ' + msg);
+    } catch (e) { /* 日志失败不能拖累发声 */ }
   }
 
   /** 朗读成功 → 清除错误态。 */

@@ -23,6 +23,7 @@ pub mod dict;
 pub mod enrich;
 pub mod graph;
 pub mod llm;
+pub mod logging;
 pub mod localllm;
 pub mod models;
 pub mod morph;

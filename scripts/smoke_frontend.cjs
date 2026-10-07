@@ -2828,6 +2828,38 @@ const cases = [
     return 'onHealth 三路挂接 + 常驻两处 + OnceLock 缓存';
   }],
 
+  // ---- 日志诊断模块 + 设置页分组手风琴 + 关闭行为 ----
+  ['日志诊断与设置重构：数据源、规则表、手风琴、关闭分流', () => {
+    const lg = fs.readFileSync(path.join(ROOT, 'src-tauri/src/logging.rs'), 'utf8');
+    const setjs = fs.readFileSync(path.join(ROOT, 'src/js/settings.js'), 'utf8');
+    const html = fs.readFileSync(path.join(ROOT, 'src/index.html'), 'utf8');
+    const appjs = fs.readFileSync(path.join(ROOT, 'src/js/app.js'), 'utf8');
+    const apijs = fs.readFileSync(path.join(ROOT, 'src/js/api.js'), 'utf8');
+    const sp = fs.readFileSync(path.join(ROOT, 'src/js/speak.js'), 'utf8');
+    const models = fs.readFileSync(path.join(ROOT, 'src-tauri/src/models.rs'), 'utf8');
+    const llm = fs.readFileSync(path.join(ROOT, 'src-tauri/src/commands/localllm.rs'), 'utf8');
+
+    // 日志基础设施：环形缓冲 + 文件轮转 + 分析规则
+    if (!/RING_CAP/.test(lg) || !/MAX_FILE_BYTES/.test(lg)) throw new Error('日志基础设施不完整');
+    if (!/fn analyze/.test(lg)) throw new Error('缺分析器');
+    if (!/"语音合成失败"/.test(lg)) throw new Error('分析规则表缺语音条目');
+    if (!/cmd_log_analysis|cmd_log_write/.test(lg)) throw new Error('缺日志命令');
+    // 诊断面板呈现
+    if (!/id="log-summary"/.test(html) || !/id="log-items"/.test(html)) throw new Error('缺诊断面板');
+    if (!/renderLogAnalysis/.test(setjs)) throw new Error('缺诊断渲染');
+    // 前端错误上报（诊断数据源）
+    if (!/unhandledrejection/.test(appjs)) throw new Error('缺全局错误上报');
+    if (!/API\.logWrite\('error', '\[tts\]/.test(sp)) throw new Error('朗读失败没有落日志');
+    // 设置页分组手风琴
+    if (!/SETTINGS_GROUPS/.test(setjs)) throw new Error('缺分组定义');
+    if (!/settings-group-head/.test(setjs)) throw new Error('缺组头');
+    // 关闭行为
+    if (!/close_to_tray: bool/.test(models)) throw new Error('配置缺 close_to_tray');
+    if (!/cmd_app_exit/.test(llm) || !/appExit/.test(apijs)) throw new Error('缺退出命令');
+    if (!/API\.appExit\(\)/.test(appjs)) throw new Error('关闭按钮没有按配置分流');
+    return '日志三件套 + 诊断面板 + 分组手风琴 + 关闭分流';
+  }],
+
   // ---- 外部链接：默认在软件内打开，设置里可关；更新下载永远走系统浏览器 ----
   ['链接：命令层分流 + 更新下载强制外部', async () => {
     const rs = fs.readFileSync(path.join(ROOT, 'src-tauri/src/commands/mod.rs'), 'utf8');
