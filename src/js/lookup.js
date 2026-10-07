@@ -52,9 +52,34 @@ const Detail = (() => {
   let current = null;
   let explainBuffer = '';
   let unlistenDelta = null;
+  // ★ P3：记录最近一次 open 的 opts —— AI 补全完成后的「回源刷新」要
+  //   用同一份 opts 重开（否则「答错了」这类原因标签会凭空消失）。
+  let lastOpts = {};
+  // 本会话已对详情卡触发过补全的词（同一个词一生只补一次，失败不反复撞）
+  const enrichTried = new Set();
+
+  /** 占位词条（无释义）→ 触发一次 AI 补全；完成事件在 bind() 里回源刷新。 */
+  function maybeEnrichDetail(e) {
+    if (!e || !e.word || (e.senses && e.senses.length)) return;
+    const k = String(e.word).toLowerCase() + '|' + (e.lang || 'en');
+    if (enrichTried.has(k)) return;
+    enrichTried.add(k);
+    API.enrichWord(e.word, e.lang || 'en').catch(() => { /* AI 没配/失败：静默 */ });
+  }
 
   async function open(entry, opts = {}) {
+    // ★ P3：背诵链路的词条直通弹窗，不经过查词页 renderEntry 的
+    //   explodeLegacySenses 清理 —— 这里克隆后统一拆掉遗留 '<' 分隔符
+    //   （克隆：不能改到调用方共享的 card.entry / history 里的词条）。
+    if (entry && typeof entry === 'object') {
+      entry = explodeLegacySenses(JSON.parse(JSON.stringify(entry)));
+    }
     current = entry;
+    lastOpts = opts;
+    // ★ P3：占位词条（senses 为空）先承诺补全 —— 后端 load_entry 的注释
+    //   写着「前端会异步联网补全」，此前背诵链路没有任何代码兑现它，
+    //   详情卡就永远停在「暂无释义」。
+    maybeEnrichDetail(entry);
     const overlay = document.getElementById('detail-overlay');
     overlay.classList.remove('hidden');
 
@@ -100,6 +125,10 @@ const Detail = (() => {
       const cfg = await API.getConfig();
       study = (cfg && cfg.study) || {};
     } catch (e) { /* 用默认 */ }
+
+    // ★ P3 竞态闸门：上面 await 期间若已 open 了另一个词（连续快速点
+    //   「相关词」），本轮直接弃写 —— 否则标题是 B、面板内容是 A。
+    if (current !== entry) return;
 
     // 各标签页内容
     document.getElementById('dc-pane-def').innerHTML = renderDefs(entry, study);
@@ -256,8 +285,53 @@ const Detail = (() => {
     if (unlistenDelta) { try { unlistenDelta(); } catch (e) {} unlistenDelta = null; }
   }
 
+  /**
+   * 详情卡内点词 chip（派生词 / 相关词 / 变形 / 例句选词）：
+   * 不离开弹窗，直接把弹窗内容换成这个词，可沿词族连续浏览。
+   *
+   * 曾经的写法是直接 Lookup.query(w) —— 查询确实在后台执行了，但结果
+   * 画在查词页的面板里：弹窗遮罩没关、页面也没切，用户屏幕上零可见反馈，
+   * 表现为「点了没反应」。本地词库没有这个词时才回退到查词页联网查，
+   * 且回退路径必须先关弹窗再切页，保证有可见反馈。
+   */
+  async function openChip(word) {
+    const from = current && current.word;
+    let entry = null;
+    try {
+      // 先按当前词条的语言找（派生词 / 变形同语言），找不到再不限语言找
+      entry = await API.getWord(word, (current && current.lang) || null);
+      if (!entry) entry = await API.getWord(word, null);
+    } catch (e) {
+      entry = null;
+    }
+    if (entry && entry.word) {
+      await open(entry, from && from !== entry.word ? { reason: `来自「${from}」` } : {});
+      return;
+    }
+    close();
+    if (window.Pages) window.Pages.go('lookup');
+    const input = document.getElementById('lk-input');
+    if (input) input.value = word;
+    Lookup.query(word);
+  }
+
   /* 事件绑定 */
   function bind() {
+    // ★ P3：AI 补全完成广播 → 详情卡正看着的恰是这个词且还是占位词条 →
+    //   用 cmd_get_word 直读库里的新词条原地重开（回源补全）。
+    API.onEnriched(async (p) => {
+      try {
+        if (!current || !p || !p.word) return;
+        if (String(p.word).toLowerCase() !== String(current.word).toLowerCase()) return;
+        if (current.senses && current.senses.length) return; // 已有释义无需刷新
+        const fresh = await API.getWord(current.word, current.lang || null);
+        if (!fresh || !fresh.word || !current) return;
+        if (String(fresh.word).toLowerCase() !== String(current.word).toLowerCase()) return;
+        if (!(fresh.senses || []).length) return;
+        open(fresh, lastOpts);
+      } catch (e) { /* 忽略 */ }
+    });
+
     document.getElementById('dc-close')?.addEventListener('click', close);
     // 详情卡内的发音按钮委托（整卡只挂一次，bind 只跑一次）
     U().speakBind(document.getElementById('detail-overlay'));
@@ -274,19 +348,20 @@ const Detail = (() => {
       t.addEventListener('click', () => U().switchDetailTab(t.dataset.tab));
     });
 
-    // 相关词 / 变形点击 → 直接查词。
+    // 相关词 / 变形 / 派生词点击 → 弹窗内直接打开这个词（见 openChip 注释：
+    // 直接 Lookup.query 会把结果画到被弹窗遮住的查词页，点了像没反应）。
     // 统一走 bindWordChips（冒泡阶段 + 已处理标记），不再逐个元素绑监听：
     // 这两个面板的内容每次 open 都会被整段替换，逐个绑必然重复绑且泄漏。
     // ★ 曾经的写法是一个**捕获阶段**的全局兜底在做 stopPropagation，
     //   把这里的委托整个废掉了 —— 表现为「相关词点了没反应」。
-    U().bindWordChips('dc-pane-rel', (w) => Lookup.query(w));
-    U().bindWordChips('dc-pane-infl', (w) => Lookup.query(w));
+    U().bindWordChips('dc-pane-rel', (w) => { void openChip(w); });
+    U().bindWordChips('dc-pane-infl', (w) => { void openChip(w); });
 
     // 例句中的词点击（可选，双击才触发，避免误触）
     document.getElementById('dc-pane-ex')?.addEventListener('dblclick', (e) => {
       const sel = window.getSelection && window.getSelection();
       const picked = sel ? String(sel).trim() : '';
-      if (picked && /^[a-zA-Z][a-zA-Z'-]*$/.test(picked)) Lookup.query(picked.toLowerCase());
+      if (picked && /^[a-zA-Z][a-zA-Z'-]*$/.test(picked)) void openChip(picked.toLowerCase());
     });
 
     document.getElementById('dc-add')?.addEventListener('click', async () => {

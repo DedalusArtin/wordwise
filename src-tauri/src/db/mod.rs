@@ -958,6 +958,12 @@ impl Db {
 
     pub fn upsert_state(&self, s: &StudyState) -> Result<()> {
         let conn = self.conn.lock();
+        Self::upsert_state_in(&conn, s)?;
+        Ok(())
+    }
+
+    /// [`Self::upsert_state`] 的事务内版本（供 [`Self::record_review`] 复用）。
+    fn upsert_state_in(conn: &rusqlite::Connection, s: &StudyState) -> rusqlite::Result<()> {
         conn.execute(
             r#"INSERT INTO study_state
                (word,lang,ease_factor,interval_days,repetitions,due_at,last_review_at,
@@ -989,6 +995,34 @@ impl Db {
                 s.is_mastered as i32
             ],
         )?;
+        Ok(())
+    }
+
+    /// 一次判分的**两笔写库放进同一事务**（P5 修复）。
+    ///
+    /// 此前 `upsert_state` 与 `log_review` 是两次独立写：upsert 成功而
+    /// log 失败（磁盘满/锁冲突）时，前端会收到错误并重试判分 ——
+    /// 同一条学习状态会被 `srs::schedule` 再施加一次，correct_count 与
+    /// 复习间隔双倍累计，且 review_log 少一条与状态对不上账。
+    pub fn record_review(
+        &self,
+        s: &StudyState,
+        word: &str,
+        lang: &str,
+        grade: &str,
+        mode: &str,
+        now: i64,
+        elapsed_ms: i64,
+    ) -> Result<()> {
+        let mut conn = self.conn.lock();
+        let tx = conn.transaction()?;
+        Self::upsert_state_in(&tx, s)?;
+        tx.execute(
+            "INSERT INTO review_log(word,lang,grade,mode,reviewed_at,elapsed_ms)
+             VALUES(?1,?2,?3,?4,?5,?6)",
+            params![word, lang, grade, mode, now, elapsed_ms],
+        )?;
+        tx.commit()?;
         Ok(())
     }
 

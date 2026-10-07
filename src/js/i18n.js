@@ -315,6 +315,9 @@
   /** 当前语言。默认跟随后端配置，读不到就退回简体中文。 */
   let current = 'zh-CN';
 
+  /** storage 监听只挂一次（init 可被多次调用，窗口里两个视图共用一个文档）。 */
+  let storageHooked = false;
+
   /** 文本节点的原文备份（切语言时要从原文重翻，不能从英文翻回去）。 */
   const nodeSrc = new WeakMap();
 
@@ -366,12 +369,16 @@
    * 的结果会让「词」和「词」粘在一起。
    */
   function translateWithSpace(src, raw) {
-    const lead = /^\s*/.exec(raw)[0];
-    const trail = /\s*$/.exec(raw)[0];
-    const body = raw.replace(/\s+/g, ' ').trim();
-    // 原文备份用**原始值**，保证切回中文时缩进也一模一样
+    /* ★ R1 修复：翻译必须从**原文备份**出发。
+       旧实现拿 raw（当前显示值）去翻 —— 英文状态下 raw 是英文，
+       切回中文时 translate() 对 zh-CN 早退、原样返回英文 → 英文永远
+       切不回中文，界面越切越中英混杂。src（原文）才是唯一可靠输入；
+       首尾空白也取自 src，保证切回原文时缩进一模一样。 */
+    const lead = /^\s*/.exec(src)[0];
+    const trail = /\s*$/.exec(src)[0];
+    const body = src.replace(/\s+/g, ' ').trim();
     const out = translate(body);
-    if (out === body) return raw;
+    if (out === body) return src;
     return lead + out + trail;
   }
 
@@ -429,8 +436,15 @@
     for (const [attr, srcAttr] of ATTRS) {
       if (!el.hasAttribute || !el.hasAttribute(attr)) continue;
       let src = el.getAttribute(srcAttr);
-      if (src == null) {
-        src = el.getAttribute(attr);
+      const cur = el.getAttribute(attr);
+      /* ★ R5 修复：原文缓存必须能失效。旧实现备份一次就永不更新 ——
+         业务代码后来把 title/placeholder 改成新值，下一轮 localize 还是
+         拿旧原文去翻、把新值盖掉（「数字过期」类漂移）。
+         判据：当前值既不是我们写出去的译文、也不是备份的原文
+         → 说明被外部改写过 → 重新备份。 */
+      const expected = src == null ? null : translate(src);
+      if (src == null || (cur !== expected && cur !== src)) {
+        src = cur;
         el.setAttribute(srcAttr, src);
       }
       const out = translate(src);
@@ -448,9 +462,29 @@
    */
   const SHOW = 5;
 
+  /**
+   * 局部刷新**一个文本节点**（R2 的关键零件）。
+   *
+   * 抽出来是因为 MutationObserver 现在要直接喂文本节点进来：
+   * `el.textContent = '中文'` 这类纯文本改写产生的是 characterData
+   * 变更 + 纯文本子节点，旧代码只收元素节点，全部漏网 ——
+   * 叠加 60 秒一次的 CTA 重刷，就是「随机漂移」观感的主来源。
+   */
+  function localizeTextNode(n) {
+    if (!n || n.nodeType !== 3) return;
+    if (!n.nodeValue || !n.nodeValue.trim()) return;
+    const parent = n.parentNode;
+    if (parent && parent.nodeType === 1 && SKIP_TAGS[parent.tagName]) return;
+    let src = nodeSrc.get(n);
+    if (src == null) { src = n.nodeValue; nodeSrc.set(n, src); }
+    const out = translateWithSpace(src, n.nodeValue);
+    if (out !== n.nodeValue) n.nodeValue = out;
+  }
+
   /** 局部刷新一棵子树（含起点自身）。 */
   function localize(root) {
     if (!root) return;
+    if (root.nodeType === 3) { localizeTextNode(root); return; }
     localizeEl(root);
     if (!root.childNodes || !document.createTreeWalker) return;
 
@@ -460,13 +494,7 @@
       if (n.nodeType === 1) {
         localizeEl(n);
       } else if (n.nodeType === 3) {
-        if (!n.nodeValue || !n.nodeValue.trim()) { n = walker.nextNode(); continue; }
-        let parent = n.parentNode;
-        if (parent && parent.nodeType === 1 && SKIP_TAGS[parent.tagName]) { n = walker.nextNode(); continue; }
-        let src = nodeSrc.get(n);
-        if (src == null) { src = n.nodeValue; nodeSrc.set(n, src); }
-        const out = translateWithSpace(src, n.nodeValue);
-        if (out !== n.nodeValue) n.nodeValue = out;
+        localizeTextNode(n);
       }
       n = walker.nextNode();
     }
@@ -483,14 +511,27 @@
       if (selfWrite) return;
       const roots = [];
       for (const m of list) {
+        // R2-a：`el.textContent = '中文'` 这类改写只发 characterData ——
+        // 旧实现直接跳过，是「随机漂移」的最大漏网点。
+        if (m.type === 'characterData') {
+          if (m.target && m.target.nodeType === 3) roots.push(m.target);
+          continue;
+        }
         if (m.type !== 'childList') continue;
-        m.addedNodes.forEach((x) => { if (x.nodeType === 1) roots.push(x); });
+        // R2-b：新增节点也收文本节点（innerHTML 换成纯文本时新增的是 3 号节点）
+        m.addedNodes.forEach((x) => {
+          if (x.nodeType === 1 || x.nodeType === 3) roots.push(x);
+        });
       }
       if (!roots.length) return;
       selfWrite = true;
       try { for (const r of roots) localize(r); } finally { selfWrite = false; }
     });
-    observer.observe(document.body, { childList: true, subtree: true });
+    observer.observe(document.body, {
+      childList: true,
+      subtree: true,
+      characterData: true,
+    });
   }
 
   /** 重新选择语言：先把现有界面从原文重翻一遍，再落盘。 */
@@ -527,6 +568,21 @@
     try { document.documentElement.lang = current; } catch (e) { /* 忽略 */ }
     localize(document.body);
     watch();
+
+    /* ★ R3 后半：跨窗口语言同步。localStorage 的 `storage` 事件只在**别的**
+       文档里触发 —— 主窗把语言下拉改了会写 LS，侧栏窗口在这里收到并直接
+       切，不必重开；修掉「主窗英文、侧栏中文」。Rust 侧不广播也够用，
+       因为 LS 现在与后端 config 是双写同步的（cmd_set_ui_lang）。 */
+    if (!storageHooked && typeof window !== 'undefined' && window.addEventListener) {
+      storageHooked = true;
+      try {
+        window.addEventListener('storage', (e) => {
+          if (!e || e.key !== LS_KEY || !e.newValue || e.newValue === current) return;
+          setLang(e.newValue, { persist: false });
+        });
+      } catch (e) { /* 事件环境异常不该影响启动 */ }
+    }
+
     return current;
   }
 

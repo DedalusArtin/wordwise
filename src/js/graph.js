@@ -17,8 +17,12 @@
    - **AI 发散出来的边用虚线**。词典里写明的关系是确定的，模型猜的是
      推测的，两者视觉上必须分开，否则用户会把模型编的词当真。
 
-   - **点一下节点 = 以它为中心重新展开**（向后端要 1-2 跳子图），
-     而不是前端在已有数据里过滤 —— 后端的边可能比当前这张图多得多。
+   - **节点三级交互**：悬停 = 跟随鼠标的小气泡（词 + 释义）；
+     单击 = 画布下方弹出这个词的介绍（不碰布局）；双击 = 按这一个词
+     AI 发散。曾经单击直接「以它为中心重新展开」——整图推倒重撒
+     320 帧，动画过于夸张；现在「换中心」收敛为介绍面板里的一个按钮。
+     重新展开仍是向后端要 1-2 跳子图，而不是前端在已有数据里过滤 ——
+     后端的边可能比当前这张图多得多。
    ============================================================ */
 
 const Graph = (() => {
@@ -28,7 +32,7 @@ const Graph = (() => {
   /** 布局节点上限。超过就只画度数最高的一批。 */
   const MAX_NODES = 150;
   /** 布局迭代总帧数。收敛后停止动画，别一直烧 CPU。 */
-  const MAX_TICKS = 320;
+  const MAX_TICKS = 200;
 
   /* 关系配色：与后端 RELS 顺序一致，前端按 code 查表 */
   const REL_COLOR = {
@@ -61,6 +65,10 @@ const Graph = (() => {
   let tick = 0;
   let raf = null;
   let drag = null;
+  // ★ 拖拽期间是否真的发生了位移（click 与 drag 的区分位）。
+  //   必须显式声明：隐式全局在严格模式下是 ReferenceError，
+  //   而且会被当成「可枚举的全局属性」污染 window。
+  let dragMoved = false;
   let pan = null;
   let selected = null;
 
@@ -158,7 +166,9 @@ const Graph = (() => {
 
     view = { tx: 0, ty: 0, k: 1 };
     tick = 0;
-    selected = null;
+    // 重新取数后若选中词还在图里就保留选中态（发散完圈还在原词上）；
+    // 词不在了新图里才清掉，避免高亮一个看不见的节点
+    if (!nodes.some(n => n.word === selected)) selected = null;
     startLayout();
     renderRelFilter();
     renderStats();
@@ -177,9 +187,9 @@ const Graph = (() => {
       const moved = iterate();
       draw();
       tick++;
-      // 收敛就早停：固定跑满 320 帧要 5 秒多，低配机器上纯属白烧 CPU。
-      // 位移已经很小说明布局稳定了，继续画也看不出差别。
-      const settled = moved < 0.4;
+      // 收敛就早停：固定跑满全部帧纯属白烧 CPU。位移按节点数归一化 ——
+      // 用总位移当阈值时，节点多的大图几乎永远达不到，必然跑满帧数。
+      const settled = moved / Math.max(1, nodes.length) < 0.05;
       if (tick < MAX_TICKS && !drag && !settled) {
         raf = requestAnimationFrame(step);
       } else {
@@ -198,11 +208,11 @@ const Graph = (() => {
 
   function iterate() {
     const n = nodes.length;
-    const REP = 2600;      // 斥力强度
+    const REP = 2000;      // 斥力强度（从 2600 降下来：初始帧不再炸开）
     const SPRING = 0.012;  // 弹簧系数
     const LEN = 110;       // 理想边长
     const CENTER = 0.004;  // 向心力（防止图飘走）
-    const DAMP = 0.86;
+    const DAMP = 0.74;     // 阻尼（从 0.86 提上来：振荡拖尾明显变短）
 
     for (let i = 0; i < n; i++) {
       const a = nodes[i];
@@ -357,7 +367,11 @@ const Graph = (() => {
     if (btn) btn.addEventListener('click', () => viewGraph(null, 1));
   }
 
-  function showTip(p) {
+  /**
+   * 悬停气泡：词 + 释义（gloss 已随图数据返回，不用异步查）。
+   * px/py 是画布内坐标，给了就跟随鼠标；越界时翻转到光标另一侧。
+   */
+  function showTip(p, px, py) {
     const tip = $('graph-tip');
     if (!tip) return;
     if (!p) {
@@ -367,10 +381,65 @@ const Graph = (() => {
     const parts = [`<b>${U().esc(p.word)}</b>`];
     if (p.gloss) parts.push(U().esc(p.gloss));
     parts.push(p.in_dict
-      ? `连接 ${p.degree} 条 · 点击查看`
+      ? `连接 ${p.degree} 条 · 单击看介绍 · 双击发散`
       : `连接 ${p.degree} 条 · 词库外（模型发散）`);
     tip.innerHTML = parts.join('<br>');
     tip.classList.remove('hidden');
+    if (px != null && py != null && tip.style) {
+      const box = $('graph-canvas');
+      const bw = (box && box.clientWidth) || 900;
+      const bh = (box && box.clientHeight) || 560;
+      const tw = tip.offsetWidth || 220;
+      const th = tip.offsetHeight || 64;
+      let lx = px + 14;
+      let ly = py + 16;
+      if (lx + tw > bw - 8) lx = px - tw - 10;
+      if (ly + th > bh - 8) ly = py - th - 10;
+      tip.style.left = Math.max(4, lx) + 'px';
+      tip.style.top = Math.max(4, ly) + 'px';
+    }
+  }
+
+  /**
+   * 单击节点：画布下方弹出这个词的介绍。
+   *
+   * 只动这一个面板，**不碰布局** —— 曾经单击直接 viewGraph 换中心，
+   * 整图推倒重撒、重新跑满布局帧，这就是「动画太夸张」的主来源。
+   * 「换中心」和「发散」收敛为面板里的两个按钮，由用户显式触发。
+   */
+  function showInfo(p) {
+    const box = $('graph-info');
+    if (!box) return;
+    if (!p) {
+      box.classList.add('hidden');
+      return;
+    }
+    const meta = p.in_dict
+      ? `连接 ${p.degree} 条` +
+        (p.mastery != null ? ` · 熟练度 ${Math.round(p.mastery * 100)}%` : '') +
+        ' · 词库已收录'
+      : `连接 ${p.degree} 条 · 词库外（模型发散）`;
+    const gloss = p.gloss
+      ? U().esc(p.gloss)
+      : '<span class="muted">暂无释义（这个词只有关系数据，没有完整词条）。</span>';
+    box.innerHTML =
+      `<div class="gi-head"><b class="gi-word">${U().esc(p.word)}</b>` +
+      `<span class="muted">${meta}</span>` +
+      `<span class="gi-actions">` +
+      `<button class="ghost-btn xs" data-act="center">以它为中心展开</button>` +
+      `<button class="ghost-btn xs" data-act="expand">AI 发散</button>` +
+      `<button class="icon-btn gi-close" title="关闭">&#215;</button>` +
+      `</span></div>` +
+      `<div class="gi-gloss">${gloss}</div>`;
+    box.classList.remove('hidden');
+    // 冒烟的迷你 DOM 里 querySelector 返回 null，?. 链天然兼容
+    box.querySelector('[data-act="center"]')?.addEventListener('click', () => viewGraph(p.word, 2));
+    box.querySelector('[data-act="expand"]')?.addEventListener('click', () => {
+      selected = p.word;
+      draw();
+      void expand();
+    });
+    box.querySelector('.gi-close')?.addEventListener('click', () => box.classList.add('hidden'));
   }
 
   /* ---------------- 交互 ---------------- */
@@ -401,8 +470,9 @@ const Graph = (() => {
       const p = hitTest(x, y);
       if (p) {
         drag = p;
+        dragMoved = false;
         selected = p.word;
-        showTip(p);
+        showTip(p, x, y);
         svg.setPointerCapture && svg.setPointerCapture(e.pointerId);
       } else {
         pan = { x: e.clientX, y: e.clientY, tx: view.tx, ty: view.ty };
@@ -416,6 +486,7 @@ const Graph = (() => {
         const cy = rect.height / 2 + view.ty;
         drag.x = (e.clientX - rect.left - cx) / view.k;
         drag.y = (e.clientY - rect.top - cy) / view.k;
+        dragMoved = true;
         draw();
         return;
       }
@@ -426,13 +497,17 @@ const Graph = (() => {
         return;
       }
       const p = hitTest(e.clientX - rect.left, e.clientY - rect.top);
-      showTip(p);
+      showTip(p, e.clientX - rect.left, e.clientY - rect.top);
     });
 
     const endDrag = (e) => {
       if (drag) {
+        // 真的拖动过才重新收敛 —— 曾经松手就 startLayout()，
+        // 导致单纯点一下节点整张图也跟着晃一遍
+        const wasMoved = dragMoved;
         drag = null;
-        startLayout();   // 松手后让它重新收敛
+        dragMoved = false;
+        if (wasMoved) startLayout();
       }
       pan = null;
       if (e && e.pointerId != null && svg.releasePointerCapture) {
@@ -440,7 +515,7 @@ const Graph = (() => {
       }
     };
     svg.addEventListener('pointerup', endDrag);
-    svg.addEventListener('pointerleave', endDrag);
+    svg.addEventListener('pointerleave', (e) => { showTip(null); endDrag(e); });
     svg.addEventListener('pointercancel', endDrag);
 
     svg.addEventListener('wheel', (e) => {
@@ -450,21 +525,20 @@ const Graph = (() => {
       draw();
     }, { passive: false });
 
-    // 点击节点：单点为「以它为中心展开」，双击为「打开详情卡」
+    // 节点三级交互：悬停看释义（pointermove 里的 showTip）、
+    // 单击下方看介绍、双击按这一个词发散。
+    //
+    // ★ 曾经的双击分支调 `Detail.openWord(p.word)` —— Detail 根本没有
+    //   这个方法（只有 open(entry, opts)），条件恒假，实际永远走 else
+    //   跳查词页。死分支已删，双击现在的语义是「按这一个词发散」，
+    //   直接复用顶部「AI 发散」按钮的 expand()（取 selected || center）。
     svg.addEventListener('dblclick', (e) => {
       const rect = svg.getBoundingClientRect();
       const p = hitTest(e.clientX - rect.left, e.clientY - rect.top);
       if (!p) return;
-      if (p.in_dict && window.Detail && window.Detail.openWord) {
-        window.Detail.openWord(p.word);
-      } else {
-        Pages && Pages.go('lookup');
-        const input = document.getElementById('lk-input');
-        if (input) {
-          input.value = p.word;
-          window.Lookup && window.Lookup.query(p.word);
-        }
-      }
+      selected = p.word;
+      draw();
+      void expand();
     });
 
     svg.addEventListener('click', (e) => {
@@ -472,10 +546,13 @@ const Graph = (() => {
       const p = hitTest(e.clientX - rect.left, e.clientY - rect.top);
       if (!p || p.word === lastClicked) return;
       lastClicked = p.word;
-      // 与 dblclick 冲突：延后一点，双击时不会触发「重新展开」
+      // 与 dblclick 共存：延后一点触发。双击时这里也会弹介绍，
+      // 介绍的正是被发散的那个词，语义不冲突。
       setTimeout(() => {
         if (lastClicked === p.word) {
-          viewGraph(p.word, 2);
+          selected = p.word;
+          showInfo(p);
+          draw();   // 画上选中圈
         }
       }, 260);
     });

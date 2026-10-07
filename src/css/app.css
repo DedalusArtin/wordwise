@@ -923,6 +923,9 @@ code {
 }
 .qc-feedback.ok { background: var(--green-soft); color: #0d7a54; }
 .qc-feedback.bad { background: var(--red-soft); color: #b3252a; }
+/* ★ P6：「显示答案」的中性反馈 —— 必须排在 .bad 之后以覆盖它的红底
+   （showFeedback 先 add('bad') 再 add('skip')，同权重下后者在 CSS 里靠后即胜）。 */
+.qc-feedback.skip { background: var(--orange-soft); color: var(--amber-text, #a05e00); }
 .qc-feedback .fb-icon { font-size: 15px; flex-shrink: 0; }
 .qc-feedback b { font-weight: 700; }
 
@@ -2823,6 +2826,29 @@ body.col-resizing * { cursor: col-resize !important; }
   box-shadow: var(--shadow-2);
 }
 .graph-tip b { color: #fff; font-size: 13.5px; }
+
+/* ★ v0.46：单击节点的「下方介绍面板」（graph.js showInfo 渲染）。
+   - 右侧留 130px：给右下角的缩放三件套让位，别把它盖住；
+   - 底部固定条形态，节点再怎么动都不跟着飘（tooltip 才是跟手的）。 */
+.graph-info {
+  position: absolute;
+  left: 14px;
+  right: 130px;
+  bottom: 14px;
+  z-index: 3;
+  padding: 10px 14px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow-2);
+  font-size: 13px;
+  line-height: 1.65;
+}
+.gi-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.gi-word { font-size: 15px; font-weight: 700; }
+.gi-actions { margin-left: auto; display: flex; align-items: center; gap: 6px; }
+.gi-gloss { margin-top: 6px; color: var(--muted-text, #667); }
+.gi-close { line-height: 1; padding: 2px 6px; }
 
 .graph-zoom {
   position: absolute;

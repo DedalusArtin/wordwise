@@ -24,6 +24,13 @@ const Study = (() => {
   };
   const toBackend = (mode) => MODE_TO_BACKEND[mode] || 'en_to_zh';
 
+  /* SRS「hard」判定耗时阈值（P7：原来是散落的魔法数 8000/12000，
+     两处口径对不上账还以为是 bug）。两值**有意不同**：
+     选择题只需读选项 → 8 秒算犹豫；拼写要打完一个词 → 给 12 秒。
+     改阈值只改这里。 */
+  const HARD_MS_CHOICE = 8000;
+  const HARD_MS_TYPING = 12000;
+
   /** 各模式的界面文案与行为 */
   const MODE_META = {
     en_to_zh: { label: '请选择正确的中文释义', typing: false, example: false, audio: false },
@@ -266,7 +273,10 @@ const Study = (() => {
         info = await API.startBookSession(bookId, backendMode, size, bl, state.defLang);
       } else {
         // kind='study'：写背诵槽位，绝不碰复习槽位
-        info = await API.startSession(backendMode, size, leechOnly, null, state.defLang, 'study');
+        // ★ P1：带上学习语言 —— 后端会在建队列时把它锁进 Session，
+        //   之后出题/判分/调度都不再依赖前端传参；这里仍显式传，
+        //   兜底旧会话（无 lang 字段）的情况。
+        info = await API.startSession(backendMode, size, leechOnly, state.bookLang || null, state.defLang, 'study');
       }
     } catch (e) {
       U().toast(e.message, 'err');
@@ -376,11 +386,11 @@ const Study = (() => {
       // 进阶模式用专用命令，保证例句/拼写字段齐全
       const m = meta();
       if (m.typing || m.example) {
-        card = await API.buildAdvancedCard(toBackend(state.mode), null, state.kind);
+        card = await API.buildAdvancedCard(toBackend(state.mode), state.bookLang || null, state.kind);
         // 后端无会话时退回普通接口
-        if (!card) card = await API.currentQuestion(null, state.kind);
+        if (!card) card = await API.currentQuestion(state.bookLang || null, state.kind);
       } else {
-        card = await API.currentQuestion(null, state.kind);
+        card = await API.currentQuestion(state.bookLang || null, state.kind);
       }
     } catch (e) {
       U().toast(e.message, 'err');
@@ -564,7 +574,7 @@ const Study = (() => {
     state.answered = true;
 
     const elapsed = Date.now() - state.startTs;
-    const grade = res.correct ? (elapsed > 12000 ? 'hard' : 'good') : 'wrong';
+    const grade = res.correct ? (elapsed > HARD_MS_TYPING ? 'hard' : 'good') : 'wrong';
 
     // 锁定输入
     if (input) input.disabled = true;
@@ -601,7 +611,11 @@ const Study = (() => {
     });
 
     let grade = 'wrong';
-    if (correct) grade = elapsed > 8000 ? 'hard' : 'good';
+    if (correct) grade = elapsed > HARD_MS_CHOICE ? 'hard' : 'good';
+    // ★ P6：「显示答案 / 拼写跳过」不是答错 —— 历史实现按 wrong 提交，
+    //   每看一次答案 = 一次 lapse + 进错词本。改为 'skip'：后端走 cmd_skip，
+    //   只推进会话、不写 study_state / review_log，两次「跳过」语义合一。
+    if (reveal) grade = 'skip';
 
     await finishAnswer(correct, grade, elapsed);
   }
@@ -635,7 +649,8 @@ const Study = (() => {
     }
     updateStreakUI();
 
-    const note = grindNote(card && card.entry && card.entry.word, correct);
+    // skip 不是错词攻坚对象 —— 别把「你连错 N 次」的提示套在主动看答案上
+    const note = grade === 'skip' ? null : grindNote(card && card.entry && card.entry.word, correct);
     if (note) {
       const box = document.getElementById('q-feedback');
       if (box) {
@@ -668,7 +683,17 @@ const Study = (() => {
      * 统计文案依然准确。答错那条 1.5 秒的定时器也不再是阻塞：它只是
      * 「用户没按回车时替用户按一下」。
      */
-    const pending = API.submitAnswer(card.entry.word, grade, elapsed, null, state.kind)
+    // ★ P6：skip 走后端 cmd_skip（不计分），返回的是 SessionInfo ——
+    //   映射成 AnswerResult 形状，下游收尾（计数/进度）一套代码走完。
+    const pending = (grade === 'skip'
+      ? API.skip(state.kind).then(si => ({
+          correct_count: si.correct,
+          wrong_count: si.wrong,
+          total: si.total,
+          requeued: false,
+          skipped: true,
+        }))
+      : API.submitAnswer(card.entry.word, grade, elapsed, state.bookLang || null, state.kind))
       .catch((e) => {
         U().toast('保存学习记录失败：' + e.message, 'err');
         return null;
@@ -680,7 +705,8 @@ const Study = (() => {
       return runAdvance(pending, card);
     };
     state.advanceNow = advance;
-    state.advanceTimer = setTimeout(advance, correct ? 900 : 1500);
+    // skip 时反馈里刚给出释义 —— 多留阅读时间（回车仍可随时推进）
+    state.advanceTimer = setTimeout(advance, correct ? 900 : (grade === 'skip' ? 3000 : 1500));
 
     // ---- 后端返回后的收尾（计数、自动弹详情卡）----
     const res = await pending;
@@ -705,7 +731,7 @@ const Study = (() => {
     const cfg = state.config;
     const autoPopup = !cfg || !cfg.study || cfg.study.auto_popup_on_wrong !== false;
     // 已经推进到下一题了就不再补弹详情卡 —— 那会把用户已经看到的题面盖掉
-    if (!correct && autoPopup && state.running && state.advanceNow === advance) {
+    if (!correct && grade !== 'skip' && autoPopup && state.running && state.advanceNow === advance) {
       setTimeout(() => {
         if (state.advanceNow !== advance) return;   // 期间按过回车 → 别弹了
         Detail.open(res.entry || card.entry, { reason: '答错了，看一下完整词条' });
@@ -752,8 +778,8 @@ const Study = (() => {
     try {
       const m = meta();
       const card = (m.typing || m.example)
-        ? (await API.buildAdvancedCard(toBackend(state.mode), null, state.kind))
-        : (await API.currentQuestion(null, state.kind));
+        ? (await API.buildAdvancedCard(toBackend(state.mode), state.bookLang || null, state.kind))
+        : (await API.currentQuestion(state.bookLang || null, state.kind));
       if (!card) return null;
       return {
         index: card.index || 0,
@@ -811,6 +837,15 @@ const Study = (() => {
       const pace = grade === 'hard' ? '答对了，但有点犹豫，已按「较难」安排下次复习。' : '答对了！';
       el.innerHTML = `<span class="fb-icon">${U().icon('check')}</span>
         <div>${pace}
+        <div style="margin-top:4px;font-size:12.5px;opacity:.85">
+          <b>${U().esc(entry.word)}</b>${sayBtn} —— ${U().esc(def)}
+        </div></div>`;
+    } else if (grade === 'skip') {
+      // ★ P6：主动看答案是中性事件 —— 不套「答错」的红底与「已记录错误」，
+      //   如实说明本题不计分、不影响下次复习。
+      el.classList.add('skip');
+      el.innerHTML = `<span class="fb-icon">${U().icon('minus')}</span>
+        <div>已显示答案 · 本题不计分，也不影响下次复习安排
         <div style="margin-top:4px;font-size:12.5px;opacity:.85">
           <b>${U().esc(entry.word)}</b>${sayBtn} —— ${U().esc(def)}
         </div></div>`;

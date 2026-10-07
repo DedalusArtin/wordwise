@@ -219,6 +219,12 @@ const App = (() => {
     window.Update?.applyVersion?.(info && info.version);
 
     if (isSidebarView()) {
+      /* ★ R3 修复：侧栏窗口此前在这里提前 return，i18n 从没初始化过 ——
+         主窗切成英文后侧栏还是一整屏中文（「语言乱飘」的来源之一）。
+         侧栏读不到 config（setupMainView 才拉配置），先用 localStorage
+         上色；主窗改语言会写 LS，storage 事件（i18n.js init 挂的）随后
+         还会把变化实时推过来。 */
+      try { window.I18n?.init(); } catch (e) { /* 字典坏了别挡侧栏 */ }
       setupSidebarView();
       return;
     }
@@ -249,6 +255,12 @@ const App = (() => {
   /* ---------- 主窗口 ---------- */
 
   async function setupMainView() {
+    /* ★ R4：先用 localStorage 立即上色（不等 IPC —— getConfig 冷启动要几十毫秒，
+       期间首屏闪一下中文又变英文很难受）。语言下拉现在 LS 与后端 config
+       双写同步（cmd_set_ui_lang），正常情况两次结果一致，下面那次「校准」
+       是空操作；只有 config 被外部改动/损坏时才真正生效。 */
+    try { window.I18n?.init(); } catch (e) { /* 同上 */ }
+
     document.querySelectorAll('.nav-item').forEach(n => {
       n.addEventListener('click', () => Pages.go(n.dataset.page));
     });
@@ -361,9 +373,9 @@ const App = (() => {
       if (seg) Study.setMode('en_to_zh');
     } catch (e) { /* 用默认 */ }
 
-    // 界面语言：配置里的 `ui_lang` 优先，读不到就退回本地缓存 / 简体中文。
-    // 必须放在拿到配置**之后**做一次全量刷新，把 index.html 里那批静态文案
-    // 一起过字典；放早了就会变成「进应用还是中文、改一次设置才变英文」。
+    // 界面语言的**校准**（R4 下半）：setupMainView 开头已经用 localStorage
+    // 上过一次色，这里拿到真实配置后再校准一次 —— 两源双写同步后正常是
+    // 空操作；只在 config 被外部改动/本地缓存损坏时才真正生效。
     try {
       window.I18n?.init(config && config.ui_lang);
     } catch (e) { /* 字典出错不该拖垮启动，界面退回中文即可 */ }

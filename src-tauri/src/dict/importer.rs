@@ -342,9 +342,12 @@ fn build_entry(
 
     let def = if !def_cn.trim().is_empty() { def_cn.trim() } else { def_en.trim() };
     if !def.is_empty() {
-        // 一条记录里可能用分号分隔多个义项，拆开更利于展示
+        // 一条记录里可能用分号分隔多个义项，拆开更利于展示；
+        // mahavivo 系词表还用 '<' 做分隔符（"n. 第一义项<第二义项"），
+        // 不在导入层拆就会带着杂散 '<' 进题面/干扰项（P4）。
+        // 与前端 explodeLegacySenses 的 `\s*<\s*` 规则对齐。
         let senses: Vec<Sense> = def
-            .split([';', '；'])
+            .split([';', '；', '<'])
             .map(|s| s.trim())
             .filter(|s| !s.is_empty())
             .enumerate()

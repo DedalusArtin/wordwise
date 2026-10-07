@@ -38,6 +38,18 @@ pub struct Session {
     /// 由前端按**所选词库的语言**下发（背日语教材时就该给中文释义），
     /// 会话期间保持不变，避免同一轮里题面语种忽中忽英。
     pub def_lang: String,
+    /// 本会话的**学习语言**（词库语言），建队列时锁定（P1 修复）。
+    ///
+    /// ★ 为什么必须存在：出题（干扰项池）、判分（upsert_state）、
+    ///   调度（srs::schedule）全都要用「这条词该记在哪个语言下」。
+    ///   此前各命令各自 `lang.unwrap_or(target_lang)`，前端只要漏传一次
+    ///   （背日语词库、target_lang=en 的组合下）状态就记成 (word, "en")，
+    ///   `unscheduled_words_in_book` 的 JOIN 永远落空 —— 背过的词每轮
+    ///   都当新词重新进队，词库永远背不完。
+    ///
+    /// 空串 = 老会话/未设置（程序内开始的会话一定有值），此时才允许
+    /// 回退到调用方参数 / 配置。
+    pub lang: String,
 }
 
 impl Session {

@@ -106,6 +106,9 @@ const API = {
     invoke('cmd_ai_generate_entry', { word, lang: lang || null }),
   // AI 讲解语言（切换即时生效并落盘 / 对已有原文重译）
   setExplainLang: (lang) => invoke('cmd_set_explain_lang', { lang }),
+  // ★ R4：界面语言单字段落盘 —— 语言下拉「选了立刻换」的同时把后端 config
+  //   一起写掉，LS 与 config 永远同值，启动时不再看谁的脸色。
+  setUiLang: (lang) => invoke('cmd_set_ui_lang', { lang }),
   translateText: (text, lang) => invoke('cmd_translate_text', { text, lang: lang || null }),
 
   // 翻译（需求 1-5）：三级链路 —— 本地缓存 → 有道在线 → 本地大模型兜底

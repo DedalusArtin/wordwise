@@ -5418,7 +5418,7 @@ checksum = "1ebf944e87a7c253233ad6766e082e3cd714b5d03812acc24c318f549614536e"
 
 [[package]]
 name = "wordwise"
-version = "0.45.9"
+version = "0.46.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",

@@ -506,6 +506,27 @@ pub fn cmd_set_explain_lang(
     Ok(lang)
 }
 
+/// 界面语言单字段落盘（R4 修复）。
+///
+/// 语言下拉「选了立刻换 UI」，但此前只写 localStorage —— 后端 config 要等
+/// 「保存」按钮。两源不一致时，下次启动谁赢取决于 getConfig 是否成功，
+/// 用户看到的就是「界面语言随机漂移」。下拉现在同时调这个命令，
+/// LS 与 config 永远同值；启动时先用 LS 上色、config 到了再校准一次。
+#[tauri::command(async)]
+pub fn cmd_set_ui_lang(
+    state: State<'_, Arc<AppState>>,
+    lang: String,
+) -> Result<String, String> {
+    let lang = lang.trim().to_string();
+    if lang.is_empty() {
+        return Err("界面语言不能为空".into());
+    }
+    state
+        .update_config(|c| c.ui_lang = lang.clone())
+        .map_err(err)?;
+    Ok(lang)
+}
+
 /// 用本地大模型生成结构化词条（离线兜底）。
 #[tauri::command]
 pub async fn cmd_ai_generate_entry(
@@ -1234,6 +1255,9 @@ pub fn cmd_start_session(
         s.started_at = now;
         s.leech_only = leech_only;
         s.def_lang = def_lang;
+        // ★ P1：学习语言随队列一起锁定。后续出题/判分/调度一律以它为准，
+        //   不再依赖「前端每次都记得传 lang」。
+        s.lang = lang.clone();
         // 新一轮不允许沿用上一轮的「答错回插」预算
         s.requeue_counts.clear();
     }
@@ -1357,6 +1381,8 @@ fn start_review_session_inner(
         s.started_at = now;
         s.leech_only = false;
         s.def_lang = def_lang;
+        // ★ P1：复习槽同样锁定学习语言（与背诵槽同一套判分/调度口径）。
+        s.lang = lang.clone();
         s.requeue_counts.clear();
     }
 
@@ -1407,7 +1433,21 @@ pub fn cmd_current_question(
     // 会话类型：缺省 / `"study"` → 背诵槽；`"review"` → 复习槽（需求 14）。
     kind: Option<String>,
 ) -> Result<Option<QuizCard>, String> {
-    let lang = lang.unwrap_or_else(|| state.cfg().target_lang);
+    // ★ P1：会话语言优先（建队列时锁定），参数/配置只是老会话的兜底。
+    //   先取出语言再做后续查询 —— 否则干扰项池/学习状态查询用的还是
+    //   参数里那份可能已经漂移的 lang。
+    let sess_lang = {
+        let s = state.session_slot(kind.as_deref()).read();
+        if !s.is_active() {
+            return Ok(None);
+        }
+        s.lang.clone()
+    };
+    let lang = if !sess_lang.is_empty() {
+        sess_lang
+    } else {
+        lang.unwrap_or_else(|| state.cfg().target_lang)
+    };
     let (entry, mode, index, is_leech, total, correct, wrong, def_lang) = {
         let s = state.session_slot(kind.as_deref()).read();
         if !s.is_active() {
@@ -1627,35 +1667,94 @@ fn build_card(
     })
 }
 
-/// 把句子里的目标词替换为 ____（大小写不敏感，兼顾词形变化）。
-fn mask_word(sentence: &str, word: &str) -> String {
-    let s = sentence;
+/// 词干回退策略（整词没匹配上时用什么再试一次）。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum MaskStem {
+    /// 不做词干回退
+    Exact,
+    /// 用词的前 3/4（字符数，至少 2）—— 拼写/选择题的词形变化覆盖
+    Prefix3_4,
+    /// 去掉词的最后一个字符 —— 例句挖空的复数/时态覆盖
+    DropLast,
+}
+
+/// 把句子里的目标词替换为 ____（大小写不敏感，兼容词形变化）。
+///
+/// ★ 全程按**字符**下标操作：`to_lowercase()` 可能把 1 个字符展开成
+///   多个（'İ'→"i̇"、'ẞ'→"ss"），按字节切会在多字节字符中间下刀 ——
+///   `&s[..i]` 直接 panic，背到含日语/变音符的词整条命令被击穿
+///   （P2 修复；同病曾出现在 extra.rs 的例句挖空）。
+pub(crate) fn mask_word_chars(
+    sentence: &str,
+    word: &str,
+    stem: MaskStem,
+    extra: usize,
+) -> String {
     let w = word.trim();
-    if w.is_empty() {
-        return s.to_string();
+    let sc: Vec<char> = sentence.chars().collect();
+    if w.is_empty() || sc.is_empty() {
+        return sentence.to_string();
     }
-    let lower = s.to_lowercase();
-    let wl = w.to_lowercase();
-    if let Some(pos) = lower.find(&wl) {
-        let mut out = String::with_capacity(s.len());
-        out.push_str(&s[..pos]);
-        out.push_str("____");
-        out.push_str(&s[pos + wl.len()..]);
-        return out;
-    }
-    // 词形变化：用词干前 3/4 再试一次
-    if wl.len() > 4 {
-        let stem = &wl[..(wl.len() * 3 / 4)];
-        if let Some(pos) = lower.find(stem) {
-            let end = (pos + stem.len() + 2).min(s.len());
-            let mut out = String::with_capacity(s.len());
-            out.push_str(&s[..pos]);
-            out.push_str("____");
-            out.push_str(&s[end..]);
-            return out;
+    // 小写扁平串 + 映射：flat[i] 对应原字符下标 idx[i]（1 字符可展开多个）
+    let mut flat: Vec<char> = Vec::with_capacity(sentence.len());
+    let mut idx: Vec<usize> = Vec::with_capacity(sentence.len());
+    for (i, &c) in sc.iter().enumerate() {
+        for lc in c.to_lowercase() {
+            flat.push(lc);
+            idx.push(i);
         }
     }
-    s.to_string()
+    let wl: Vec<char> = w.to_lowercase().chars().collect();
+    if wl.is_empty() {
+        return sentence.to_string();
+    }
+
+    let find = |needle: &[char]| -> Option<(usize, usize)> {
+        if needle.is_empty() || needle.len() > flat.len() {
+            return None;
+        }
+        'outer: for st in 0..=(flat.len() - needle.len()) {
+            for k in 0..needle.len() {
+                if flat[st + k] != needle[k] {
+                    continue 'outer;
+                }
+            }
+            return Some((st, st + needle.len()));
+        }
+        None
+    };
+
+    // 整词命中 → 精确区间；否则按策略取词干再试（命中后额外多盖 extra 个原字符）
+    let range = find(&wl)
+        .map(|(a, b)| (idx[a], idx[b - 1] + 1))
+        .or_else(|| {
+            let n = match stem {
+                MaskStem::Exact => return None,
+                MaskStem::Prefix3_4 if wl.len() > 4 => std::cmp::max(2, wl.len() * 3 / 4),
+                MaskStem::DropLast if wl.len() > 4 => wl.len() - 1,
+                _ => return None,
+            };
+            if n == 0 || n >= wl.len() {
+                return None;
+            }
+            let (a, b) = find(&wl[..n])?;
+            Some((idx[a], (idx[b - 1] + 1 + extra).min(sc.len())))
+        });
+    let (lo, hi) = match range {
+        Some(r) => r,
+        None => return sentence.to_string(),
+    };
+
+    let mut out = String::with_capacity(sentence.len() + 4);
+    out.extend(&sc[..lo.min(sc.len())]);
+    out.push_str("____");
+    out.extend(&sc[hi.min(sc.len())..]);
+    out
+}
+
+/// 把句子里的目标词替换为 ____（大小写不敏感，兼顾词形变化）。
+fn mask_word(sentence: &str, word: &str) -> String {
+    mask_word_chars(sentence, word, MaskStem::Prefix3_4, 2)
 }
 
 /// 供 `commands::extra` 复用的公开构造入口（需求 4 进阶模式）。
@@ -1746,10 +1845,18 @@ pub fn cmd_submit_answer(
     kind: Option<String>,
 ) -> Result<AnswerResult, String> {
     let cfg = state.cfg();
-    let lang = lang.unwrap_or(cfg.target_lang.clone());
     let now = timeutil::now_ts();
     // 复习与背诵各自维护一个会话，互不干扰（需求 14）。
     let slot = state.session_slot(kind.as_deref());
+
+    // ★ P1：学习语言以会话为准（建队列时锁定），参数/配置只是老会话兜底。
+    //   判分与调度写进 (word, lang) —— lang 一旦漂移，词库进度 JOIN 永远落空。
+    let sess_lang = slot.read().lang.clone();
+    let lang = if !sess_lang.is_empty() {
+        sess_lang
+    } else {
+        lang.unwrap_or(cfg.target_lang.clone())
+    };
 
     // 确定被作答的词：显式传入优先，否则用会话当前题
     let word = match word {
@@ -1782,10 +1889,12 @@ pub fn cmd_submit_answer(
 
     // 调度
     let result: ScheduleResult = srs::schedule(&mut st, grade, &cfg.srs, now);
-    state.db.upsert_state(&result.state).map_err(err)?;
+    // ★ P5：状态与日志必须同生共死 —— 两笔独立写时，upsert 成功而 log
+    //   失败会让前端重试判分，同一条状态被 schedule 再施加一次（双倍累计）。
     state
         .db
-        .log_review(
+        .record_review(
+            &result.state,
             &word,
             &lang,
             grade_str(grade),
@@ -2629,6 +2738,44 @@ mod tests {
             queue: words.iter().map(|w| WordEntry::new(*w)).collect(),
             ..Default::default()
         }
+    }
+
+    /* ---------------- P2：挖空必须按字符切，多字节词不得 panic ---------------- */
+
+    #[test]
+    fn mask_word_exact_multibyte() {
+        // 日语整词精确命中
+        assert_eq!(
+            mask_word("私は日本語を勉強しています。", "日本語"),
+            "私は____を勉強しています。"
+        );
+        // 大小写不敏感
+        assert_eq!(mask_word("Hello World", "world"), "Hello ____");
+    }
+
+    #[test]
+    fn mask_word_stem_fallback_no_panic() {
+        // ★ 历史实现 `&wl[..wl.len()*3/4]` 在这里按字节切 12 字节日语词
+        //   （9 字节位置落在字符中间）→ 直接 panic 击穿整条命令。
+        //   无匹配时必须原样返回。
+        assert_eq!(mask_word("完全无关的句子", "テスト"), "完全无关的句子");
+        // 英文词形变化走词干回退：apple(5) → 词干 app(3)，词干+2 字符
+        //   恰好盖住 "apple"（与历史行为一致，剩余 s. 留在外面）
+        assert_eq!(mask_word("I ate two apples.", "apple"), "I ate two ____s.");
+        // 词太短不做词干回退，也不得 panic
+        assert_eq!(mask_word("a cat sat", "dog"), "a cat sat");
+        assert_eq!(mask_word("hello world", "  "), "hello world");
+    }
+
+    #[test]
+    fn mask_word_drop_last_stem() {
+        // 例句挖空（DropLast 策略）：test → testing 的词形覆盖
+        let out = mask_word_chars("They are testing now.", "test", MaskStem::DropLast, 2);
+        assert!(!out.contains("testing"), "应挖掉 testing：{out}");
+        assert!(out.contains("____"), "应含占位符：{out}");
+        // 日语句子 + 日语词干回退不 panic
+        let jp = mask_word_chars("これは完全に違う文です。", "終わる", MaskStem::DropLast, 2);
+        assert_eq!(jp, "これは完全に違う文です。");
     }
 
     /* ---------------- 需求 5：AI 联网补充的触发条件 ---------------- */

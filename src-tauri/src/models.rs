@@ -114,6 +114,23 @@ fn contains_han(s: &str) -> bool {
 /// 一个源抽风吐出几十条垃圾释义就会把详情卡撑爆，甚至把正常释义挤到屏幕外。
 pub const MAX_SENSES: usize = 16;
 
+/// 义项里的遗留分隔符清洗（P4 兜底）。
+///
+/// mahavivo 系词表用 `<` 做义项分隔符（`n. 第一义项<第二义项`），直接进
+/// 题面/干扰项会在选项尾部留下杂散 `<`。前端 `explodeLegacySenses` 早就是
+/// 按 `\s*<\s*` 拆的 —— 这里对齐同一规则，让**后端产出**（题面、干扰项、
+/// 详情回传）也不再携带分隔符；存量数据不改库，仅在读出时清洗。
+fn clean_legacy_sep(def: &str) -> String {
+    if !def.contains('<') {
+        return def.to_string();
+    }
+    def.split('<')
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join("；")
+}
+
 impl WordEntry {
     pub fn new(word: impl Into<String>) -> Self {
         Self {
@@ -265,8 +282,11 @@ impl WordEntry {
             "src" => all.iter().find(|s| !contains_han(&s.definition)),
             _ => None,
         };
-        pick.map(|s| s.definition.clone())
-            .unwrap_or_else(|| first.definition.clone())
+        clean_legacy_sep(
+            &pick
+                .map(|s| s.definition.clone())
+                .unwrap_or_else(|| first.definition.clone()),
+        )
     }
 
     /// 该词条是否带至少一条可用例句（需求 4：例句模式）。
@@ -1319,6 +1339,30 @@ impl Default for SrsConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /* ---------------- P4：遗留 '<' 分隔符清洗 ---------------- */
+
+    #[test]
+    fn clean_legacy_sep_splits_mahavivo_style_defs() {
+        assert_eq!(clean_legacy_sep("n. 高兴的<adj. 快乐的"), "n. 高兴的；adj. 快乐的");
+        // 无 '<' 原样返回（不产生额外分配开销的分支）
+        assert_eq!(clean_legacy_sep("plain definition"), "plain definition");
+        // 空段被过滤
+        assert_eq!(clean_legacy_sep("a< <b"), "a；b");
+        // definition_in 出口也必须是清洗过的
+        let e = WordEntry {
+            word: "happy".into(),
+            lang: "en".into(),
+            senses: vec![Sense {
+                pos: "adj.".into(),
+                definition: "高兴的<快乐的".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        assert_eq!(e.definition_in("auto"), "高兴的；快乐的");
+        assert!(!e.definition_in("zh").contains('<'));
+    }
 
     fn entry_with(defs: &[(&str, &str)]) -> WordEntry {
         WordEntry {

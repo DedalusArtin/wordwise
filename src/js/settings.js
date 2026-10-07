@@ -103,6 +103,10 @@ const Settings = (() => {
 
   let config = null;
   let sources = [];
+  // ★ R6：AI 讲解语言下拉在 load() 时的基准值。save() 用它判断
+  //   「用户到底动没动这个下拉」—— 没动就回读后端最新值原样保留，
+  //   绝不拿面板打开时的旧快照把别处刚改的值踩回去。
+  let exLangBase = null;
 
   const OPT_KEYS = [
     'show_phonetic', 'show_inflections', 'show_examples', 'show_related',
@@ -175,6 +179,7 @@ const Settings = (() => {
       const code = (config.explain_lang || 'zh').toLowerCase();
       exLang.innerHTML = window.WordWiseAPI.explainLangOptions(code);
       exLang.value = code;
+      exLangBase = exLang.value; // R6：记下基准，save() 判断是否被改动
     }
     const exAuto = document.getElementById('set-explain-auto');
     if (exAuto) exAuto.checked = config.explain_auto_translate !== false;
@@ -260,23 +265,37 @@ const Settings = (() => {
       try { window.I18n?.setLang(config.ui_lang); } catch (e) { /* 字典坏了也别挡住保存 */ }
     }
 
-    // AI 讲解语言：走 setExplainLang 单独落盘，保证「选了就记住」，
-    // 哪怕用户最后没点保存按钮。
+    /* AI 讲解语言（★ R6 修复）：
+       这个字段有两个写入口 —— 本面板的下拉，和查词页「AI 讲解」面板里的
+       下拉（lookup.js 会直接调 setExplainLang 单字段落盘）。旧逻辑无条件
+       拿本面板的值写回整份 config：只要设置页快照比查词页那次改动旧
+       （load() 失败、或改完立刻点保存的竞态），就把别处刚改的语言踩回
+       旧值 —— 用户看到的「AI 讲解语言自己变回去」。
+       现在：下拉被用户动过（≠ load 基准）才写新值；没动过就回读最新
+       配置原样保留。 */
     const exLang = document.getElementById('set-explain-lang');
-    const exCode = exLang ? exLang.value : (config.explain_lang || 'zh');
-    config.explain_lang = exCode || 'zh';
+    const exTouched = !!exLang && exLangBase != null && exLang.value !== exLangBase;
+    if (exTouched) {
+      const code = exLang.value || 'zh';
+      config.explain_lang = code;
+      try { await API.setExplainLang(code); } catch (e) { /* 主流程会再写一次 */ }
+    } else {
+      try {
+        const latest = await API.getConfig();
+        if (latest && latest.explain_lang) config.explain_lang = latest.explain_lang;
+      } catch (e) { /* 回读失败：沿用快照，不比踩好 */ }
+    }
     const exAuto = document.getElementById('set-explain-auto');
     if (exAuto) config.explain_auto_translate = exAuto.checked;
     config.explain_translate_template = getVal('set-explain-tpl');
-
-    if (exCode) {
-      try { await API.setExplainLang(exCode); } catch (e) { /* 保存主流程里会再写一次 */ }
-    }
 
     try {
       await API.saveConfig(config);
       await API.saveSources(sources);
       U().toast('设置已保存', 'ok');
+      // R6：保存成功 → 新基准 = 当前下拉值，下次 save 重新判定脏标记
+      const exNow = document.getElementById('set-explain-lang');
+      if (exNow) exLangBase = exNow.value;
       // 同步背诵页的题量
       const b = document.getElementById('opt-batch');
       if (b) b.value = config.study.batch_size;
@@ -1698,13 +1717,18 @@ const Settings = (() => {
       });
     });
 
-    // 界面语言：改动立刻换 UI，不等「保存」。
-    // 故意不落 save —— 用户想看的是「切过去长什么样」，让他多点一次保存
-    // 才能看到效果，在这个选项上没有意义。真正写盘由 save() 负责。
+    // 界面语言：改动立刻换 UI，不等「保存」（用户想看的是「切过去长什么样」）。
+    // ★ R4：同时把后端 config 的 ui_lang 单字段落盘 —— 此前只写 localStorage，
+    //   后端那份要等「保存」按钮，两源不一致时下次启动看谁成功谁赢，
+    //   表现就是「界面语言随机漂移 / 选了没记住」。现在双写同步，
+    //   谁先读都是同一个值。
     document.getElementById('set-ui-lang')?.addEventListener('change', (e) => {
       const code = e.target.value || 'zh-CN';
       if (config) config.ui_lang = code;
       window.I18n?.setLang(code);
+      API.setUiLang?.(code).catch((err) => {
+        U().toast('界面语言写入配置失败：' + err.message, 'err');
+      });
     });
 
     bindSpeak();

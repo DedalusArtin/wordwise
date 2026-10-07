@@ -67,6 +67,7 @@ fn build_invoke_handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync +
         // AI 讲解语言（需求：选择后即时生效并记住上次语言）
         commands::cmd_translate_text,
         commands::cmd_set_explain_lang,
+        commands::cmd_set_ui_lang,
         // 查词与搜索
         commands::cmd_lookup,
         commands::cmd_lookup_pairs,

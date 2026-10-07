@@ -290,6 +290,8 @@ pub fn cmd_start_book_session(
         s.started_at = now;
         s.leech_only = false;
         s.def_lang = def_lang;
+        // ★ P1：词库会话同样锁定学习语言
+        s.lang = lang.clone();
         // 新一轮不沿用上一轮的「答错回插」预算
         s.requeue_counts.clear();
     }
@@ -382,33 +384,10 @@ pub fn cmd_spell_hint(word: String, reveal: Option<i64>) -> String {
 /// 例句挖空（需求 4）：把例句里的目标词替换为 ____，用于「例句识词」。
 #[tauri::command(async)]
 pub fn cmd_mask_example(sentence: String, word: String) -> String {
-    let s = &sentence;
-    if word.trim().is_empty() {
-        return s.clone();
-    }
-    // 大小写不敏感替换，保留前后标点
-    let lower = s.to_lowercase();
-    let w = word.to_lowercase();
-    if let Some(pos) = lower.find(&w) {
-        let mut out = String::with_capacity(s.len());
-        out.push_str(&s[..pos]);
-        out.push_str("____");
-        out.push_str(&s[pos + w.len()..]);
-        out
-    } else {
-        // 词形变化（如复数/时态）时退化为按词干匹配
-        let stem = if w.len() > 4 { &w[..w.len() - 1] } else { &w[..] };
-        if let Some(pos) = lower.find(stem) {
-            let end = (pos + stem.len() + 2).min(s.len());
-            let mut out = String::with_capacity(s.len());
-            out.push_str(&s[..pos]);
-            out.push_str("____");
-            out.push_str(&s[end..]);
-            out
-        } else {
-            s.clone()
-        }
-    }
+    // ★ P2：曾经这里按字节切片（`&w[..w.len()-1]`、`pos+stem.len()+2`），
+    //   多字节字符（日语/变音符）会下刀切在字符中间直接 panic。
+    //   统一走 commands 的字符级实现，词干策略为「去掉最后一个字符」。
+    super::mask_word_chars(&sentence, &word, super::MaskStem::DropLast, 2)
 }
 
 /// 构造一道进阶题（需求 4）：支持拼写 / 例句 / 听音。
@@ -421,7 +400,20 @@ pub fn cmd_build_advanced_card(
     // 会话类型：缺省 / `"study"` → 背诵槽；`"review"` → 复习槽（需求 14）。
     kind: Option<String>,
 ) -> Result<Option<QuizCard>, String> {
-    let lang = lang.unwrap_or_else(|| state.cfg().target_lang);
+    // ★ P1：与 cmd_current_question 同口径 —— 会话语言优先（建队列时锁定），
+    //   否则进阶题（拼写/例句/听音）的 leech 查询与干扰项池会用错语言。
+    let sess_lang = {
+        let s = state.session_slot(kind.as_deref()).read();
+        if !s.is_active() {
+            return Ok(None);
+        }
+        s.lang.clone()
+    };
+    let lang = if !sess_lang.is_empty() {
+        sess_lang
+    } else {
+        lang.unwrap_or_else(|| state.cfg().target_lang)
+    };
     let (entry, index, total, correct, wrong, is_leech, def_lang) = {
         let s = state.session_slot(kind.as_deref()).read();
         if !s.is_active() {
