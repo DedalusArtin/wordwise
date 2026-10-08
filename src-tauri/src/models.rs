@@ -131,6 +131,45 @@ fn clean_legacy_sep(def: &str) -> String {
         .join("；")
 }
 
+/// 音标字段入库清洗（与前端 `isUsableIpa` 同一套规则的后端版）。
+///
+/// 词典源会把**领域标签 / 杂数字**塞进音标字段 —— 实测 `fault` 的
+/// uk/us 都是 `"[地质]"`，一旦入库就在所有展示位置现形。两个写入点
+/// （联网源解析 `dict/mod.rs`、词表导入 `importer.rs`）都过这一道。
+///
+/// 按语言分流：拉丁语言（en 等）拒绝含 CJK 的值与纯数字；中文/日语/韩语
+/// 的读音本身就是表意文字或假名（如日语 `あう`），不能按字符集一刀切，
+/// 只拒纯数字与超长值。
+pub fn clean_phonetic_value(v: &str, lang: &str) -> String {
+    let s = v.trim();
+    if s.is_empty() || s.chars().count() > 64 {
+        return String::new();
+    }
+    if s.chars().all(|c| c.is_ascii_digit()) {
+        return String::new();
+    }
+    let lg = lang.trim().to_lowercase();
+    let lg = lg.split(['-', '_']).next().unwrap_or("en");
+    if matches!(lg, "zh" | "ja" | "ko") {
+        return s.to_string();
+    }
+    let has_cjk = s.chars().any(|c| {
+        matches!(
+            c as u32,
+            0x3400..=0x4DBF | 0x4E00..=0x9FFF | 0x3040..=0x30FF | 0xAC00..=0xD7AF
+        )
+    });
+    if has_cjk {
+        return String::new();
+    }
+    let latin2 = s.chars().filter(|c| c.is_ascii_alphabetic()).count() >= 2;
+    let ipa_mark = s.contains('ˈ') || s.contains('ˌ') || s.contains('ː');
+    if !latin2 && !ipa_mark {
+        return String::new();
+    }
+    s.to_string()
+}
+
 impl WordEntry {
     pub fn new(word: impl Into<String>) -> Self {
         Self {
@@ -1339,6 +1378,28 @@ impl Default for SrsConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /* ---------------- 音标入库清洗（P4 音标污染） ---------------- */
+
+    #[test]
+    fn clean_phonetic_value_rejects_junk_keeps_real_readings() {
+        // 英语音标：领域标签、纯数字全拒
+        assert_eq!(clean_phonetic_value("[地质]", "en"), "");
+        assert_eq!(clean_phonetic_value("41", "en"), "");
+        assert_eq!(clean_phonetic_value("", "en"), "");
+        assert_eq!(clean_phonetic_value("a", "en"), "", "单字母不是音标");
+        // 真音标：斜杠版与方括号版都保留
+        assert_eq!(clean_phonetic_value("/fɔːlt/", "en"), "/fɔːlt/");
+        assert_eq!(clean_phonetic_value("[əˈbændən]", "en"), "[əˈbændən]");
+        // 日语读音是假名 —— 不能按「含 CJK」一刀切拒掉
+        assert_eq!(clean_phonetic_value("あう", "ja"), "あう");
+        // 中文拼音保留
+        assert_eq!(clean_phonetic_value("wūyā", "zh"), "wūyā");
+        // 纯数字无论什么语言都拒
+        assert_eq!(clean_phonetic_value("123", "ja"), "");
+        // 超长值拒
+        assert_eq!(clean_phonetic_value(&"x".repeat(80), "en"), "");
+    }
 
     /* ---------------- P4：遗留 '<' 分隔符清洗 ---------------- */
 

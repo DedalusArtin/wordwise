@@ -1809,8 +1809,13 @@ const cases = [
       senses: [{ pos: '形容词', definition: '心情愉快；高兴', examples: [] }],
       phonetic: {},
     });
-    if ((html.match(/we-section-title/g) || []).length !== 1) {
-      throw new Error('只有一组释义时不该画出第二个分组标题：' + html);
+    // 判据演进（意图不变）：原判据是 we-section-title 总数 === 1，但那会把
+    // 「例句 / 变形」这些**固定专栏的块标题**也误伤 —— 守卫的本意是
+    // 「单语言词条不许硬凑第二个**释义分组**标题（参考释义/XX释义）」。
+    // 现在按「释义类标题」计数，新增固定专栏不在此限。
+    const defTitles = (html.match(/we-section-title">[^<]*释义/g) || []);
+    if (defTitles.length !== 1) {
+      throw new Error('只有一组释义时不该画出第二个释义分组标题：' + html);
     }
     return '';
   }],
@@ -1966,11 +1971,16 @@ const cases = [
     const rest = src.slice(at);
     const stop = rest.search(/\n  (?:async )?function \w/);
     const body = stop > 0 ? rest.slice(0, stop) : rest;
-    if (!body.includes('senseGroup')) throw new Error('详情卡释义没复用 senseGroup，会和结果页分叉');
-    if (!body.includes('splitSensesByScript')) throw new Error('详情卡释义没做中/英分组');
+    // 判据演进（意图不变）：守卫要的是「详情卡与结果页共用同一段实现」。
+    // 实现已从「renderDefs 直接调 senseGroup/splitSensesByScript」升级为
+    // 「薄包装调 entryBlocks（固定专栏序列的唯一实现）」—— 所以判据改为
+    // 必须复用 entryBlocks；手搓 sense DOM 仍然绝对禁止。
+    if (!body.includes('entryBlocks')) throw new Error('详情卡释义没复用 entryBlocks，会和结果页分叉');
     // 混排的判据：自己再手搓一遍 sense 的 DOM
-    if (body.includes('sense-pos')) throw new Error('详情卡释义还在自己拼 sense DOM（改了结果页它不会跟着变）');
-    return (body.match(/senseGroup/g) || []).length + ' 处调用';
+    if (body.includes('sense-pos') || body.includes('sense-def')) {
+      throw new Error('详情卡释义还在自己拼 sense DOM（改了结果页它不会跟着变）');
+    }
+    return (body.match(/entryBlocks/g) || []).length + ' 处复用';
   }],
   ['分块卡片：查词结果与详情卡的标签视觉同源（只改一处会分叉）', () => {
     const css = fs.readFileSync(path.join(ROOT, 'src/css/app.css'), 'utf8');

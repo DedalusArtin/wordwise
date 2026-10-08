@@ -165,6 +165,13 @@
     '全部词库': 'All wordbooks',
     '未入词库': 'Not in any wordbook',
     '{n} 词': '{n} words',
+    // 固定专栏的空态占位（有道式栏目：无数据也保留位置，点名 AI 补齐）
+    '暂无释义 —— 点下方「AI 讲解」可生成完整词条。':
+      'No definitions yet — click "AI Explain" below to generate the full entry.',
+    '暂无例句 —— 点下方「AI 讲解」可生成例句与词形变化。':
+      'No examples yet — click "AI Explain" below to generate examples and inflections.',
+    '暂无变形数据 —— 「AI 讲解」会一并生成。':
+      'No inflection data — "AI Explain" generates it together with the entry.',
     '强制刷新': 'Force refresh', '本地模型': 'Local model', '在线搜索': 'Web search',
     '历史记录': 'History', '例句生成': 'Generate examples',
     '我的词库': 'My Wordbook', '在线词库': 'Online Wordbook',

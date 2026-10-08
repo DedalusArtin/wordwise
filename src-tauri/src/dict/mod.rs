@@ -293,17 +293,25 @@ pub fn normalize(raw: &serde_json::Value, cfg: &DictSourceConfig, word: &str, la
     // 音标：可能命中数组，过滤空值后取第一个/全部
     let uks = crate::dict::jsonpath::query_list(raw, &m.phonetic_uk);
     let uss = crate::dict::jsonpath::query_list(raw, &m.phonetic_us);
-    e.phonetic.uk = uks
-        .iter()
-        .find(|s| !s.trim().is_empty() && s.contains('/'))
-        .or_else(|| uks.iter().find(|s| !s.trim().is_empty()))
-        .cloned()
-        .unwrap_or_default();
-    e.phonetic.us = uss
-        .iter()
-        .find(|s| !s.trim().is_empty())
-        .cloned()
-        .unwrap_or_default();
+    // ★ 入库前清洗（P4 音标污染）：jsonpath 会把领域标签抓进音标字段
+    //   （实测 fault 的 uk/us = "[地质]"）。规则按语言分流，见
+    //   `clean_phonetic_value` —— 清洗后为空的值宁可留空（前端音标行会
+    //   退回纯发音按钮），也不入库现形。
+    e.phonetic.uk = crate::models::clean_phonetic_value(
+        &uks.iter()
+            .find(|s| !s.trim().is_empty() && s.contains('/'))
+            .or_else(|| uks.iter().find(|s| !s.trim().is_empty()))
+            .cloned()
+            .unwrap_or_default(),
+        lang,
+    );
+    e.phonetic.us = crate::models::clean_phonetic_value(
+        &uss.iter()
+            .find(|s| !s.trim().is_empty())
+            .cloned()
+            .unwrap_or_default(),
+        lang,
+    );
     if e.phonetic.uk.is_empty() {
         e.phonetic.uk = e.phonetic.us.clone();
     }

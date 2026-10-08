@@ -1068,6 +1068,50 @@ code {
   line-height: 1.65;
 }
 .sense-ex .ex-zh { color: var(--text-3); font-size: 12.5px; }
+/* ---- 有道式专栏（v0.47：固定栏目 + 词性组头 + 义项编号 + 例句专栏）---- */
+/* 词性组头：每个词性只出现一次（旧版每条义项一个 .sense-pos，pos 数据
+   只写在第一条时词性就悬在半空）。 */
+.sg-pos {
+  font-size: 13px;
+  font-style: italic;
+  font-weight: 700;
+  color: var(--blue);
+  margin: 14px 0 2px;
+}
+.entry-pane > .sense-group > .sg-pos:first-child,
+.sense-group > .sg-pos:first-child { margin-top: 2px; }
+/* 义项编号：窄列占位，与旧 .sense-pos 同型（flex 列结构不变）。 */
+.sense-no {
+  font-size: 12.5px;
+  color: var(--text-3);
+  min-width: 22px;
+  flex-shrink: 0;
+  padding-top: 2px;
+  font-style: normal;
+}
+/* 空栏目占位：核心三栏（释义/例句/变形）永远在位，无数据时给虚线框占位，
+   每个词的栏目集合因此完全一致。 */
+.blk-empty {
+  padding: 16px 12px;
+  text-align: center;
+  font-size: 13px;
+  border: 1px dashed var(--border);
+  border-radius: var(--radius-sm);
+}
+/* 例句专栏：英文行 + 朗读钮，中文对照行淡底色（有道例句区形态）。 */
+.ex-list .ex-item { padding: 10px 0; border-bottom: 1px solid var(--border-2); }
+.ex-list .ex-item:last-child { border-bottom: 0; }
+.ex-line { display: flex; align-items: flex-start; gap: 8px; }
+.ex-en { flex: 1; font-size: 14.5px; line-height: 1.65; }
+.ex-list .ex-zh {
+  margin-top: 5px;
+  padding: 5px 9px;
+  background: var(--bg);
+  border-radius: var(--radius-sm);
+  color: var(--text-2);
+  font-size: 13px;
+  line-height: 1.6;
+}
 .infl-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 8px; }
 .infl-item {
   background: var(--bg);

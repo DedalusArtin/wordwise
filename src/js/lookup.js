@@ -167,59 +167,41 @@ const Detail = (() => {
    * 表现就是「结果页中文在前英文在后，详情卡却中英混排」。用户按哪个页
    * 面记住的排版，另一个页面就反过来打脸。
    */
+  /* ★ 四个 pane 的渲染全部改成 `U().entryBlocks` 的**薄包装** —— 详情卡
+     此前是四份手抄实现，与查词页 renderEntry 各画各的，于是同一个词在
+     两个入口排版不一致（用户截图对比 fault / craftsman 报的问题）。
+     现在两处共用同一段 HTML，格式只有一份。 */
+
+  /** 按 id 取专栏内容；块不存在（可选栏无数据）返回 ''。 */
+  function blockInner(entry, id, opts) {
+    const b = U().entryBlocks(entry, opts || {}).find(x => x.id === id);
+    return b ? b.inner : '';
+  }
+
   function renderDefs(entry, study) {
-    if (!entry.senses || !entry.senses.length) {
-      return '<div class="muted">暂无释义。可点击「AI 讲解」让本地模型生成完整词条。</div>';
-    }
-    const showEx = study.show_examples !== false;
-    const showMn = study.show_mnemonic !== false;
-    const o = { showExamples: showEx };
-
-    // 与 renderEntry 同一套分组：母语组在前，原文组在后；只有一组时不加小标题
-    const [local, native] = U().splitSensesByScript(entry.senses);
-    let html = '';
-    if (local.length && native.length) {
-      const title = U().langLabel(entry.lang || '') === '中文'
-        ? '参考释义' : `${U().langLabel(entry.lang || '')}释义`;
-      html += U().senseGroup(null, local, o) + U().senseGroup(title, native, o);
-    } else {
-      html += U().senseGroup(null, local.length ? local : native, o);
-    }
-
-    if (showMn && entry.mnemonic) {
-      html += `<div class="we-section"><div class="we-section-title">记忆法</div>
-        <div class="mnemonic-box">${U().esc(entry.mnemonic)}</div></div>`;
+    // 释义 pane 不内嵌例句（例句有自己的页）；记忆法无独立页，挂在释义尾部
+    // —— 与查词页「释义/例句/变形/记忆法」的顺序保持相邻关系一致。
+    let html = blockInner(entry, 'def', { showMnemonic: study.show_mnemonic !== false });
+    const mn = U().entryBlocks(entry, { showExamples: false, showRelated: false })
+      .find(x => x.id === 'mnemonic');
+    if (mn) {
+      html += `<div class="we-section"><div class="we-section-title">记忆法</div>${mn.inner}</div>`;
     }
     return html;
   }
 
   function renderInfl(entry) {
-    if (!entry.inflections || !entry.inflections.length) {
-      return '<div class="muted">该词暂无变形信息。可在设置中开启后重新联网查询。</div>';
-    }
-    return '<div class="infl-grid">' + entry.inflections.map(i =>
-      `<div class="infl-item"><span class="infl-label">${U().esc(i.label || '形式')}</span>
-       <span class="infl-form clickable" data-word="${U().esc(i.form)}" title="点击查询 ${U().esc(i.form)}">${U().esc(i.form)}</span></div>`).join('') + '</div>';
+    return blockInner(entry, 'infl', { showExamples: false, showMnemonic: false })
+      || '<div class="muted">该词暂无变形信息。可在设置中开启后重新联网查询。</div>';
   }
 
   function renderEx(entry) {
-    const exs = U().collectExamples(entry);
-    if (!exs.length) return '<div class="muted">暂无例句。</div>';
-    return exs.map(ex => `
-      <div class="sense" style="padding:10px 0">
-        <div class="sense-pos">${U().esc(ex.pos || '')}</div>
-        <div class="sense-def">
-          ${U().esc(ex.text)}
-          ${ex.translation ? `<div class="ex-zh" style="margin-top:4px">${U().esc(ex.translation)}</div>` : ''}
-        </div>
-      </div>`).join('');
+    return blockInner(entry, 'ex', { showInflections: false, showMnemonic: false, showRelated: false });
   }
 
   function renderRel(entry) {
-    const rels = U().splitRelated(entry.related);
-    if (!rels.length) return '<div class="muted">暂无相关词。</div>';
-    return '<div class="rel-list">' + rels.map(r =>
-      `<span class="rel-chip" data-word="${U().esc(r)}">${U().esc(r)}</span>`).join('') + '</div>';
+    return blockInner(entry, 'related', { showRelated: true, showExamples: false, showMnemonic: false })
+      || '<div class="muted">暂无相关词。</div>';
   }
 
   /**

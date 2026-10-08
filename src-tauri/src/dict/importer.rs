@@ -335,9 +335,11 @@ fn build_entry(
 ) -> WordEntry {
     let mut e = WordEntry::new(word);
     e.lang = lang.to_string();
-    if !phonetic.is_empty() {
-        e.phonetic.uk = phonetic.to_string();
-        e.phonetic.us = phonetic.to_string();
+    // ★ 入库前清洗（P4 音标污染）：词表里的音标列也可能混入领域标签/数字
+    let ph = crate::models::clean_phonetic_value(phonetic, lang);
+    if !ph.is_empty() {
+        e.phonetic.uk = ph.clone();
+        e.phonetic.us = ph;
     }
 
     let def = if !def_cn.trim().is_empty() { def_cn.trim() } else { def_en.trim() };

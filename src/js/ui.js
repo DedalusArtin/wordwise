@@ -83,6 +83,30 @@ function speakBtn(entry, accent, label) {
  * @param {object} entry 词条（读 entry.phonetic 与 entry.lang）
  * @param {object} [opts] { size: 'sm'，speak: false 可去掉每条读音旁的小喇叭 }
  */
+/**
+ * 音标可信度清洗。
+ *
+ * 词典源会把**领域标签和杂数**塞进音标字段 —— 实测 `fault` 的 uk/us 都是
+ * `"[地质]"`，旁边还跟着裸数字 `"41"`。这类值一旦入库就在所有展示位置现形
+ * （词头、列表、详情卡全都走 phoneticHtml）。规则按词条语言判断：
+ *   - 含 CJK / 假名 / 谚文 → 拒（领域标签、注释混进来了）；
+ *   - 纯数字、长度 > 64 → 拒；
+ *   - 不含 ≥2 个拉丁字母、也没有 IPA 修饰符（ˈ ˌ ː）→ 拒。
+ * 宁可不显示音标（音标行会退回一个纯发音按钮），也不给用户看乱码。
+ */
+function isUsableIpa(raw) {
+  const v = String(raw == null ? '' : raw).trim();
+  if (!v || v.length > 64) return false;
+  if (/[\u3400-\u4dbf\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af]/.test(v)) return false;
+  if (/^\d+$/.test(v)) return false;
+  // 字母按**计数**不按连续对：拼音带声调会打断连续（"nǐ hǎo" 没有任何
+  // 连续两个 ASCII 字母，用 /[a-zA-Z]{2}/ 会把合法拼音整批误杀 —— 冒烟
+  // 守卫「中文词条标拼音」抓过这个回归）。
+  const latinCount = (v.match(/[a-zA-Z]/g) || []).length;
+  if (latinCount < 2 && !/[ˈˌː]/.test(v)) return false;
+  return true;
+}
+
 function phoneticHtml(entry, opts) {
   const o = opts || {};
   const ph = (entry && entry.phonetic) || {};
@@ -92,16 +116,16 @@ function phoneticHtml(entry, opts) {
   const pairs = [];
   if (lg === 'zh') {
     const py = ph.uk || ph.us;
-    if (py) pairs.push({ tag: '拼音', ipa: py, accent: 'us' });
+    if (py && isUsableIpa(py)) pairs.push({ tag: '拼音', ipa: py, accent: 'us' });
   } else if (lg === 'ja') {
     const rb = ph.uk || ph.us;
-    if (rb) pairs.push({ tag: '读音', ipa: rb, accent: 'us' });
+    if (rb && isUsableIpa(rb)) pairs.push({ tag: '读音', ipa: rb, accent: 'us' });
   } else if (lg === 'ko') {
     const rb = ph.uk || ph.us;
-    if (rb) pairs.push({ tag: '罗马音', ipa: rb, accent: 'us' });
+    if (rb && isUsableIpa(rb)) pairs.push({ tag: '罗马音', ipa: rb, accent: 'us' });
   } else {
-    if (ph.uk) pairs.push({ tag: '英', ipa: ph.uk, accent: 'uk' });
-    if (ph.us) pairs.push({ tag: '美', ipa: ph.us, accent: 'us' });
+    if (ph.uk && isUsableIpa(ph.uk)) pairs.push({ tag: '英', ipa: ph.uk, accent: 'uk' });
+    if (ph.us && isUsableIpa(ph.us)) pairs.push({ tag: '美', ipa: ph.us, accent: 'us' });
   }
   // 一个都没有时不留一个空壳，交给调用方决定要不要放个纯发音按钮
   if (!pairs.length) return '';
@@ -221,6 +245,143 @@ function explodeLegacySenses(entry) {
   return entry;
 }
 
+/* ============================================================
+   词条正文的固定专栏序列（有道式）—— 全项目唯一实现
+   ============================================================
+
+   用户反馈的两个问题都出在这里：
+     1. 「这两个格式不同」—— 查词页用 renderEntry、详情卡另有
+        renderDefs/renderInfl/renderEx/renderRel 四份手抄，排版必然漂移；
+     2. 「每个词都一样」—— 旧版块是**条件生成**的（有变形才有变形标签、
+        没例句就没有例句），于是 craftsman 有 [释义][变形] 两个标签、
+        fault 可能只有 [释义]，栏目集合跟着数据走，每个词长得都不一样。
+
+   现在的约定：
+     - 顺序恒定：释义 → 例句 → 变形 → 记忆法 → 相关词；
+     - **核心三栏（释义/例句/变形）永远在位**，无数据显示占位文案
+       （占位里点名「AI 讲解」，把已有的一键生成能力接上）；
+     - 记忆法 / 相关词是可选栏，有数据才追加（有道也不给没数据的词
+       硬开一个空栏目）；
+     - 例句从义项里抽出来**集中成专栏**（中英对照 + 逐句朗读），
+       与详情卡的「例句」页共用同一段 HTML。
+*/
+function entryBlocks(entry, opts = {}) {
+  const o = {
+    showInflections: true,
+    showExamples: true,
+    showRelated: false,
+    showMnemonic: true,
+    // 无数据时是否保留占位（释义/例句/变形）。主查词页与详情卡恒为 true
+    // —— 栏目集合必须每个词一致；「对应词汇」这类紧凑对照卡传 false，
+    // 无数据整栏收起，不让虚线占位喧宾夺主（有数据照常显示）。
+    placeholders: true,
+    ...opts,
+  };
+  if (!entry) return [];
+  const blocks = [];
+
+  // ① 释义：按「释文写成的语言」分两组（中文组在前），组内有道式编号。
+  //    例句不在这里内嵌 —— 统一进「例句」专栏，避免同一批例句出现两遍。
+  const senses = entry.senses || [];
+  if (senses.length) {
+    const [local, native] = splitSensesByScript(senses);
+    const inner = [];
+    if (local.length && native.length) {
+      inner.push(senseGroup(null, local, { showExamples: false }));
+      // 原文组小标题跟着词条语言走（「乌鸦」的原文组本身就是中文）
+      const title = langLabel(entry.lang || '') === '中文'
+        ? '参考释义' : `${langLabel(entry.lang || '')}释义`;
+      inner.push(senseGroup(title, native, { showExamples: false }));
+    } else {
+      inner.push(senseGroup(null, local.length ? local : native, { showExamples: false }));
+    }
+    blocks.push({ id: 'def', label: '释义', inner: inner.join('') });
+  } else {
+    blocks.push({
+      id: 'def',
+      label: '释义',
+      inner: '<div class="blk-empty muted">暂无释义 —— 点下方「AI 讲解」可生成完整词条。</div>',
+    });
+  }
+
+  // ② 例句：全量收集 + 中英对照 + 逐句朗读（有道「例句」栏的形态）
+  if (o.showExamples !== false) {
+    const has = collectExamples(entry).some((x) => x.text);
+    if (has || o.placeholders !== false) {
+      blocks.push({ id: 'ex', label: '例句', inner: examplesBlockHtml(entry) });
+    }
+  }
+
+  // ③ 词形变化
+  if (o.showInflections !== false) {
+    const has = !!(entry.inflections && entry.inflections.length);
+    if (has || o.placeholders !== false) {
+      const inner = has
+        ? inflectionGridHtml(entry.inflections)
+        : '<div class="blk-empty muted">暂无变形数据 —— 「AI 讲解」会一并生成。</div>';
+      blocks.push({ id: 'infl', label: '变形', inner });
+    }
+  }
+
+  // ④ 记忆法（可选栏）
+  if (o.showMnemonic !== false && entry.mnemonic) {
+    blocks.push({ id: 'mnemonic', label: '记忆法', inner: `<div class="mnemonic-box">${esc(entry.mnemonic)}</div>` });
+  }
+
+  // ⑤ 相关词（可选栏）
+  if (o.showRelated && entry.related && entry.related.length) {
+    const rels = splitRelated(entry.related);
+    if (rels.length) {
+      blocks.push({
+        id: 'related',
+        label: '相关词',
+        inner: '<div class="rel-list">' + rels
+          .map(r => `<span class="rel-chip" data-word="${esc(r)}">${esc(r)}</span>`)
+          .join('') + '</div>',
+      });
+    }
+  }
+  return blocks;
+}
+
+/** 例句专栏：全量（去重）中英对照，每句带朗读。无数据给占位。 */
+function examplesBlockHtml(entry) {
+  const exs = collectExamples(entry);
+  const seen = new Set();
+  const items = [];
+  const lang = entry.lang || 'en';
+  for (const ex of exs) {
+    const k = String(ex.text || '').trim();
+    if (!k || seen.has(k)) continue;
+    seen.add(k);
+    items.push(`<div class="ex-item">
+      <div class="ex-line">
+        <span class="ex-en">${esc(ex.text)}</span>
+        <button class="speak-btn" title="朗读例句"
+          data-speak-word="${esc(ex.text)}"
+          data-speak-lang="${esc(lang)}"
+          data-speak-audio=""
+          data-speak-accent="us">${icon('sound')}</button>
+      </div>
+      ${ex.translation ? `<div class="ex-zh">${esc(ex.translation)}</div>` : ''}
+    </div>`);
+  }
+  if (!items.length) {
+    return '<div class="blk-empty muted">暂无例句 —— 点下方「AI 讲解」可生成例句与词形变化。</div>';
+  }
+  return `<div class="ex-list">${items.join('')}</div>`;
+}
+
+/** 词形变化网格（查词页与详情卡共用）。 */
+function inflectionGridHtml(inflections) {
+  const inner = ['<div class="infl-grid">'];
+  for (const i of inflections) {
+    inner.push(`<div class="infl-item"><span class="infl-label">${esc(i.label || '形式')}</span><span class="infl-form clickable" data-word="${esc(i.form)}" title="点击查询 ${esc(i.form)}">${esc(i.form)}</span></div>`);
+  }
+  inner.push('</div>');
+  return inner.join('');
+}
+
 function renderEntry(entry, opts = {}) {
   entry = explodeLegacySenses(entry);
   const o = {
@@ -234,6 +395,8 @@ function renderEntry(entry, opts = {}) {
     compactHead: false,
     // 分块 + 底部标签切换（见函数头说明）
     tabs: false,
+    // 无数据核心栏保留占位（主查词页/详情卡要求栏目集合每词一致）
+    placeholders: true,
     ...opts,
   };
   if (!entry) return '<div class="empty-state"><p>无内容</p></div>';
@@ -260,70 +423,16 @@ function renderEntry(entry, opts = {}) {
   if (tags.length) head.push(`<div class="we-src">${tags.join('')}</div>`);
   head.push('</div>');
 
-  /* ---------- 正文：先攒成「块」，再决定怎么摆 ----------
-     攒成块而不是边写边拼，是因为堆叠与标签两种排布对同一份内容有不同的
-     外壳需求。分两趟走，义项渲染就只有一份实现，版式不会分叉。 */
-  const blocks = [];
-  const addBlock = (id, label, inner) => {
-    if (inner) blocks.push({ id, label, inner });
-  };
-
-  // 释义：按「这段释文本身是哪种语言写的」分组。
-  //
-  // 为什么要分组而不是混着画：同一个英语词，有道给中文释义、
-  // freedictionaryapi 给英英释义，两条都要留下（用户原话——「仿照有道词典
-  // 两者都有，不然我输入英文的时候没有英文解释对吧」）。但混进一条列表里
-  // 读起来是「中文、英文、中文…」来回跳。有道词典的做法是拆成「释义」与
-  // 「英英释义」两块，这里沿用：母语组在前（用户一眼能读），原文组在后。
-  const senses = entry.senses || [];
-  const [localSenses, nativeSenses] = splitSensesByScript(senses);
-
-  if (senses.length) {
-    const inner = [];
-    if (localSenses.length && nativeSenses.length) {
-      // 两组都有才需要小标题区分；只有一组时「释义」这个标题由块本身带着，
-      // 再来一遍就是重复（有道也是只在多来源时才标区分）。
-      inner.push(senseGroup(null, localSenses, o));
-      // 原文组的小标题跟着词条语言走：「乌鸦」的原文组本身就是中文，
-      // 标题写成「中文释义」既奇怪又和上一块重复
-      const title = langLabel(entry.lang || '') === '中文'
-        ? '参考释义' : `${langLabel(entry.lang || '')}释义`;
-      inner.push(senseGroup(title, nativeSenses, o));
-    } else if (localSenses.length) {
-      inner.push(senseGroup(null, localSenses, o));
-    } else {
-      inner.push(senseGroup(null, nativeSenses, o));
-    }
-    addBlock('def', '释义', inner.join(''));
-  } else {
-    addBlock('def', '释义', '<div class="muted">暂无释义，可点击「AI 讲解」让本地模型生成。</div>');
-  }
-
-  // 变形
-  if (o.showInflections && entry.inflections && entry.inflections.length) {
-    const inner = ['<div class="infl-grid">'];
-    for (const i of entry.inflections) {
-      inner.push(`<div class="infl-item"><span class="infl-label">${esc(i.label || '形式')}</span><span class="infl-form clickable" data-word="${esc(i.form)}" title="点击查询 ${esc(i.form)}">${esc(i.form)}</span></div>`);
-    }
-    inner.push('</div>');
-    addBlock('infl', '变形', inner.join(''));
-  }
-
-  // 记忆法
-  if (o.showMnemonic && entry.mnemonic) {
-    addBlock('mnemonic', '记忆法', `<div class="mnemonic-box">${esc(entry.mnemonic)}</div>`);
-  }
-
-  // 相关词
-  if (o.showRelated && entry.related && entry.related.length) {
-    const rels = splitRelated(entry.related);
-    if (rels.length) {
-      addBlock('related', '相关词',
-        '<div class="rel-list">' + rels
-          .map(r => `<span class="rel-chip" data-word="${esc(r)}">${esc(r)}</span>`)
-          .join('') + '</div>');
-    }
-  }
+  /* ---------- 正文：固定专栏序列（有道式），排布由 o.tabs 决定 ----------
+     专栏内容的唯一实现在 `entryBlocks` —— 查词页与详情卡调同一份，
+     「同一个词在两处长得不一样」「不同词栏目集合乱跳」都是从这里治掉的。 */
+  const blocks = entryBlocks(entry, {
+    showInflections: o.showInflections,
+    showExamples: o.showExamples,
+    showRelated: o.showRelated,
+    showMnemonic: o.showMnemonic,
+    placeholders: o.placeholders,
+  });
 
   /* ---------- 组装 ---------- */
   const body = o.tabs
@@ -382,11 +491,25 @@ function splitSensesByScript(senses) {
  * 带着（标签模式下就是标签本身），再来一遍是重复。
  */
 function senseGroup(title, senses, opts = {}) {
+  /* 有道式排版：**词性只在组头标一次**，组内义项编号 1. 2. 3. …
+     旧版每条义项都带一个 .sense-pos，数据里 pos 只写在第一条时就成了
+     「n. 故障 / 断层 / 错误… v. 弄错」这种词性悬在半空、编号全无的样子
+     （用户截图 fault 就是这样）。这里按 pos 变化切组：pos 相同的连续义项
+     共用一个词性标题，编号在每个词性组内从 1 重排 —— 与有道一致。 */
   const parts = ['<div class="sense-group">'];
   if (title) parts.push(`<div class="we-section-title">${esc(title)}</div>`);
+  let lastPos = null;
+  let n = 0;
   for (const s of senses) {
+    const pos = String(s.pos || '').trim();
+    if (pos !== lastPos) {
+      if (pos) parts.push(`<div class="sg-pos">${esc(pos)}</div>`);
+      lastPos = pos;
+      n = 0;
+    }
+    n += 1;
     parts.push('<div class="sense">');
-    if (s.pos) parts.push(`<div class="sense-pos">${esc(s.pos)}</div>`);
+    parts.push(`<div class="sense-no">${n}.</div>`);
     parts.push('<div class="sense-def">');
     parts.push(esc(s.definition));
     if (opts.showExamples !== false && s.examples && s.examples.length) {
@@ -440,6 +563,8 @@ function renderPairs(pairs, opts = {}) {
       showRelated: false,
       showMnemonic: false,
       showPhonetic: opts.showPhonetic !== false,
+      // 对照卡是紧凑形态：没数据的栏整栏收起，不摆占位框
+      placeholders: false,
     }));
     parts.push('</div>');
   }
@@ -1023,7 +1148,7 @@ function bindWordChips(root, onPick) {
 
 window.WW = window.WW || {};
 Object.assign(window.WW, {
-  esc, toast, loadingHtml, renderEntry, collectExamples, sourceLabel, langLabel,
+  esc, toast, loadingHtml, renderEntry, entryBlocks, examplesBlockHtml, collectExamples, sourceLabel, langLabel,
   splitRelated, phoneticHtml, renderPairs, senseGroup, splitSensesByScript, hasHan,
   renderMarkdown, renderPlainText, fmtDay, timeAgo, masteryClass, renderBarChart, switchDetailTab, debounce,
   attachListSearch, speakBtn, isTypingTarget, icon, ICON_PATHS, bindWordChips, WORD_CHIP_SEL,
