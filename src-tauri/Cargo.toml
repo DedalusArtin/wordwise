@@ -1,6 +1,6 @@
 [package]
 name = "wordwise"
-version = "0.46.0"
+version = "0.47.0"
 description = "WordWise - LM Studio 驱动的可视化背单词与 AI 讲解一体化桌面软件"
 authors = ["DedalusArtin"]
 edition = "2021"
