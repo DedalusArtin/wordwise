@@ -151,7 +151,13 @@ pub fn youdao_suggest() -> S {
         api_key: String::new(),
         priority: 30,
         mapping: FieldMapping {
-            word: "query".into(),
+            // ★ 词头必须取**联想命中的真实词条**，不能用 `query`（那是把
+            //   用户输入原样回显）：查 grievaunce 时有道联想回的是 grievance
+            //   的整套中文释义，用 query 做词头等于把别人家的释义挂在这个
+            //   不存在的词头上，用户一上有道查「根本没有这个词」。
+            //   取 entries[0].entry 后，pick_entry 的词头错配过滤会把这种
+            //   「联想替身」整源丢掉。
+            word: "data.entries[0].entry".into(),
             phonetic_uk: String::new(),
             phonetic_us: String::new(),
             audio: String::new(),

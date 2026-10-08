@@ -1155,23 +1155,44 @@ fn pick_entry(
     word: &str,
     lang: &str,
 ) -> Option<WordEntry> {
-    if let Some(v) = json {
-        let strict = normalize(v, cfg, word, lang);
-        if is_meaningful(&strict) {
-            return Some(strict);
+    let cand = (|| {
+        if let Some(v) = json {
+            let strict = normalize(v, cfg, word, lang);
+            if is_meaningful(&strict) {
+                return Some(strict);
+            }
+            let loose = normalize_heuristic(v, cfg, word, lang);
+            if is_presentable(&loose) {
+                return Some(loose);
+            }
         }
-        let loose = normalize_heuristic(v, cfg, word, lang);
-        if is_presentable(&loose) {
-            return Some(loose);
+        if let Some(b) = body {
+            let loose = normalize_from_text(b, cfg, word, lang);
+            if is_presentable(&loose) {
+                return Some(loose);
+            }
         }
+        None
+    })();
+    // ★ 词头错配过滤（正确性闸）：源声明的词头与查询词不一致时，这份数据
+    //   属于**另一个词**，丢弃。典型现场：有道 suggest 对不存在的词
+    //   （grievaunce）联想回 grievance 的整套释义 —— 词条看着很全，用户
+    //   一上有道查却发现「根本没有这个词」。词头为空（源没给）时放行，
+    //   不影响正常源。
+    cand.filter(|e| !head_mismatch(&e.word, word))
+}
+
+/// 源声明的词头与查询词是否**不是同一个词**（忽略大小写与首尾空白）。
+///
+/// 只做严格相等判定：编辑距离式的「近似容忍」会把 grievaunce/grievance
+/// 这种差一个字母的替身放进来 —— 而那恰恰是要拦的东西。
+fn head_mismatch(declared: &str, query: &str) -> bool {
+    let d = declared.trim().to_lowercase();
+    let q = query.trim().to_lowercase();
+    if d.is_empty() || q.is_empty() {
+        return false; // 源没声明词头 → 不算错配
     }
-    if let Some(b) = body {
-        let loose = normalize_from_text(b, cfg, word, lang);
-        if is_presentable(&loose) {
-            return Some(loose);
-        }
-    }
-    None
+    d != q
 }
 
 /// 访问单个词典源，返回归一化后的词条（或错误）。
@@ -1701,6 +1722,37 @@ mod tests {
     use super::*;
     use crate::dict::builtin;
     use crate::models::FieldMapping;
+
+    /// ★ 正确性闸（用户反馈「有道上查根本没有这个词」）：
+    /// 联想替身 —— 有道 suggest 对不存在的 grievaunce 回 grievance 的释义 ——
+    /// 必须在 pick_entry 出口被整源丢弃，而不是挂上错误词头进词条。
+    #[test]
+    fn pick_entry_drops_lookalike_head_from_suggest() {
+        let cfg = builtin::youdao_suggest();
+        // 有道 suggest 响应：query 回显用户输入，entries[0].entry 才是真实联想词
+        let v: serde_json::Value = serde_json::from_str(
+            r#"{"query":"grievaunce",
+                "data":{"entries":[{"entry":"grievance","type":"n.","explain":"不满，不平"}]}}"#,
+        )
+        .unwrap();
+        // 词头错配 → 整源丢弃
+        assert!(
+            pick_entry(Some(&v), None, &cfg, "grievaunce", "en").is_none(),
+            "联想替身的释义不得挂到查询词头上"
+        );
+        // 词头一致 → 正常放行（普通查询不受影响）
+        let v2: serde_json::Value = serde_json::from_str(
+            r#"{"query":"grievance",
+                "data":{"entries":[{"entry":"grievance","type":"n.","explain":"不满，不平"}]}}"#,
+        )
+        .unwrap();
+        assert!(pick_entry(Some(&v2), None, &cfg, "grievance", "en").is_some());
+        // 源没声明词头 → 放行
+        assert!(!head_mismatch("", "anything"));
+        // 大小写差异不算错配
+        assert!(!head_mismatch("Grievance", "grievance"));
+        assert!(head_mismatch("grievance", "grievaunce"));
+    }
 
     #[test]
     fn render_url_encodes_word() {

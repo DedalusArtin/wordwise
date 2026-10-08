@@ -1819,6 +1819,35 @@ const cases = [
     }
     return '';
   }],
+  ['变形：label 中英归一 + 词性徽标（动名形容时态单复数变形要表明）', () => {
+    // 英文 label（freedictionary 系数据源）→ 中文 + 词性
+    const cases = [
+      ['plural', '复数', 'n.'],
+      ['past tense', '过去式', 'v.'],
+      ['past participle', '过去分词', 'v.'],
+      ['present participle', '现在分词', 'v.'],
+      ['3rd person singular', '第三人称单数', 'v.'],
+      ['comparative', '比较级', 'adj.'],
+      ['superlative', '最高级', 'adj.'],
+    ];
+    for (const [raw, label, pos] of cases) {
+      const m = WW.inflMeta(raw);
+      if (m.label !== label || m.pos !== pos) {
+        throw new Error(`inflMeta(${raw}) = ${JSON.stringify(m)}，期望 label=${label} pos=${pos}`);
+      }
+    }
+    // 中文 label 也要挂上词性（AI 生成的数据是中文 label）
+    if (WW.inflMeta('过去分词').pos !== 'v.') throw new Error('中文 label 没挂上词性');
+    // 渲染出来必须带徽标
+    const h = WW.renderEntry({
+      word: 'grieve', lang: 'en',
+      senses: [{ pos: 'v.', definition: '悲伤' }],
+      inflections: [{ label: 'past tense', form: 'grieved' }],
+    });
+    if (!h.includes('infl-pos')) throw new Error('变形网格没渲染词性徽标');
+    if (!h.includes('过去式')) throw new Error('英文 label 没归一成中文');
+    return '';
+  }],
   ['双向词条：中文词条的分组标题不该写成「中文释义」这种废话', () => {
     const html = WW.renderEntry({
       word: '乌鸦', lang: 'zh',

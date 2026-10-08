@@ -518,7 +518,7 @@ pub async fn generate_entry(
     {{"pos": "词性缩写如 n./v./adj.", "definition": "简体中文释义",
       "examples": [{{"text": "英文例句", "translation": "中文翻译"}}]}}
   ],
-  "inflections": [{{"label": "变形类型如 过去式/复数/比较级", "form": "变形后的词"}}],
+  "inflections": [{{"label": "变形类型(中文)，如 复数/过去式/过去分词/现在分词/第三人称单数/比较级/最高级", "form": "变形后的词"}}],
   "related": ["相关词或同义词"],
   "mnemonic": "一句话词根词缀或记忆技巧"
 }}
@@ -526,7 +526,11 @@ pub async fn generate_entry(
 1. senses 至少 1 项，覆盖该词最常见的 2-3 个义项，按常用度排序。
 2. definition 必须是简体中文，简洁准确（不超过 30 字）。
 3. 每个义项给 1 个例句。
-4. 若该词无变形（如名词不可数），inflections 可为空数组。
+4. **inflections 按该词的词性把变形给全**（用户要求「动名形容时态单复数变形要表明」）：
+   - 动词 → 过去式、过去分词、现在分词、第三人称单数；
+   - 名词（可数）→ 复数（不可数名词不编复数）；
+   - 形容词/副词 → 比较级、最高级（没有则省略）。
+   每条 label 用**中文**写清变形类型，form 用正确形式；没有的变形才省略，不要编。
 5. 若拼写疑似有误，仍按最可能的正确拼写生成。"#,
         lang_name = lang_name,
         word = word
@@ -750,6 +754,13 @@ fn flatten_ws(s: &str) -> String {
 }
 
 /// 构造讲解提示词（需求 5：答错时的完整讲解）。
+///
+/// ★ 正确性约束（用户反馈「讲解了根本不存在的词，有道上查没有」后加的）：
+///   旧版 senses 分支写的是「供参考，**可补充纠正**」—— 这四个字直接
+///   纵容模型推翻词典：grievaunce 的词典释义明明是
+///   「Obsolete form of grievance」，模型却"纠正"成 grieve 的 n/v/adj
+///   三词性，词源、搭配、例句整段编造。现在词典释义是**唯一事实来源**，
+///   并逐条约束词性/词源；词是变体时（释义指向另一个词）要求开门见山。
 pub fn explain_prompt(entry: &WordEntry, mode_hint: &str) -> String {
     let senses = entry
         .senses
@@ -758,22 +769,67 @@ pub fn explain_prompt(entry: &WordEntry, mode_hint: &str) -> String {
         .collect::<Vec<_>>()
         .join("；");
 
+    // 词典把该词标注为另一个词的变体/派生（"Obsolete form of grievance"、
+    // "plural of child"…）→ 讲解必须开门见山说明这层关系
+    let variant_line = match detect_variant_of(entry) {
+        Some(v) => format!(
+            "3. 词典将「{word}」标注为「{v}」的变体/派生形式 —— **第一句就说明这层关系**，并把讲解重心放在 {v} 上；\n",
+            word = entry.word,
+            v = v
+        ),
+        None => String::new(),
+    };
+
     if senses.is_empty() {
         format!(
-            "请讲解单词「{}」{}。\
-             请按：核心含义 → 词根词缀记忆法 → 常见搭配 → 例句与翻译 → 易混词辨析 的顺序讲解。",
-            entry.word, mode_hint
+            "请讲解单词「{word}」{mode_hint}。\n\
+             ★ 你没有任何词典释义，正确性要求（必须遵守）：\n             1. 若你认为这不是标准词/是变体或罕见拼写，**第一段就直接说明**并给出规范形式；\n             2. 词性与词义只讲你有把握的，把握不足就注明「未经词典收录」；\n             3. 词源没有把握时**不得编造** —— 只讲可验证的构词拆分，拆不出来就写「暂无可靠的词根信息」；\n             请按：核心含义 → 词根词缀记忆法 → 常见搭配 → 例句与翻译 → 易混词辨析 的顺序讲解。",
+            word = entry.word,
+            mode_hint = mode_hint
         )
     } else {
         format!(
-            "请讲解单词「{}」{mode_hint}。\n\
-             已知词典释义（供参考，可补充纠正）：{senses}\n\
+            "请讲解单词「{word}」{mode_hint}。\n\
+             词典释义（**唯一事实来源，讲解必须与之一致**）：{senses}\n\
+             ★ 正确性要求（必须遵守）：\n             1. 核心含义的**词性与词义只能来自上面的词典释义** —— 不得添加词典没有的词性，\
+                不得给出与之矛盾的释义；\n             2. 词源没有把握时**不得编造** —— 写「暂无定论」，或只做构词拆分并注明是联想记忆；\n             {variant_line}\
              请按：核心含义 → 词根词缀记忆法 → 常见搭配与用法区别 → 两个地道例句及翻译 → 易混词辨析 的顺序讲解。",
-            entry.word,
+            word = entry.word,
             mode_hint = mode_hint,
-            senses = senses
+            senses = senses,
+            variant_line = variant_line
         )
     }
+}
+
+/// 词典释义把该词指向另一个词（变体/派生/复数/古体）时，提取被指向的词。
+///
+/// 匹配英文释义里的固定说法：`Obsolete form of grievance`、
+/// `plural of child`、`misspelling of …`、`variant of …`。
+fn detect_variant_of(entry: &WordEntry) -> Option<String> {
+    const PATTERNS: [&str; 5] = [
+        "form of ",
+        "variant of ",
+        "misspelling of ",
+        "alternative spelling of ",
+        "plural of ",
+    ];
+    for s in &entry.senses {
+        let d = s.definition.to_lowercase();
+        for p in PATTERNS {
+            if let Some(idx) = d.find(p) {
+                let rest = &d[idx + p.len()..];
+                let w: String = rest
+                    .chars()
+                    .take_while(|c| c.is_ascii_alphabetic() || *c == '-' || *c == '\'')
+                    .collect();
+                if w.chars().count() >= 2 {
+                    return Some(w);
+                }
+            }
+        }
+    }
+    None
 }
 
 /// 讲解语言代码 → **目标语言的自称**。
@@ -1316,6 +1372,41 @@ mod tests {
     fn lang_names() {
         assert_eq!(lang_display_name("ja"), "日语");
         assert_eq!(lang_display_name("xx"), "外语");
+    }
+
+    /// ★ 正确性闸（用户反馈「讲解了有道上根本没有的词」）：
+    /// 词典释义必须是唯一事实来源，词是变体时要注入「第一句说明关系」。
+    #[test]
+    fn explain_prompt_anchors_dict_and_flags_variants() {
+        // 有释义的词：不得再出现「可补充纠正」这种纵容措辞
+        let mut e = WordEntry::new("apple");
+        e.senses.push(Sense {
+            pos: "n.".into(),
+            definition: "苹果".into(),
+            examples: vec![],
+        });
+        let p = explain_prompt(&e, "");
+        assert!(p.contains("唯一事实来源"), "释义必须声明为唯一事实来源");
+        assert!(!p.contains("可补充纠正"), "「可补充纠正」的幻觉口子必须关掉");
+        assert!(p.contains("不得添加词典没有的词性"));
+
+        // 变体词：释义指向另一个词 → 注入「第一句说明关系」的约束
+        let mut v = WordEntry::new("grievaunce");
+        v.senses.push(Sense {
+            pos: String::new(),
+            definition: "Obsolete form of grievance.".into(),
+            examples: vec![],
+        });
+        let pv = explain_prompt(&v, "");
+        assert!(pv.contains("grievance"), "要注入被指向的词");
+        assert!(pv.contains("第一句就说明这层关系"), "变体关系必须开门见山");
+        assert_eq!(detect_variant_of(&v).as_deref(), Some("grievance"));
+
+        // 无释义的词：禁止编造词源
+        let empty = WordEntry::new("zzzqqq");
+        let pe = explain_prompt(&empty, "");
+        assert!(pe.contains("不得编造"), "无释义时词源不得编造");
+        assert!(pe.contains("没有任何词典释义"));
     }
 
     #[test]

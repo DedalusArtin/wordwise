@@ -372,11 +372,43 @@ function examplesBlockHtml(entry) {
   return `<div class="ex-list">${items.join('')}</div>`;
 }
 
-/** 词形变化网格（查词页与详情卡共用）。 */
+/**
+ * 变形类型归一 → `{ label: 中文标签, pos: 词性 }`。
+ *
+ * 数据源给的 label 中英混杂（freedictionary 是 `plural`/`past tense`，
+ * AI 生成的是「过去式」），用户要求「动名形容时态单复数变形**要表明**」——
+ * 两件事一起解决：label 统一成中文，每条再挂一个词性徽标（v. / n. / adj.），
+ * 一眼看清这是谁的什么变形。注意匹配顺序：`past participle` 必须排在
+ * `past` 前面，`过去分词` 必须排在 `过去式` 前面。
+ */
+function inflMeta(label) {
+  const raw = String(label || '').trim();
+  const l = raw.toLowerCase();
+  const has = (...ks) => ks.some((k) => l.includes(k));
+  if (has('past participle') || raw.includes('过去分词')) return { label: '过去分词', pos: 'v.' };
+  if (has('past') || raw.includes('过去式')) return { label: '过去式', pos: 'v.' };
+  if (has('present participle') || raw.includes('现在分词')) return { label: '现在分词', pos: 'v.' };
+  if (has('3rd person', 'third person') || raw.includes('第三人称')) return { label: '第三人称单数', pos: 'v.' };
+  if (has('gerund') || raw.includes('动名词')) return { label: '动名词', pos: 'v.' };
+  if (has('imperative') || raw.includes('祈使')) return { label: '祈使形', pos: 'v.' };
+  if (has('plural') || raw.includes('复数')) return { label: '复数', pos: 'n.' };
+  if (has('singular') || raw.includes('单数')) return { label: '单数', pos: 'n.' };
+  if (has('comparative') || raw.includes('比较级')) return { label: '比较级', pos: 'adj.' };
+  if (has('superlative') || raw.includes('最高级')) return { label: '最高级', pos: 'adj.' };
+  if (has('adverb', '副词')) return { label: raw, pos: 'adv.' };
+  if (has('alternative', 'variant') || raw.includes('变体')) return { label: '变体', pos: '' };
+  if (has('abbrev', 'short form') || raw.includes('缩写')) return { label: '缩写', pos: '' };
+  // 中文 label（AI 生成）原样保留；认不出的一律原样显示、不挂词性
+  return { label: raw || '形式', pos: '' };
+}
+
+/** 词形变化网格（查词页与详情卡共用）：中英文 label 归一 + 词性徽标。 */
 function inflectionGridHtml(inflections) {
   const inner = ['<div class="infl-grid">'];
   for (const i of inflections) {
-    inner.push(`<div class="infl-item"><span class="infl-label">${esc(i.label || '形式')}</span><span class="infl-form clickable" data-word="${esc(i.form)}" title="点击查询 ${esc(i.form)}">${esc(i.form)}</span></div>`);
+    const m = inflMeta(i.label);
+    const pos = m.pos ? `<i class="infl-pos">${m.pos}</i>` : '';
+    inner.push(`<div class="infl-item"><span class="infl-label">${pos}${esc(m.label)}</span><span class="infl-form clickable" data-word="${esc(i.form)}" title="点击查询 ${esc(i.form)}">${esc(i.form)}</span></div>`);
   }
   inner.push('</div>');
   return inner.join('');
@@ -1148,7 +1180,7 @@ function bindWordChips(root, onPick) {
 
 window.WW = window.WW || {};
 Object.assign(window.WW, {
-  esc, toast, loadingHtml, renderEntry, entryBlocks, examplesBlockHtml, collectExamples, sourceLabel, langLabel,
+  esc, toast, loadingHtml, renderEntry, entryBlocks, examplesBlockHtml, inflMeta, collectExamples, sourceLabel, langLabel,
   splitRelated, phoneticHtml, renderPairs, senseGroup, splitSensesByScript, hasHan,
   renderMarkdown, renderPlainText, fmtDay, timeAgo, masteryClass, renderBarChart, switchDetailTab, debounce,
   attachListSearch, speakBtn, isTypingTarget, icon, ICON_PATHS, bindWordChips, WORD_CHIP_SEL,
