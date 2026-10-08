@@ -68,6 +68,7 @@ fn build_invoke_handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync +
         commands::cmd_translate_text,
         commands::cmd_set_explain_lang,
         commands::cmd_set_ui_lang,
+        commands::books::cmd_word_book_refs,
         // 查词与搜索
         commands::cmd_lookup,
         commands::cmd_lookup_pairs,

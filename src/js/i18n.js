@@ -161,6 +161,10 @@
     '连续学习': 'Study streak', '背诵词库': 'Book to review', '每轮题量': 'Words per round',
     '结束本轮': 'End this round', '本轮已背': 'Reviewed this round',
     '最近背过': 'Recently reviewed', '收起右栏': 'Collapse the right panel',
+    // 分词库容器（已背列表按词库分组）用到的三条新文案
+    '全部词库': 'All wordbooks',
+    '未入词库': 'Not in any wordbook',
+    '{n} 词': '{n} words',
     '强制刷新': 'Force refresh', '本地模型': 'Local model', '在线搜索': 'Web search',
     '历史记录': 'History', '例句生成': 'Generate examples',
     '我的词库': 'My Wordbook', '在线词库': 'Online Wordbook',

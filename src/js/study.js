@@ -144,6 +144,10 @@ const Study = (() => {
     learnedScope: 'session',   // session（本轮） | recent（最近背过，跨会话）
     recent: null,              // 懒加载：第一次切到「最近背过」才去查库
     recentLoading: false,
+    /* ---- 分词库容器（已背列表按词库分组）---- */
+    bookNameById: {},          // 书 id → 显示名（组头文案）
+    _bookRefs: {},             // `lang|word` → [{id, name}] 归属缓存（查过一次不再查）
+    _renderGen: 0,             // 列表渲染代际：await 归属查询回来后，过期的渲染直接丢弃
     _recs: [],                 // 当前列表渲染出来的记录（点「详情」时按下标回查）
 
     /* ---- 学习目标（需求 15） ---- */
@@ -234,6 +238,11 @@ const Study = (() => {
   /** 同步词库下拉选择（多个 select 保持一致）。 */
   function setBook(bookId) {
     state.bookId = bookId || '';
+    // ★ 选库后四张统计卡与「开始今日复习（N 词）」的 N 必须跟着书变 ——
+    //   refreshStudy 会按 state.bookId 去取 stats（cmd_stats 现支持按书口径）。
+    try { window.Pages && window.Pages.refreshStudy && window.Pages.refreshStudy(); } catch (e) { /* 概览不在时忽略 */ }
+    // 已背列表的分组排序也以「所选词库优先」—— 切库后原地重分组一次
+    try { renderLearned(); } catch (e) { /* 列表不在时忽略 */ }
     ['study-book', 'study-book2'].forEach(id => {
       const el = document.getElementById(id);
       if (el) el.value = state.bookId;
@@ -302,7 +311,10 @@ const Study = (() => {
     let info;
     try {
       info = await API.startReviewSession(
-        toBackend(state.mode), null, state.bookLang || null, state.defLang);
+        toBackend(state.mode), null, state.bookLang || null, state.defLang,
+        // ★ 与顶部词库下拉同口径：选了书就只背该书的到期词。
+        //   此前不传 → 队列按语言全库混背，与「开始背诵」的按书行为矛盾。
+        state.bookId || null);
     } catch (e) {
       U().toast(e.message, 'err');
       return;
@@ -922,7 +934,12 @@ const Study = (() => {
     try { books = await API.listWordbooks(); } catch (e) { return; }
     // 记下每本词库的语言，选词库时才能自动切换界面文案与释义语言
     state.bookLangById = {};
-    books.forEach(b => { if (b && b.id) state.bookLangById[b.id] = b.lang || 'en'; });
+    state.bookNameById = {};
+    books.forEach(b => {
+      if (!b || !b.id) return;
+      state.bookLangById[b.id] = b.lang || 'en';
+      state.bookNameById[b.id] = b.name || b.id;
+    });
 
     // 只保留叶子（可背的）词库 + 全库
     const leafs = books.filter(b => b.level >= 2 || b.id === 'root');
@@ -1312,6 +1329,82 @@ const Study = (() => {
     </div>`;
   }
 
+  /**
+   * 批量补齐 recs 缺失的**词库归属**（已背列表要按词库分容器，而 WordRow /
+   * entry 都不带归属字段，只能开命令反查）。查过的进缓存永不再查；
+   * 查询失败也写空数组 —— 否则每次渲染都会重撞同一个失败请求。
+   * 返回「是否拿到了新数据」。
+   */
+  async function ensureBookRefs(recs) {
+    const byLang = new Map();
+    for (const rec of recs) {
+      const e = (rec && rec.entry) || {};
+      if (!e.word) continue;
+      const lang = e.lang || 'en';
+      const key = lang + '|' + e.word;
+      if (state._bookRefs[key] !== undefined) continue;
+      if (!byLang.has(lang)) byLang.set(lang, new Set());
+      byLang.get(lang).add(e.word);
+    }
+    if (!byLang.size) return false;
+    let got = false;
+    for (const [lang, words] of byLang) {
+      try {
+        const map = await API.wordBookRefs([...words], lang);
+        for (const w of words) state._bookRefs[lang + '|' + w] = (map && map[w]) || [];
+        got = true;
+      } catch (e) {
+        for (const w of words) state._bookRefs[lang + '|' + w] = [];
+      }
+    }
+    return got;
+  }
+
+  /**
+   * 按词库把记录分组成**不同容器** —— 用户反馈「不同词库的背诵单词混到一起」。
+   * 归属规则：所选词库优先 → 书名字序第一本 → 「未入词库」兜底组。
+   * 一个词属多本书时只进一个组（不重复计数）；
+   * 组顺序：所选库 → 其余按书名 → 未入词库永远最后。
+   */
+  function groupByBook(recs) {
+    const pref = state.bookId || '';
+    const prefName = pref ? (state.bookNameById[pref] || pref) : '';
+    const groups = new Map();
+    recs.forEach((rec, idx) => {
+      const e = (rec && rec.entry) || {};
+      const refs = state._bookRefs[(e.lang || 'en') + '|' + (e.word || '')] || [];
+      let key, title, order;
+      if (pref && refs.some(r => r.id === pref)) {
+        key = ' pref';
+        title = prefName;
+        order = 0;
+      } else if (refs.length) {
+        key = ' b:' + refs[0].id;
+        title = refs[0].name;
+        order = 1;
+      } else {
+        key = ' none';
+        title = '未入词库';
+        order = 2;
+      }
+      if (!groups.has(key)) groups.set(key, { title, order, items: [] });
+      groups.get(key).items.push({ rec, idx });
+    });
+    const out = [...groups.values()];
+    out.sort((a, b) => (a.order - b.order) || String(a.title).localeCompare(String(b.title), 'zh'));
+    return out;
+  }
+
+  /** 分组容器的 HTML：每组一个 `.lw-group`，组头 = 词库名 + 计数。
+   *  data-idx 仍用扁平下标（_recs 不变），点「详情」的回查逻辑零改动。 */
+  function groupsHtml(groups) {
+    return groups.map(g => `
+      <div class="lw-group">
+        <div class="lw-group-head"><b>${U().esc(g.title)}</b><span>${g.items.length} 词</span></div>
+        ${g.items.map(it => rowHtml(it.rec, it.idx)).join('')}
+      </div>`).join('');
+  }
+
   /** 渲染整个底部区域（开始一轮时调用）。 */
   function renderFoot() {
     renderPrev();
@@ -1327,6 +1420,9 @@ const Study = (() => {
   function renderLearned() {
     const box = $id('learned-list');
     if (!box) return;
+    // 代际守卫：归属查询是异步的，期间若又触发了新的渲染（连答两题 /
+    // 快速切 tab），晚回来的重渲必须放弃，否则旧数据会盖掉新渲染。
+    const gen = ++state._renderGen;
 
     document.querySelectorAll('#lb-seg .seg-btn').forEach(b => {
       b.classList.toggle('active', b.dataset.scope === state.learnedScope);
@@ -1356,9 +1452,17 @@ const Study = (() => {
         }
       }
 
+      // 同步首渲（缓存里有什么用什么 —— 行/发音/详情立刻可用，绝不因
+      // 归属反查 IPC 空一帧），查回新归属后再原地重渲一次。
       box.innerHTML = recs.length
-        ? recs.map(rowHtml).join('')
+        ? groupsHtml(groupByBook(recs))
         : '<div class="muted lw-empty">本轮还没有背过的词</div>';
+      void ensureBookRefs(recs).then((got) => {
+        if (!got || gen !== state._renderGen) return;
+        box.innerHTML = recs.length
+          ? groupsHtml(groupByBook(recs))
+          : '<div class="muted lw-empty">本轮还没有背过的词</div>';
+      });
       return;
     }
 
@@ -1386,9 +1490,17 @@ const Study = (() => {
         spoken.dataset.speakAudio = (newest.phonetic && newest.phonetic.audio) || '';
       }
     }
+    // 与本轮列表同一套分容器渲染（200 条跨词库平铺混排就是用户看到的「混」）。
+    // 同步首渲 + 后台补归属重渲，理由同上。
     box.innerHTML = recs.length
-      ? recs.map(rowHtml).join('')
+      ? groupsHtml(groupByBook(recs))
       : '<div class="muted lw-empty">学习记录里还没有背过的词</div>';
+    void ensureBookRefs(recs).then((got) => {
+      if (!got || gen !== state._renderGen) return;
+      box.innerHTML = recs.length
+        ? groupsHtml(groupByBook(recs))
+        : '<div class="muted lw-empty">学习记录里还没有背过的词</div>';
+    });
   }
 
   /** 读「最近背过」（懒加载，读完缓存；点刷新会清缓存重读）。 */

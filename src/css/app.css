@@ -3352,6 +3352,29 @@ h1 .ver-chip { font-size: 11px; padding: 2px 8px; vertical-align: 4px; }
 .lb-tools .ghost-btn { margin-left: auto; }
 
 .learned-list { display: flex; flex-direction: column; gap: 4px; max-height: 320px; overflow: auto; }
+/* ★ 分词库容器：已背列表按词库分组，每组一个卡片（用户反馈「不同词库的
+   背诵单词混到一起」）。组头 = 词库名 + 词数；组内沿用 .lw-row 行样式。 */
+.lw-group {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+  background: var(--panel);
+}
+.lw-group + .lw-group { margin-top: 8px; }
+.lw-group-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 5px 10px;
+  font-size: 12px;
+  color: var(--muted-text, #667);
+  background: var(--border-2, rgba(0, 0, 0, .03));
+  border-bottom: 1px solid var(--border);
+}
+.lw-group-head b { color: var(--text, inherit); font-weight: 600; }
+.lw-group .lw-row { border: 0; border-radius: 0; border-bottom: 1px solid var(--border-2, transparent); }
+.lw-group .lw-row:last-child { border-bottom: 0; }
 
 .lw-row {
   display: flex; align-items: flex-start; gap: 9px;

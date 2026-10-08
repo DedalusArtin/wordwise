@@ -1292,8 +1292,10 @@ pub fn cmd_start_review_session(
     size: Option<usize>,
     lang: Option<String>,
     def_lang: Option<String>,
+    // ★ 词库过滤：与顶部下拉同口径。空/缺省 = 全部词库（历史行为）。
+    book_id: Option<String>,
 ) -> Result<SessionInfo, String> {
-    start_review_session_inner(&state, mode, size, lang, def_lang)
+    start_review_session_inner(&state, mode, size, lang, def_lang, book_id)
 }
 
 /// 只由「今天到期（含逾期）」构成的复习队列。
@@ -1305,6 +1307,9 @@ fn build_review_queue(
     state: &AppState,
     lang: &str,
     size: Option<usize>,
+    // ★ 词库过滤：非空时只取该书的到期词 —— 此前「开始今日复习」无视
+    //   词库下拉、按语言全库混背，与「开始背诵」的按书口径自相矛盾。
+    book_id: Option<&str>,
 ) -> Result<Vec<WordEntry>, String> {
     // `None` 取一个「实际上等于无限」的上限（本地词库不可能有上万条今天到期）。
     const REVIEW_UNLIMITED: i64 = 10_000;
@@ -1318,7 +1323,10 @@ fn build_review_queue(
     //   否则「逾期 5 天」会排在「今天到期」后面。）
     let now = timeutil::now_ts();
     let today_start = timeutil::today_start();
-    let due = state.db.due_states(lang, now, limit).map_err(err)?;
+    let due = match book_id.map(str::trim).filter(|b| !b.is_empty()) {
+        Some(b) => state.db.due_states_in_book(lang, now, limit, b).map_err(err)?,
+        None => state.db.due_states(lang, now, limit).map_err(err)?,
+    };
 
     let mut ordered: Vec<(&StudyState, i64)> = due
         .iter()
@@ -1357,13 +1365,14 @@ fn start_review_session_inner(
     size: Option<usize>,
     lang: Option<String>,
     def_lang: Option<String>,
+    book_id: Option<String>,
 ) -> Result<SessionInfo, String> {
     let cfg = state.cfg();
     let lang = lang.unwrap_or(cfg.target_lang.clone());
     let now = timeutil::now_ts();
     let def_lang = def_lang.unwrap_or_default();
 
-    let picked = build_review_queue(state, &lang, size)?;
+    let picked = build_review_queue(state, &lang, size, book_id.as_deref())?;
     let total = picked.len();
 
     // 复习沿用调用方传进来的模式；没传才退回背诵槽当前的模式。
@@ -2067,15 +2076,40 @@ pub struct WordStateView {
 
 /// 学习总览。
 #[tauri::command(async)]
-pub fn cmd_stats(state: State<'_, Arc<AppState>>, lang: Option<String>) -> Result<Stats, String> {
+pub fn cmd_stats(
+    state: State<'_, Arc<AppState>>,
+    lang: Option<String>,
+    // ★ 词库口径：非空时 due/leech/mastered 三卡只数该书的词 —— 否则
+    //   「开始今日复习（N 词）」的 N 是全库数、点进去却只背所选书，数字对不上。
+    //   日统计（reviewed/streak/history）与书无关，保持全局。
+    book_id: Option<String>,
+) -> Result<Stats, String> {
     let lang = lang.unwrap_or_else(|| state.cfg().target_lang);
     let now = timeutil::now_ts();
+    let book = book_id.unwrap_or_default();
+    let book = book.trim();
 
     let total_words = state.db.word_count(&lang).map_err(err)?;
     let learned = state.db.learned_count(&lang).map_err(err)?;
-    let mastered = state.db.mastered_count(&lang).map_err(err)?;
-    let leeches = state.db.leech_count(&lang).map_err(err)?;
-    let due_today = state.db.due_states(&lang, now, 9999).map_err(err)?.len() as i64;
+    let mastered = if book.is_empty() {
+        state.db.mastered_count(&lang).map_err(err)?
+    } else {
+        state.db.mastered_count_in_book(&lang, book).map_err(err)?
+    };
+    let leeches = if book.is_empty() {
+        state.db.leech_count(&lang).map_err(err)?
+    } else {
+        state.db.leech_count_in_book(&lang, book).map_err(err)?
+    };
+    let due_today = if book.is_empty() {
+        state.db.due_states(&lang, now, 9999).map_err(err)?.len() as i64
+    } else {
+        state
+            .db
+            .due_states_in_book(&lang, now, 9999, book)
+            .map_err(err)?
+            .len() as i64
+    };
     let (reviewed_today, correct_today, wrong_today) =
         state.db.today_counts(now).map_err(err)?;
     let streak_days = state.db.streak(now).map_err(err)?;
@@ -3008,7 +3042,7 @@ mod tests {
             s.def_lang = "zh".into();
         }
         // 开复习（空库 → total 0，但不报错）
-        let info = start_review_session_inner(&st, None, None, Some("en".into()), None).unwrap();
+        let info = start_review_session_inner(&st, None, None, Some("en".into()), None, None).unwrap();
         assert_eq!(info.total, 0, "今天没有要复习的词时返回 total=0，而不是报错");
         // 背诵槽原封不动
         let s = st.session_slot(None).read();
@@ -3048,12 +3082,49 @@ mod tests {
         st.db.upsert_state(&StudyState::new("aa", "en", now)).unwrap();
         st.db.upsert_state(&StudyState::new("bb", "en", now)).unwrap();
 
-        let q = build_review_queue(&st, "en", None).unwrap();
+        let q = build_review_queue(&st, "en", None, None).unwrap();
         assert_eq!(q.len(), 2, "到期的有几个就是几个，绝不补足到 batch_size");
         // size 只用于截断上限
-        assert_eq!(build_review_queue(&st, "en", Some(1)).unwrap().len(), 1);
+        assert_eq!(build_review_queue(&st, "en", Some(1), None).unwrap().len(), 1);
         // 没有到期词 → 空队列（不报错）
-        assert!(build_review_queue(&st, "ja", None).unwrap().is_empty());
+        assert!(build_review_queue(&st, "ja", None, None).unwrap().is_empty());
+    }
+
+    /// 今日复习按词库过滤：选了书就只背该书的到期词，「全部词库」退回全库。
+    /// 这条对应用户报的「不同词库的背诵单词混到一起」—— 此前队列只按语言取，
+    /// 词库下拉对「开始今日复习」完全无效。
+    #[test]
+    fn review_queue_filters_by_book() {
+        let st = state("review-book");
+        let now = timeutil::now_ts();
+        st.db
+            .bulk_upsert_words(
+                &[WordEntry::new("aa"), WordEntry::new("bb")],
+                now,
+            )
+            .unwrap();
+        st.db.upsert_state(&StudyState::new("aa", "en", now)).unwrap();
+        st.db.upsert_state(&StudyState::new("bb", "en", now)).unwrap();
+        {
+            // commands 测试摸不到 Db 的私有 conn，走公开 API 建书挂词
+            let b = crate::models::Wordbook {
+                id: "bk".into(),
+                name: "某书".into(),
+                lang: "en".into(),
+                ..Default::default()
+            };
+            st.db.upsert_wordbook(&b).unwrap();
+            st.db
+                .add_words_to_book("bk", &["aa".to_string()], "en")
+                .unwrap();
+        }
+
+        // 选了 bk → 只有 aa；全部词库（None / 空串）→ 两个词都在
+        let q = build_review_queue(&st, "en", None, Some("bk")).unwrap();
+        let words: Vec<&str> = q.iter().map(|e| e.word.as_str()).collect();
+        assert_eq!(words, vec!["aa"], "所选词库的到期词独占队列");
+        assert_eq!(build_review_queue(&st, "en", None, Some("")).unwrap().len(), 2);
+        assert_eq!(build_review_queue(&st, "en", None, None).unwrap().len(), 2);
     }
 
     /// 复习会话必须**采用调用方传来的模式**，不能悄悄沿用背诵槽的模式。
@@ -3079,6 +3150,7 @@ mod tests {
             None,
             Some("en".into()),
             Some("zh".into()),
+            None,
         )
         .unwrap();
         assert_eq!(info.total, 1, "一个到期词就出一题");

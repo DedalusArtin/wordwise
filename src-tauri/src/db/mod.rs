@@ -1064,6 +1064,115 @@ impl Db {
         Ok(out)
     }
 
+    /// 某**词库内**今天到期的词（今日复习与所选词库同口径，v0.47 分词库背诵）。
+    ///
+    /// 用 `EXISTS` 而不是 `JOIN wordbook_words`：JOIN 在成员行重复时会产生
+    /// 重复状态行，EXISTS 天然一行一次。`book_id` 为空串视为「全部词库」，
+    /// 直接回退到 [`Self::due_states`]，保证下拉选「全部」时行为与历史一致。
+    pub fn due_states_in_book(
+        &self,
+        lang: &str,
+        now: i64,
+        limit: i64,
+        book_id: &str,
+    ) -> Result<Vec<StudyState>> {
+        if book_id.trim().is_empty() {
+            return self.due_states(lang, now, limit);
+        }
+        let conn = self.conn.lock();
+        let mut stmt = conn.prepare(
+            r#"SELECT word,lang,ease_factor,interval_days,repetitions,due_at,last_review_at,
+                      correct_count,wrong_count,is_leech,mastery,is_mastered
+               FROM study_state s
+               WHERE s.lang=?1 AND s.is_mastered=0 AND s.due_at<=?2
+                 AND EXISTS (SELECT 1 FROM wordbook_words bw
+                             WHERE bw.word=s.word AND bw.lang=s.lang AND bw.book_id=?4)
+               ORDER BY s.is_leech DESC, s.due_at ASC
+               LIMIT ?3"#,
+        )?;
+        let rows = stmt.query_map(params![lang, now, limit, book_id], row_to_state)?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
+    /// 词库内的强化词数量（统计卡与所选词库同口径）。
+    pub fn leech_count_in_book(&self, lang: &str, book_id: &str) -> Result<i64> {
+        if book_id.trim().is_empty() {
+            return self.leech_count(lang);
+        }
+        let conn = self.conn.lock();
+        let n: i64 = conn.query_row(
+            r#"SELECT COUNT(*) FROM study_state s
+               WHERE s.lang=?1 AND s.is_leech=1
+                 AND EXISTS (SELECT 1 FROM wordbook_words bw
+                             WHERE bw.word=s.word AND bw.lang=s.lang AND bw.book_id=?2)"#,
+            params![lang, book_id],
+            |r| r.get(0),
+        )?;
+        Ok(n)
+    }
+
+    /// 词库内的已掌握数量（统计卡与所选词库同口径）。
+    pub fn mastered_count_in_book(&self, lang: &str, book_id: &str) -> Result<i64> {
+        if book_id.trim().is_empty() {
+            return self.mastered_count(lang);
+        }
+        let conn = self.conn.lock();
+        let n: i64 = conn.query_row(
+            r#"SELECT COUNT(*) FROM study_state s
+               WHERE s.lang=?1 AND s.is_mastered=1
+                 AND EXISTS (SELECT 1 FROM wordbook_words bw
+                             WHERE bw.word=s.word AND bw.lang=s.lang AND bw.book_id=?2)"#,
+            params![lang, book_id],
+            |r| r.get(0),
+        )?;
+        Ok(n)
+    }
+
+    /// 批量查一批词的**词库归属**（已背列表按词库分容器用）。
+    ///
+    /// 返回 `(word, book_id, book_name)`，按书名排序 —— 前端拿第一本做
+    /// 「这个词属于哪本书」的默认归属，同属多本时由前端按当前所选词库优先。
+    /// `words` 超过 500 只取前 500（列表一页最多 200，超限是调用方的问题，
+    /// 截断比拼一条几百占位符的 SQL 安全）。
+    pub fn word_book_refs(&self, lang: &str, words: &[String]) -> Result<Vec<(String, String, String)>> {
+        if words.is_empty() {
+            return Ok(Vec::new());
+        }
+        let words: Vec<String> = {
+            let mut seen = std::collections::HashSet::new();
+            words.iter()
+                .filter(|w| seen.insert(w.as_str()))
+                .take(500)
+                .cloned()
+                .collect()
+        };
+        // 显式编号 ?2..?N+1（?1 是 lang）——混用裸 `?` 时 SQLite 的续号
+        // 规则容易和 params_from_iter 的计数对不上，编号写死最稳。
+        let placeholders: Vec<String> = (2..=words.len() + 1).map(|i| format!("?{i}")).collect();
+        let placeholders = placeholders.join(",");
+        let sql = format!(
+            "SELECT bw.word, bw.book_id, wb.name \
+             FROM wordbook_words bw JOIN wordbooks wb ON wb.id = bw.book_id \
+             WHERE bw.lang=?1 AND bw.word IN ({placeholders}) \
+             ORDER BY wb.name"
+        );
+        let conn = self.conn.lock();
+        let mut stmt = conn.prepare(&sql)?;
+        let params = std::iter::once(lang).chain(words.iter().map(|s| s.as_str()));
+        let rows = stmt.query_map(rusqlite::params_from_iter(params), |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?))
+        })?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
     /// 取某一天到期的词（复习计划视图）。
     pub fn states_due_between(
         &self,
@@ -2602,6 +2711,85 @@ mod tests {
             examples: vec![],
         }];
         e
+    }
+
+    /// 分词库背诵的底座：按书过滤到期词 + 批量词库归属查询。
+    /// 锁三件事：① 按书只出该书的词；② 空 book_id 退化为全库（下拉「全部词库」
+    /// 的历史行为不变）；③ 归属查询按书名排序、查不到的词不出现。
+    #[test]
+    fn book_scoped_due_states_and_word_book_refs() {
+        let db = tmp_db("bookscope");
+        let now = 1_700_000_000;
+        for w in ["apple", "banana", "cherry"] {
+            db.upsert_state(&StudyState::new(w, "en", now - 60)).unwrap();
+        }
+        {
+            let conn = db.conn.lock();
+            // 全列有 DEFAULT，只给必填的 id/name
+            conn.execute(
+                "INSERT INTO wordbooks (id,name,lang) VALUES ('book-a','A 词库','en')",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO wordbooks (id,name,lang) VALUES ('book-b','B 词库','en')",
+                [],
+            )
+            .unwrap();
+            for (b, w) in [
+                ("book-a", "apple"),
+                ("book-a", "banana"),
+                ("book-b", "cherry"),
+            ] {
+                conn.execute(
+                    "INSERT OR IGNORE INTO wordbook_words (book_id,word,lang) VALUES (?1,?2,'en')",
+                    params![b, w],
+                )
+                .unwrap();
+            }
+        }
+
+        // ① 按书过滤：book-a 只有 apple/banana
+        let a: Vec<String> = db
+            .due_states_in_book("en", now, 99, "book-a")
+            .unwrap()
+            .into_iter()
+            .map(|s| s.word)
+            .collect();
+        assert_eq!(a, vec!["apple".to_string(), "banana".to_string()], "按书过滤结果");
+
+        // ② 空 book_id = 全部词库（历史行为）
+        assert_eq!(db.due_states_in_book("en", now, 99, "").unwrap().len(), 3);
+        // 不存在的书 → 空，而不是报错
+        assert!(db.due_states_in_book("en", now, 99, "no-such-book").unwrap().is_empty());
+        // 计数同口径
+        assert_eq!(db.leech_count_in_book("en", "book-a").unwrap(), 0);
+        assert_eq!(db.leech_count_in_book("en", "").unwrap(), db.leech_count("en").unwrap());
+
+        // ③ 批量归属：apple→A、cherry→B、ghost 无归属不出现
+        let refs = db
+            .word_book_refs(
+                "en",
+                &[
+                    "apple".to_string(),
+                    "cherry".to_string(),
+                    "ghost".to_string(),
+                ],
+            )
+            .unwrap();
+        let m: std::collections::HashMap<&str, Vec<&str>> = {
+            let mut x: std::collections::HashMap<&str, Vec<&str>> =
+                std::collections::HashMap::new();
+            for (w, _id, name) in &refs {
+                x.entry(w.as_str()).or_default().push(name.as_str());
+            }
+            x
+        };
+        assert_eq!(m.get("apple"), Some(&vec!["A 词库"]), "apple 归 A");
+        assert_eq!(m.get("cherry"), Some(&vec!["B 词库"]), "cherry 归 B");
+        assert!(!m.contains_key("ghost"), "无归属的词不该出现");
+        // 空入参不查库
+        assert!(db.word_book_refs("en", &[]).unwrap().is_empty());
     }
 
     /// 音标回写只能**填空**，不能动用户已有的数据 —— 后台补全与用户

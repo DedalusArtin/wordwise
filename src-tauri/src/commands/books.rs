@@ -557,6 +557,36 @@ pub fn cmd_reviewed_words(
     state.db.reviewed_words(&lang, limit, offset).map_err(err)
 }
 
+/// 一条「词 → 词库」归属（已背列表分容器渲染用）。
+#[derive(Debug, serde::Serialize)]
+pub struct BookRef {
+    pub id: String,
+    pub name: String,
+}
+
+/// 批量查一批词的词库归属 → `{ "word": [{id, name}, …], … }`。
+///
+/// 已背列表（本轮 / 最近背过）此前把不同词库的词平铺在一个容器里，
+/// 前端要按词库分容器就必须知道每个词属于哪本书 —— 而 WordRow 不带
+/// 归属字段，纯前端做不到，所以开这个批量反查口。
+/// 同属多本书时按书名排序全部返回，由前端按「当前所选词库优先」定组。
+#[tauri::command(async)]
+pub fn cmd_word_book_refs(
+    state: State<'_, Arc<AppState>>,
+    lang: Option<String>,
+    words: Vec<String>,
+) -> Result<std::collections::HashMap<String, Vec<BookRef>>, String> {
+    let lang = lang.unwrap_or_else(|| state.cfg().target_lang);
+    let rows = state.db.word_book_refs(&lang, &words).map_err(err)?;
+    let mut out: std::collections::HashMap<String, Vec<BookRef>> = std::collections::HashMap::new();
+    for (word, book_id, book_name) in rows {
+        out.entry(word)
+            .or_default()
+            .push(BookRef { id: book_id, name: book_name });
+    }
+    Ok(out)
+}
+
 /// 列出某个词库里的单词（需求 5：进词库看内容）。
 #[tauri::command(async)]
 pub fn cmd_words_in_book(

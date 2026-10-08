@@ -317,12 +317,16 @@ const API = {
    *   属于正常状态，不是错误。
    * @param {number|null} size 截断上限，null = 全部到期词
    */
-  startReviewSession: (mode, size, lang, defLang) =>
+  startReviewSession: (mode, size, lang, defLang, bookId) =>
     invoke('cmd_start_review_session', {
       mode: mode || null,
       size: size || null,
       lang: lang || null,
       defLang: defLang || null,
+      // ★ 词库过滤：与顶部下拉同口径 —— 选了书就只背该书的到期词，
+      //   空/不传 = 全部词库（历史行为）。此前签名里根本没有这个参数，
+      //   「开始今日复习」把所有词库的到期词混成一队。
+      bookId: bookId || null,
     }),
   currentQuestion: (lang, kind) =>
     invoke('cmd_current_question', { lang: lang || null, kind: kind || null }),
@@ -355,8 +359,13 @@ const API = {
   extraStudy: (extra, bookId, lang) =>
     invoke('cmd_extra_study', { extra, bookId: bookId || null, lang: lang || null }),
 
-  // 统计
-  stats: (lang) => invoke('cmd_stats', { lang: lang || null }),
+  // 统计。bookId 非空时 due/leech/mastered 三卡只数该书的词
+  // （与「开始今日复习」按钮数字同口径）；不传 = 全库（词库页等处用）。
+  stats: (lang, bookId) =>
+    invoke('cmd_stats', { lang: lang || null, bookId: bookId || null }),
+  /** 批量查词的词库归属 → `{ word: [{id, name}, …] }`（已背列表按词库分容器）。 */
+  wordBookRefs: (words, lang) =>
+    invoke('cmd_word_book_refs', { words: words || [], lang: lang || null }),
   reviewPlan: (days, lang) => invoke('cmd_review_plan', { days: days || 14, lang: lang || null }),
   dueWords: (limit, lang) => invoke('cmd_due_words', { limit: limit || 60, lang: lang || null }),
   leechList: (limit, lang) => invoke('cmd_leech_list', { limit: limit || 100, lang: lang || null }),

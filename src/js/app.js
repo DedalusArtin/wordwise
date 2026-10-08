@@ -52,7 +52,10 @@ async function refreshStudy() {
 
   let s;
   try {
-    s = await API.stats();
+    // ★ 按所选词库取统计：四张卡与「开始今日复习（N 词）」的 N 只数该书的词，
+    //   否则数字是全库的、点进去却只背所选书，两个口径当众打架。
+    //   词库页（library.js）仍用无参调用取全库统计，不受影响。
+    s = await API.stats(null, (window.Study && window.Study.state && window.Study.state.bookId) || null);
   } catch (e) {
     return;
   }
