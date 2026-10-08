@@ -1182,6 +1182,84 @@ fn pick_entry(
     cand.filter(|e| !head_mismatch(&e.word, word))
 }
 
+/// 简单 percent-encoding（有道 jsonapi 的 `q` 参数）。
+fn urlencode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() * 3);
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char)
+            }
+            b' ' => out.push('+'),
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
+/// 有道 `jsonapi` 响应解析 → `(英音, 美音, 词形变化[(label, form)])`。
+///
+/// 这是**免 AI 的音标/变形补全**的数据源（用户反馈「有些单词还没有音标」——
+/// 词库 9908 词里 4984 个缺音标，全是词表导入时没有音标列；靠 LLM 后台
+/// 补要几十小时，这个接口毫秒级一次给齐音标 **和** 词形变化）。
+/// 纯函数：网络与解析分离，便于单测。拿不到任何有效字段返回 `None`。
+pub fn parse_youdao_jsonapi(word: &str, body: &str) -> Option<(String, String, Vec<(String, String)>)> {
+    let v: serde_json::Value = serde_json::from_str(body).ok()?;
+    let w = v.pointer("/ec/word")?.as_array()?.first()?;
+    // ★ 词头错配闸（与 pick_entry 同一哲学）：返回词不是查询词 → 整份丢弃。
+    //   return-phrase 两种形态都见过：字符串 / [{"l":{"i":[...]}}]。
+    let phrase = w
+        .get("return-phrase")
+        .map(|rp| {
+            if let Some(s) = rp.as_str() {
+                return s.to_string();
+            }
+            rp.pointer("/l/i/0")
+                .or_else(|| rp.pointer("/l/i"))
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .to_string()
+        })
+        .unwrap_or_default();
+    if !phrase.is_empty() && !phrase.trim().eq_ignore_ascii_case(word.trim()) {
+        return None;
+    }
+    let uk = w.get("ukphone").and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
+    let us = w.get("usphone").and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
+    let mut wfs = Vec::new();
+    if let Some(arr) = w.get("wfs").and_then(|x| x.as_array()) {
+        for it in arr {
+            let Some(wf) = it.get("wf") else { continue };
+            let name = wf.get("name").and_then(|x| x.as_str()).unwrap_or("").trim();
+            let value = wf.get("value").and_then(|x| x.as_str()).unwrap_or("").trim();
+            if !name.is_empty() && !value.is_empty() {
+                wfs.push((name.to_string(), value.to_string()));
+            }
+        }
+    }
+    if uk.is_empty() && us.is_empty() && wfs.is_empty() {
+        return None;
+    }
+    Some((uk, us, wfs))
+}
+
+/// 按词取有道 jsonapi（免 AI 音标/变形源）。错误一律 `None`（网络层是
+/// 增强能力，失败静默，交给下一轮）。
+pub async fn fetch_youdao_jsonapi(
+    http: &reqwest::Client,
+    word: &str,
+) -> Option<(String, String, Vec<(String, String)>)> {
+    let url = format!("https://dict.youdao.com/jsonapi?q={}", urlencode(word));
+    let resp = http
+        .get(&url)
+        .timeout(std::time::Duration::from_secs(8))
+        .send()
+        .await
+        .ok()?;
+    let body = resp.text().await.ok()?;
+    parse_youdao_jsonapi(word, &body)
+}
+
 /// 源声明的词头与查询词是否**不是同一个词**（忽略大小写与首尾空白）。
 ///
 /// 只做严格相等判定：编辑距离式的「近似容忍」会把 grievaunce/grievance
@@ -1752,6 +1830,34 @@ mod tests {
         // 大小写差异不算错配
         assert!(!head_mismatch("Grievance", "grievance"));
         assert!(head_mismatch("grievance", "grievaunce"));
+    }
+
+    /// 有道 jsonapi 解析：音标 + 词形变化 + 词头错配闸（真实响应结构）。
+    #[test]
+    fn parse_youdao_jsonapi_extracts_phones_and_wfs() {
+        let body = r#"{"ec":{"word":[{
+            "return-phrase":{"l":{"i":["consider"]}},
+            "ukphone":"kənˈsɪdə(r)","usphone":"kənˈsɪdər",
+            "wfs":[{"wf":{"name":"第三人称单数","value":"considers"}},
+                   {"wf":{"name":"过去式","value":"considered"}}]
+        }]}}"#;
+        let (uk, us, wfs) = parse_youdao_jsonapi("consider", body).expect("应解析成功");
+        assert_eq!(uk, "kənˈsɪdə(r)");
+        assert_eq!(us, "kənˈsɪdər");
+        assert_eq!(wfs.len(), 2);
+        assert_eq!(wfs[0], ("第三人称单数".to_string(), "considers".to_string()));
+
+        // 词头错配 → 丢（联想替身闸）
+        assert!(parse_youdao_jsonapi("grievaunce", body).is_none());
+        // 空响应 / 非法 JSON → None
+        assert!(parse_youdao_jsonapi("x", "{}").is_none());
+        assert!(parse_youdao_jsonapi("x", "not json").is_none());
+        // 全字段为空 → None（没东西可填）
+        let empty = r#"{"ec":{"word":[{"return-phrase":{"l":{"i":["w"]}},"ukphone":"","usphone":""}]}}"#;
+        assert!(parse_youdao_jsonapi("w", empty).is_none());
+        // urlencode：空格与非 ASCII
+        assert_eq!(urlencode("in order"), "in+order");
+        assert_eq!(urlencode("naïve"), "na%C3%AFve");
     }
 
     #[test]

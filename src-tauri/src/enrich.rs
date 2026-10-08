@@ -30,6 +30,10 @@ use std::time::Duration;
 const START_DELAY_SECS: u64 = 90;
 /// 一轮结束后的歇息（秒）——模型刚跑完一个词，给它也给自己喘口气。
 const REST_PER_WORD_SECS: u64 = 10;
+/// 网络层（音标/变形）两词之间的间隔 —— 有道 jsonapi 毫秒级返回，
+/// 节奏只需要避开「打爆接口」，350ms 一个词，4964 个缺音标的词约 45 分钟刷完。
+const NETWORK_GAP_MS: u64 = 350;
+
 /// AI 未启用时空转的间隔（秒）。配置是热更新的，睡醒再看。
 const IDLE_NO_LLM_SECS: u64 = 60;
 /// 词库已全部丰满后的长歇（秒）。有新词入库后最多 5 分钟就会被发现。
@@ -89,37 +93,124 @@ fn merge_entry(mut base: crate::models::WordEntry, fresh: crate::models::WordEnt
     base
 }
 
-/// 增强单个词条：取现有 → 生成 → 合并 → 回写。
-/// 返回 `Ok(true)` 表示词条确实被充实了。
+/// 增强单个词条的结果 —— 决定主循环的节奏。
+enum Outcome {
+    /// LLM 补的：推理 5~20 秒，按词歇 [`REST_PER_WORD_SECS`]。
+    Llm,
+    /// 网络源补的（有道 jsonapi：音标 + 词形变化，免 AI）：毫秒级，
+    ///   短歇继续刷 —— 词库 50% 的词只缺音标变形，全靠这层才补得动
+    ///   （LLM 逐词跑要几十小时）。
+    Network,
+    /// 两层都没补上（断网 + AI 没开 / 词条被删）。
+    Nothing,
+}
+
+/// 第一层：**免 AI 的网络补全**（有道 jsonapi）。
+///
+/// 只做两件事，且都遵守「只填空不覆盖」：缺音标 → 填英/美音标；
+/// 缺词形变化 → 填 `wfs`（第三人称单数/过去式…，label 本来就是中文）。
+/// 英语专用（jsonapi 是英语词典）；失败静默返回 false。
+async fn enrich_network(
+    state: &AppState,
+    word: &str,
+    lang: &str,
+    base: &crate::models::WordEntry,
+) -> bool {
+    if !lang.eq_ignore_ascii_case("en") {
+        return false;
+    }
+    let need_ph = base.phonetic.uk.trim().is_empty() && base.phonetic.us.trim().is_empty();
+    let need_infl = base.inflections.is_empty();
+    if !need_ph && !need_infl {
+        return false;
+    }
+    let Some((uk, us, wfs)) = crate::dict::fetch_youdao_jsonapi(&state.http(), word).await
+    else {
+        return false;
+    };
+    let mut e = base.clone();
+    let mut changed = false;
+    if need_ph {
+        let uk = crate::models::clean_phonetic_value(&uk, lang);
+        let us = crate::models::clean_phonetic_value(&us, lang);
+        if e.phonetic.uk.trim().is_empty() && !uk.is_empty() {
+            e.phonetic.uk = uk;
+            changed = true;
+        }
+        if e.phonetic.us.trim().is_empty() && !us.is_empty() {
+            e.phonetic.us = us;
+            changed = true;
+        }
+    }
+    if need_infl && !wfs.is_empty() {
+        e.inflections = wfs
+            .into_iter()
+            .map(|(label, form)| crate::models::Inflection { label, form })
+            .collect();
+        changed = true;
+    }
+    if !changed {
+        return false;
+    }
+    let Ok(json) = serde_json::to_string(&e) else {
+        return false;
+    };
+    matches!(state.db.update_word_entry_json(word, lang, &json), Ok(true))
+}
+
+/// 增强单个词条：**网络层（音标/变形，免 AI）→ AI 层（释义等）**。
+///
+/// 分层的理由（用户反馈「有些单词还没有音标」）：词库 9908 词里 4984 个
+/// 缺音标 —— 全是词表导入没有音标列。这类词**只缺音标变形**，有道
+/// jsonapi 毫秒级就能补齐，根本轮不到 LLM；把网络层放前面，AI 只处理
+/// 真正缺释义的词条，速度差两个数量级。
 async fn enrich_one(
     state: &AppState,
     llm_cfg: &LlmConfig,
+    llm_ready: bool,
     word: &str,
     lang: &str,
-) -> anyhow::Result<bool> {
+) -> anyhow::Result<Outcome> {
     let Some(existing) = state.db.get_word(word, lang).ok().flatten() else {
-        return Ok(false); // 用户已删，别再写回去
+        return Ok(Outcome::Nothing); // 用户已删，别再写回去
     };
     if !needs_enrich(&existing) {
-        return Ok(false); // 扫描批次里混着的、已被补好的词
+        return Ok(Outcome::Nothing); // 扫描批次里混着的、已被补好的词
+    }
+
+    // 第一层：网络（音标 + 词形变化）
+    let networked = enrich_network(state, word, lang, &existing).await;
+
+    // 重取：网络层可能已经回写
+    let Some(cur) = state.db.get_word(word, lang).ok().flatten() else {
+        return Ok(if networked { Outcome::Network } else { Outcome::Nothing });
+    };
+    if !needs_enrich(&cur) {
+        return Ok(if networked { Outcome::Network } else { Outcome::Nothing });
+    }
+
+    // 第二层：AI（补释义等网络源给不了的内容）；AI 未配就到此为止
+    if !llm_ready {
+        return Ok(if networked { Outcome::Network } else { Outcome::Nothing });
     }
     let fresh = llm::generate_entry(&state.http(), llm_cfg, word, lang).await?;
-    let merged = merge_entry(existing, fresh);
+    let merged = merge_entry(cur, fresh);
     let json = serde_json::to_string(&merged)?;
-    state.db.update_word_entry_json(word, lang, &json)
+    state.db.update_word_entry_json(word, lang, &json)?;
+    Ok(Outcome::Llm)
 }
 
 /// 查词现场补全：本地命中的词条如果单薄（没音标/没释义），不等后台
-/// 空闲轮，立即补一次。AI 未启用时直接返回 false（前端不等待）。
-/// 与后台循环并发安全：合并纪律「现有为准，生成垫底」保证两边同时
+/// 空闲轮，立即补一次。**AI 未启用时网络层照样工作**（音标补全不需要
+/// 模型）。与后台循环并发安全：合并纪律「只填空」保证两边同时
 /// 跑也不会互相覆盖。
 pub async fn enrich_now(state: &AppState, word: &str, lang: &str) -> bool {
     let cfg = state.config.read().clone();
     let llm_ready = cfg.study.ai_explain && !cfg.llm.base_url.trim().is_empty();
-    if !llm_ready {
-        return false;
-    }
-    matches!(enrich_one(state, &cfg.llm, word, lang).await, Ok(true))
+    matches!(
+        enrich_one(state, &cfg.llm, llm_ready, word, lang).await,
+        Ok(Outcome::Llm) | Ok(Outcome::Network)
+    )
 }
 
 /// 启动后台增强循环（整个应用生命周期一个任务）。
@@ -137,10 +228,8 @@ pub fn spawn(state: Arc<AppState>) {
             }
             let cfg = state.config.read().clone();
             let llm_ready = cfg.study.ai_explain && !cfg.llm.base_url.trim().is_empty();
-            if !llm_ready {
-                tokio::time::sleep(Duration::from_secs(IDLE_NO_LLM_SECS)).await;
-                continue;
-            }
+            // ★ 不再因「AI 未配」整轮空转 —— 第一层网络补全（音标/变形）
+            //   不需要模型；只有 LLM 层才受 llm_ready 门控。
 
             let candidates = match state.db.pick_words_to_enrich(120) {
                 Ok(v) => v,
@@ -150,7 +239,7 @@ pub fn spawn(state: Arc<AppState>) {
                 }
             };
             if candidates.is_empty() {
-                // 词库已够丰满：长歇，新词入库后最多 5 分钟会被发现
+                // 词库已够丰满：长歇，新词入库后最多 5 分钟就会被发现
                 tokio::time::sleep(Duration::from_secs(IDLE_DONE_SECS)).await;
                 continue;
             }
@@ -160,21 +249,27 @@ pub fn spawn(state: Arc<AppState>) {
                 if STOP.load(Ordering::Relaxed) {
                     break;
                 }
-                match enrich_one(&state, &cfg.llm, &word, &lang).await {
-                    Ok(true) => {
+                match enrich_one(&state, &cfg.llm, llm_ready, &word, &lang).await {
+                    Ok(Outcome::Llm) => {
                         ENRICHED.fetch_add(1, Ordering::Relaxed);
                         progressed = true;
                         tokio::time::sleep(Duration::from_secs(REST_PER_WORD_SECS)).await;
                     }
+                    Ok(Outcome::Network) => {
+                        // 网络层是毫秒级的：只给个网络往返的喘息，继续刷
+                        ENRICHED.fetch_add(1, Ordering::Relaxed);
+                        progressed = true;
+                        tokio::time::sleep(Duration::from_millis(NETWORK_GAP_MS)).await;
+                    }
                     _ => {
-                        // 单词失败（模型没响应 / JSON 不合法）→ 换下一个，
+                        // 两层都没补上（断网 + AI 没开 / 词条被删）→ 换下一个，
                         // 绝不在同一个词上反复撞墙
                         tokio::time::sleep(Duration::from_secs(2)).await;
                     }
                 }
             }
             if !progressed {
-                // 这一批全军覆没，多半是模型没开：长睡后再看配置
+                // 这一批全军覆没（多半是断网且模型没开）：长睡后再看
                 tokio::time::sleep(Duration::from_secs(IDLE_NO_LLM_SECS * 2)).await;
             }
         }

@@ -312,15 +312,10 @@ function entryBlocks(entry, opts = {}) {
     }
   }
 
-  // ③ 词形变化
+  // ③ 词形变化：**恒在** —— inflectionGridHtml 永远画得出「原形」锚点行，
+  //    每个词的变形栏都不再为空（栏目集合一致的另一半保证）。
   if (o.showInflections !== false) {
-    const has = !!(entry.inflections && entry.inflections.length);
-    if (has || o.placeholders !== false) {
-      const inner = has
-        ? inflectionGridHtml(entry.inflections)
-        : '<div class="blk-empty muted">暂无变形数据 —— 「AI 讲解」会一并生成。</div>';
-      blocks.push({ id: 'infl', label: '变形', inner });
-    }
+    blocks.push({ id: 'infl', label: '变形', inner: inflectionGridHtml(entry) });
   }
 
   // ④ 记忆法（可选栏）
@@ -373,6 +368,56 @@ function examplesBlockHtml(entry) {
 }
 
 /**
+ * 词典释义把**查询词**标注为另一个词的屈折/派生形式时，提取原形。
+ *
+ * 场景（用户反馈「如果是变形的话标记原型和现在的时态」）：查 `coincided`
+ * 时词典只给一句 *simple past and past participle of coincide* —— 原形
+ * 藏在释义里没人提，变形栏也没有任何参照。这里把原形挖出来：
+ *   - 英文：past tense of X / past participle of X / plural of X / form of X…
+ *   - 中文：coincide 的过去式 / …的复数形式（中文语序里原形在**前**）
+ * 提不到返回 ''（不是变形，按普通词渲染）。
+ */
+function detectBaseForm(entry) {
+  const defs = (entry.senses || []).map((s) => s.definition || '').join(' ');
+  if (!defs) return '';
+  // 英文：在小写副本上定位并截取（ASCII 小写不改变长度，index 对齐安全）
+  const lower = defs.toLowerCase();
+  const EN = [
+    'past participle of ', 'past tense of ', 'simple past of ',
+    'present participle of ', 'third person singular of ',
+    'alternative spelling of ', 'misspelling of ',
+    'form of ', 'variant of ', 'plural of ',
+  ];
+  for (const p of EN) {
+    const i = lower.indexOf(p);
+    if (i < 0) continue;
+    const w = (lower.slice(i + p.length).match(/^[a-z][a-z'-]*/) || [''])[0];
+    if (w.length >= 2) return w;
+  }
+  // 中文：原形在前，「X 的过去式 / 的复数形式 …」
+  const zh = defs.match(/([A-Za-z][A-Za-z'-]*)['」)]?\s*的(过去式|过去分词|现在分词|复数形式|第三人称单数|复数)/);
+  if (zh && zh[1].length >= 2) return zh[1];
+  return '';
+}
+
+/** 查询词本身是屈折形式时，它是什么形态（coincided → 过去式/过去分词）。 */
+function detectFormLabel(entry) {
+  const defs = (entry.senses || []).map((s) => s.definition || '').join(' ');
+  const lower = defs.toLowerCase();
+  if (lower.includes('simple past and past participle')) return { label: '过去式/过去分词', pos: 'v.' };
+  if (lower.includes('past tense')) return { label: '过去式', pos: 'v.' };
+  if (lower.includes('past participle')) return { label: '过去分词', pos: 'v.' };
+  if (lower.includes('present participle')) return { label: '现在分词', pos: 'v.' };
+  if (lower.includes('third person')) return { label: '第三人称单数', pos: 'v.' };
+  if (defs.includes('的复数形式') || lower.includes('plural of')) return { label: '复数', pos: 'n.' };
+  if (defs.includes('的过去式')) return { label: '过去式', pos: 'v.' };
+  if (defs.includes('的过去分词')) return { label: '过去分词', pos: 'v.' };
+  if (defs.includes('的现在分词')) return { label: '现在分词', pos: 'v.' };
+  if (lower.includes('plural')) return { label: '复数', pos: 'n.' };
+  return { label: '变形', pos: '' };
+}
+
+/**
  * 变形类型归一 → `{ label: 中文标签, pos: 词性 }`。
  *
  * 数据源给的 label 中英混杂（freedictionary 是 `plural`/`past tense`，
@@ -402,16 +447,72 @@ function inflMeta(label) {
   return { label: raw || '形式', pos: '' };
 }
 
-/** 词形变化网格（查词页与详情卡共用）：中英文 label 归一 + 词性徽标。 */
-function inflectionGridHtml(inflections) {
-  const inner = ['<div class="infl-grid">'];
-  for (const i of inflections) {
-    const m = inflMeta(i.label);
-    const pos = m.pos ? `<i class="infl-pos">${m.pos}</i>` : '';
-    inner.push(`<div class="infl-item"><span class="infl-label">${pos}${esc(m.label)}</span><span class="infl-form clickable" data-word="${esc(i.form)}" title="点击查询 ${esc(i.form)}">${esc(i.form)}</span></div>`);
+/**
+ * 词形变化网格（查词页与详情卡共用）。
+ *
+ * 结构（用户要求「标记原型和现在的时态」）：
+ *   ① 恒定第一行 **原形（现在时）** —— 变形表的锚点，后面每条都相对它读；
+ *   ② 查询词本身就是屈折形式时（coincided / grievaunces），
+ *      第二行标出**它是什么形态**（过去式/过去分词、复数…）；
+ *   ③ 数据源给的其余变形（中英 label 归一 + 词性徽标），
+ *      与 ①② 重复的 form 跳过；
+ *   ④ 数据变形一条都没有时补一句 AI 引导（原形行本身永远有内容，
+ *      所以变形栏对**每个词**都不再是空的 —— 栏目集合因此完全一致）。
+ *
+ * 非英语词没有「现在时」概念，第一行 label 退回「原形」。
+ */
+function inflectionGridHtml(entry) {
+  const inflections = (entry && entry.inflections) || [];
+  const word = String((entry && entry.word) || '');
+  const isEn = String((entry && entry.lang) || 'en').toLowerCase().startsWith('en');
+
+  // ① 原形锚点：词典说「这是 X 的过去式」→ 原形是 X；否则原形就是词本身
+  const base = detectBaseForm(entry) || word;
+  const isInflected = !!base && base.toLowerCase() !== word.toLowerCase();
+  const firstPos = ((entry && entry.senses) || [])
+    .map((s) => String(s.pos || '').trim()).find(Boolean) || '';
+  const items = [];
+  if (base) {
+    const badge = firstPos ? `<i class="infl-pos">${esc(firstPos)}</i>` : '';
+    items.push(`<div class="infl-item infl-base">
+      <span class="infl-label">${badge}${isEn ? '原形（现在时）' : '原形'}</span>
+      <span class="infl-form clickable" data-word="${esc(base)}" title="点击查询 ${esc(base)}">${esc(base)}</span>
+    </div>`);
   }
-  inner.push('</div>');
-  return inner.join('');
+
+  // ② 查询词是变形形式 → 标明它的时态/形态
+  if (isInflected) {
+    const fl = detectFormLabel(entry);
+    const badge = fl.pos ? `<i class="infl-pos">${fl.pos}</i>` : '';
+    items.push(`<div class="infl-item">
+      <span class="infl-label">${badge}${esc(fl.label)}</span>
+      <span class="infl-form clickable" data-word="${esc(word)}" title="点击查询 ${esc(word)}">${esc(word)}</span>
+    </div>`);
+  }
+
+  // ③ 数据里的其余变形（去重：与原形/本词相同的跳过）
+  const seen = new Set([base.toLowerCase(), word.toLowerCase()]);
+  let extra = 0;
+  for (const i of inflections) {
+    const form = String(i.form || '').trim();
+    if (!form || seen.has(form.toLowerCase())) continue;
+    seen.add(form.toLowerCase());
+    const m = inflMeta(i.label);
+    const badge = m.pos ? `<i class="infl-pos">${m.pos}</i>` : '';
+    items.push(`<div class="infl-item">
+      <span class="infl-label">${badge}${esc(m.label)}</span>
+      <span class="infl-form clickable" data-word="${esc(form)}" title="点击查询 ${esc(form)}">${esc(form)}</span>
+    </div>`);
+    extra += 1;
+  }
+
+  if (!items.length) {
+    return '<div class="blk-empty muted">暂无变形数据 —— 「AI 讲解」会一并生成。</div>';
+  }
+  const hint = extra
+    ? ''
+    : '<div class="infl-more muted">其余变形暂无数据 ——「AI 讲解」可生成。</div>';
+  return `<div class="infl-grid">${items.join('')}</div>${hint}`;
 }
 
 function renderEntry(entry, opts = {}) {
@@ -451,6 +552,13 @@ function renderEntry(entry, opts = {}) {
   const tags = srcs.map(s => `<span class="tag">${esc(sourceLabel(s))}</span>`);
   if (entry.lang && entry.lang !== 'en') {
     tags.unshift(`<span class="tag blue">${esc(langLabel(entry.lang))}</span>`);
+  }
+  // ★ 查询词本身是屈折形式（coincided → coincide）时，词头旁直接标出原形，
+  //   点击即查原形 ——「如果是变形的话标记原型」在词头这一层的兑现。
+  const baseTag = detectBaseForm(entry);
+  if (baseTag && baseTag.toLowerCase() !== String(entry.word || '').toLowerCase()) {
+    tags.unshift(`<span class="tag orange clickable" data-word="${esc(baseTag)}"
+      title="这是变形形式，点击查看原形">原形 ${esc(baseTag)}</span>`);
   }
   if (tags.length) head.push(`<div class="we-src">${tags.join('')}</div>`);
   head.push('</div>');
@@ -1132,7 +1240,8 @@ function voiceTipHide() {
 
 /** 全站「点一下就查这个词」的元素选择器。加新形态时改这一处。 */
 const WORD_CHIP_SEL =
-  '.rel-chip[data-word], .infl-form.clickable[data-word], .pair-word.clickable[data-word]';
+  '.rel-chip[data-word], .infl-form.clickable[data-word], .pair-word.clickable[data-word]'
+  + ', .tag.clickable[data-word]';
 
 /**
  * 给一个容器的「可点词」（相关词 / 变形 / 对应词词头）接上统一入口。
@@ -1180,7 +1289,8 @@ function bindWordChips(root, onPick) {
 
 window.WW = window.WW || {};
 Object.assign(window.WW, {
-  esc, toast, loadingHtml, renderEntry, entryBlocks, examplesBlockHtml, inflMeta, collectExamples, sourceLabel, langLabel,
+  esc, toast, loadingHtml, renderEntry, entryBlocks, examplesBlockHtml, inflMeta,
+  detectBaseForm, detectFormLabel, collectExamples, sourceLabel, langLabel,
   splitRelated, phoneticHtml, renderPairs, senseGroup, splitSensesByScript, hasHan,
   renderMarkdown, renderPlainText, fmtDay, timeAgo, masteryClass, renderBarChart, switchDetailTab, debounce,
   attachListSearch, speakBtn, isTypingTarget, icon, ICON_PATHS, bindWordChips, WORD_CHIP_SEL,

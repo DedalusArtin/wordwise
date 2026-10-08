@@ -1112,6 +1112,15 @@ code {
   font-size: 13px;
   line-height: 1.6;
 }
+/* 变形栏的原形锚点行：左侧蓝条 = 这张表的参照物（原形/现在时） */
+.infl-grid .infl-base {
+  background: var(--blue-soft);
+  box-shadow: inset 3px 0 0 var(--blue);
+}
+.infl-more { grid-column: 1 / -1; font-size: 12px; padding-top: 2px; }
+/* 词头「原形 xxx」标签可点 */
+.tag.clickable { cursor: pointer; }
+.tag.clickable:hover { filter: brightness(0.94); }
 /* 词性徽标（v. / n. / adj.）——「动名形容时态单复数变形要表明」 */
 .infl-pos {
   font-style: italic;

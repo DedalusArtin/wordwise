@@ -1846,6 +1846,24 @@ const cases = [
     });
     if (!h.includes('infl-pos')) throw new Error('变形网格没渲染词性徽标');
     if (!h.includes('过去式')) throw new Error('英文 label 没归一成中文');
+    // ★ 变形栏恒有「原形」锚点行（用户要求：标记原型和现在的时态）
+    if (!h.includes('infl-base')) throw new Error('变形栏缺原形（现在时）锚点行');
+    if (!h.includes('原形（现在时）')) throw new Error('锚点行文案缺失');
+    // ★ 屈折形式查询：coincided → 词头标原形 coincide、变形栏给时态行
+    const h2 = WW.renderEntry({
+      word: 'coincided', lang: 'en',
+      senses: [{ pos: 'v.', definition: 'v. simple past and past participle of coincide' }],
+      inflections: [],
+    });
+    if (!h2.includes('原形 coincide')) throw new Error('词头没挂可点的原形标签：' + h2.slice(0, 200));
+    if (!h2.includes('过去式/过去分词')) throw new Error('屈折查询没标明当前形态的时态');
+    if (!h2.includes('infl-base')) throw new Error('屈折查询的变形栏没锚点');
+    if (WW.detectBaseForm({ senses: [{ definition: 'v. simple past and past participle of coincide' }] }) !== 'coincide') {
+      throw new Error('detectBaseForm 没从英文释义里挖出原形');
+    }
+    if (WW.detectBaseForm({ senses: [{ definition: 'coincide 的过去式' }] }) !== 'coincide') {
+      throw new Error('detectBaseForm 中文模式失败');
+    }
     return '';
   }],
   ['双向词条：中文词条的分组标题不该写成「中文释义」这种废话', () => {
