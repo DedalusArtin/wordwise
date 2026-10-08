@@ -1866,6 +1866,17 @@ const cases = [
     }
     return '';
   }],
+  ['讲解回写：enriched 刷新必须停在用户当前标签（点了AI要看得见变化）', () => {
+    const src = fs.readFileSync(path.join(ROOT, 'src/js/lookup.js'), 'utf8');
+    // 有两个 onEnriched（详情卡回源 / 查词页刷新）——要断言的是**查词页**
+    // 这个（带 entry-tab 记录的），从后找。
+    const at = src.lastIndexOf('API.onEnriched');
+    if (at < 0) throw new Error('没找到 onEnriched 监听');
+    const body = src.slice(at, at + 1200);
+    if (!body.includes('entry-tab.active')) throw new Error('刷新前没记录当前标签');
+    if (!body.includes('data-block=')) throw new Error('刷新后没回放标签');
+    return '';
+  }],
   ['双向词条：中文词条的分组标题不该写成「中文释义」这种废话', () => {
     const html = WW.renderEntry({
       word: '乌鸦', lang: 'zh',

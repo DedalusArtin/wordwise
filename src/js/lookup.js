@@ -617,8 +617,19 @@ const Lookup = (() => {
     API.onEnriched((p) => {
       try {
         if (p && lastResult
-          && String(p.word || '').toLowerCase() === String(lastResult.word || '').toLowerCase()) {
-          query(lastResult.word, true, { fromNav: true });
+          && String(p.word || '').toLowerCase() === String(lastResult.word).toLowerCase()) {
+          // ★ 刷新前记住用户正看着哪个标签（多半就是「例句/变形」的占位
+          //   —— AI 回写完成触发的这次刷新必须**停在原地**把内容补出来，
+          //   跳回「释义」会让用户以为「点了 AI 还是没显示」）。
+          const active = document.querySelector('#lk-result .entry-tab.active')?.dataset.block || '';
+          Promise.resolve(query(lastResult.word, true, { fromNav: true }))
+            .then(() => {
+              if (!active) return;
+              const btn = document.querySelector(
+                `#lk-result .entry-tab[data-block="${active}"]`);
+              if (btn) btn.click();
+            })
+            .catch(() => { /* 刷新失败保持现状 */ });
         }
       } catch (e) { /* 忽略 */ }
     });

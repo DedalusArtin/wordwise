@@ -22,6 +22,7 @@
 use crate::llm;
 use crate::models::LlmConfig;
 use crate::state::AppState;
+use tauri::Emitter; // AppHandle::emit（tauri 2 的 trait 方法）
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -68,7 +69,15 @@ fn needs_enrich(e: &crate::models::WordEntry) -> bool {
 /// 这是整个增强引擎最重要的一条纪律。模型会出错（音标可能标错、释义
 /// 可能偏窄），而词库里的现有内容要么来自词典、要么用户自己录入过，
 /// 权威性都高于生成结果 —— 合并方向必须是「现有为准，生成垫底」。
-fn merge_entry(mut base: crate::models::WordEntry, fresh: crate::models::WordEntry) -> crate::models::WordEntry {
+///
+/// ★ 例句要**逐义项补齐**（用户报「点了AI但是没有显示」后加的）：
+///   旧逻辑只在 `base.senses` 整体为空时才拿 fresh 的 senses —— 而
+///   「有释义没例句」正是最常见的状态（词表导入的词条），于是讲解里
+///   辛辛苦苦生成的例句整组被丢掉，左栏例句永远停在占位。
+pub(crate) fn merge_entry(
+    mut base: crate::models::WordEntry,
+    fresh: crate::models::WordEntry,
+) -> crate::models::WordEntry {
     if base.phonetic.uk.trim().is_empty() {
         base.phonetic.uk = fresh.phonetic.uk;
     }
@@ -80,6 +89,24 @@ fn merge_entry(mut base: crate::models::WordEntry, fresh: crate::models::WordEnt
     }
     if base.senses.is_empty() {
         base.senses = fresh.senses;
+    } else {
+        // 逐义项补例句（只填空）：对位补，对不上位时把 fresh 里任意
+        // 一组例句挂到第一条义项 —— 总比空着强，义项顺序本就不保证一致。
+        for (i, bs) in base.senses.iter_mut().enumerate() {
+            if !bs.examples.is_empty() {
+                continue;
+            }
+            if let Some(fs) = fresh.senses.get(i).filter(|f| !f.examples.is_empty()) {
+                bs.examples = fs.examples.clone();
+            }
+        }
+        if base.senses.iter().all(|s| s.examples.is_empty()) {
+            if let Some(fs) = fresh.senses.iter().find(|f| !f.examples.is_empty()) {
+                if let Some(first) = base.senses.first_mut() {
+                    first.examples = fs.examples.clone();
+                }
+            }
+        }
     }
     if base.inflections.is_empty() {
         base.inflections = fresh.inflections;
@@ -91,6 +118,62 @@ fn merge_entry(mut base: crate::models::WordEntry, fresh: crate::models::WordEnt
         base.mnemonic = fresh.mnemonic;
     }
     base
+}
+
+/// 词条是否缺「例句或词形变化」—— 讲解自动回写的触发条件。
+///
+/// 两样都齐才跳过：AI 讲解的价值对这类词条就是例句与变形，
+/// 缺一样就值得跑一次回写。
+pub fn explain_gap(e: &crate::models::WordEntry) -> bool {
+    let has_example = e
+        .senses
+        .iter()
+        .any(|s| s.examples.iter().any(|x| !x.text.trim().is_empty()));
+    e.inflections.is_empty() || !has_example
+}
+
+/// 讲解自动回写词条（后台、只填空、完成广播）。
+///
+/// 兑现例句/变形占位文案「点下方 AI 讲解可生成例句与词形变化」：
+/// `cmd_ai_explain` 只产讲解文本存讲解档，不碰词条 —— 不接这一层的话，
+/// 左栏例句/变形永远停在占位（用户报「明明点了 AI 但是没有显示」）。
+/// 流程：讲解 markdown → `entry_from_explain`（模型整理）→ `merge_entry`
+/// （只填空）→ 回写 → 广播 `enrich://done`（查词页刷新、详情卡回源）。
+/// 任何一步失败都静默返回 false —— 这是增强能力，不该弹错误。
+pub async fn merge_explain_into_entry(
+    state: &AppState,
+    app: &tauri::AppHandle,
+    llm_cfg: &LlmConfig,
+    word: &str,
+    lang: &str,
+    markdown: &str,
+) -> bool {
+    let Ok(Some(base)) = state.db.get_word(word, lang) else {
+        return false; // 词不在库（用户没加过）→ 不凭空建词条
+    };
+    if !explain_gap(&base) {
+        return false; // 例句变形都齐了，省一次 LLM
+    }
+    let Ok(fresh) = llm::entry_from_explain(&state.http(), llm_cfg, word, lang, markdown).await
+    else {
+        return false;
+    };
+    // 一条像样的释义都没有 → 宁可不写也不污染词库（与手动并入同一条守则）
+    if fresh.senses.iter().all(|s| s.definition.trim().is_empty()) {
+        return false;
+    }
+    let merged = merge_entry(base, fresh);
+    let Ok(json) = serde_json::to_string(&merged) else {
+        return false;
+    };
+    if !matches!(state.db.update_word_entry_json(word, lang, &json), Ok(true)) {
+        return false;
+    }
+    let _ = app.emit(
+        "enrich://done",
+        serde_json::json!({ "word": word, "lang": lang }),
+    );
+    true
 }
 
 /// 增强单个词条的结果 —— 决定主循环的节奏。
@@ -308,6 +391,65 @@ mod tests {
         let merged = merge_entry(base, fresh);
         assert_eq!(merged.phonetic.uk, "/test/", "已有音标绝不能被覆盖");
         assert_eq!(merged.mnemonic, "已有记忆法", "已有记忆法绝不能被覆盖");
+    }
+
+    /// ★ 「点了 AI 但没有显示」的病灶回归：有释义没例句的词条
+    ///   （词表导入的常态）必须能接到 fresh 的例句与变形，
+    ///   且自己的释义一个字都不能被覆盖。
+    #[test]
+    fn merge_fills_examples_into_existing_senses() {
+        let mut base = crate::models::WordEntry::new("proceeding");
+        base.lang = "en".into();
+        base.senses.push(crate::models::Sense {
+            pos: "n.".into(),
+            definition: "进行；会议记录".into(),
+            examples: vec![],
+        });
+
+        let mut fresh = crate::models::WordEntry::new("proceeding");
+        fresh.lang = "en".into();
+        fresh.senses.push(crate::models::Sense {
+            pos: "n.".into(),
+            definition: "（讲解里给的别的措辞）".into(),
+            examples: vec![crate::models::Example {
+                text: "The proceedings were published.".into(),
+                translation: "会议记录已发表。".into(),
+            }],
+        });
+        fresh.inflections.push(crate::models::Inflection {
+            label: "现在分词".into(),
+            form: "proceeding".into(),
+        });
+
+        let m = merge_entry(base, fresh);
+        assert_eq!(m.senses[0].definition, "进行；会议记录", "释义绝不能被覆盖");
+        assert_eq!(m.senses[0].examples.len(), 1, "例句必须补进已有义项");
+        assert_eq!(m.inflections.len(), 1, "变形必须补上");
+    }
+
+    /// 讲解自动回写的触发闸：缺例句**或**缺变形就写；两样齐才跳过。
+    #[test]
+    fn explain_gap_gates_auto_writeback() {
+        let mut e = crate::models::WordEntry::new("x");
+        e.lang = "en".into();
+        e.senses.push(crate::models::Sense {
+            pos: "n.".into(),
+            definition: "释义".into(),
+            examples: vec![],
+        });
+        assert!(explain_gap(&e), "无例句无变形 → 要回写");
+
+        e.inflections.push(crate::models::Inflection {
+            label: "复数".into(),
+            form: "xs".into(),
+        });
+        assert!(explain_gap(&e), "有变形但没例句 → 仍要回写");
+
+        e.senses[0].examples.push(crate::models::Example {
+            text: "An example.".into(),
+            translation: "例句。".into(),
+        });
+        assert!(!explain_gap(&e), "例句变形都齐 → 跳过，省一次 LLM");
     }
 
     /// 缺失的字段必须被填上，否则引擎就是空转。

@@ -395,6 +395,27 @@ pub async fn cmd_ai_explain(
             updated_at: now,
         };
         let _ = state.db.save_explain(&row, now);
+
+        // ★ 讲解自动回写词条（P：占位文案的兑现）—— 例句/变形占位写着
+        //   「点下方 AI 讲解可生成例句与词形变化」，但讲解只存讲解档、
+        //   不碰词条，左栏永远停在占位（用户报「点了 AI 但是没有显示」）。
+        //   这里后台把讲解整理成结构化词条、**只填空**合并回写，完成后
+        //   广播 enrich://done —— 查词页刷新、详情卡回源，各自更新。
+        //   失败静默（增强能力不弹错误）；追问/词条已齐时函数内部直接跳过。
+        {
+            let st = state.inner().clone();
+            let app2 = app.clone();
+            let llm_cfg = cfg.llm.clone();
+            let w = word.clone();
+            let lg = lang.clone();
+            let md = out.text.clone();
+            tauri::async_runtime::spawn(async move {
+                let _ = crate::enrich::merge_explain_into_entry(
+                    &st, &app2, &llm_cfg, &w, &lg, &md,
+                )
+                .await;
+            });
+        }
     }
 
     // 前端据此整体替换（流式期间显示的是可能未经翻译的增量文本）
