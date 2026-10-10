@@ -518,6 +518,40 @@ pub fn cmd_tts_clear_cache(state: State<'_, Arc<AppState>>) -> Result<serde_json
     }))
 }
 
+/// 把一段 WAV（base64）交给**系统原生**播放。
+///
+/// ★ 存在的唯一理由：窗口最小化 / 收进托盘时，页面进入 hidden，WebView
+///   里的两条通路都会失灵 ——
+///     · WebAudio：隐藏页面的 AudioContext 被浏览器挂起，`start()` 不报错
+///       也不出声（上层还会误判成功）；
+///     · `<audio>`：受自动播放策略与后台节流影响，隐藏态下经常挂起。
+///   原生播放由 Rust 直接调系统的波形音频接口，与页面可见性无关，
+///   所以「窗口收起时也听得见」只能靠它兜底。
+///
+/// 只在页面确实不可见时才由前端调用（可见时仍走 WebAudio 主通路 ——
+/// 它的音质更好：按文件原生采样率建上下文，不做 16k→48k 重采样）。
+#[tauri::command(async)]
+pub fn cmd_tts_play_native(audio: String) -> Result<bool, String> {
+    let b64 = audio
+        .split(',')
+        .last()
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    use base64::Engine as _;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(b64)
+        .map_err(|e| format!("音频数据不是合法 base64：{e}"))?;
+    Ok(tts::play_wav_bytes(&bytes))
+}
+
+/// 停止原生播放（对应前端 `speakStop()`：窗口里点了停止，藏起来的那条也要停）。
+#[tauri::command(async)]
+pub fn cmd_tts_stop_native() -> Result<(), String> {
+    tts::stop_playback();
+    Ok(())
+}
+
 /// WAV → `data:audio/wav;base64,…`
 fn encode_wav(bytes: &[u8]) -> String {
     use base64::Engine as _;

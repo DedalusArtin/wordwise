@@ -481,6 +481,9 @@ const API = {
   enrichStatus: () => invoke('cmd_enrich_status'),
   enrichWord: (word, lang) => invoke('cmd_enrich_word', { word, lang }),
   audioDevices: () => invoke('cmd_audio_devices'),
+  // 原生播放：窗口最小化/收起时页面被挂起，只有这条通路还出声
+  ttsPlayNative: (audio) => invoke('cmd_tts_play_native', { audio: audio || '' }),
+  ttsStopNative: () => invoke('cmd_tts_stop_native'),
   onEnriched: (fn) => listen('enrich://done', fn),
   // 语音包下载进度（与更新、本地模型三条流各自独立）
   onTtsProgress: (fn) => listen('tts://progress', fn),
@@ -1655,6 +1658,11 @@ const Mock = (() => {
       case 'cmd_tts_speak':
         // 调试模式没有引擎 → 明确抛错，让前端走系统语音回退这条路径
         throw new Error('调试模式没有本地语音引擎');
+      case 'cmd_tts_play_native':
+        // 浏览器调试模式没有原生播放；返回 false 让前端照旧走页面里的通路
+        return false;
+      case 'cmd_tts_stop_native':
+        return {};
       default:
         if (cmd.startsWith('sidebar_') || cmd === 'main_show') return true;
         return null;

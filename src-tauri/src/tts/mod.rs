@@ -18,7 +18,7 @@
 //! 会自动跳到下一条，不需要额外分支。
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::Arc;
 
 use anyhow::{anyhow, Context, Result};
@@ -1143,6 +1143,112 @@ pub fn wav_sample_rate(bytes: &[u8]) -> u32 {
     u32::from_le_bytes([bytes[24], bytes[25], bytes[26], bytes[27]])
 }
 
+/* ---------------- 原生播放（窗口收起 / 最小化时的兜底通路） ----------------
+
+   为什么需要它：朗读平时走 WebView 里的两条管线（WebAudio 主通路 +
+   `<audio>` 兜底），二者都属于**页面**。窗口一旦最小化或收进托盘，
+   页面进入 hidden：Chromium 会挂起隐藏页面的 AudioContext、并节流定时器，
+   于是「合成成功了却一点声音都没有」—— 而且因为 `start()` 不抛错，
+   上层还会误以为播成功了，既不降级也不报错。
+
+   原生播放绕开整个 WebView：音频字节由 Rust 直接交给系统的波形音频接口
+   （Windows 的 winmm `PlaySoundW`），与窗口可见性、页面节流、自动播放
+   策略统统无关。这是「窗口收起状态下也要出声」唯一稳的一条路。
+
+   为什么不引 rodio/cpal：这里只需要「把一段 WAV 放出来」这一个动作，
+   为一个播放动作拖进一整套音频设备抽象（外加它自己的依赖树）并不划算，
+   而 winmm 是 Windows 自带、零依赖、随系统分发。 */
+
+/// 同一进程内并发播放的序号（临时文件名不撞车）。
+static PLAY_SEQ: AtomicU64 = AtomicU64::new(0);
+
+#[cfg(windows)]
+mod winmm {
+    use std::ffi::c_void;
+
+    // winmm 是 Windows 系统库，随系统分发，不需要额外 crate；
+    // PlaySoundW 是它最老牌的一个导出，Win2000 起就在，不会因版本缺席。
+    #[link(name = "winmm")]
+    extern "system" {
+        pub fn PlaySoundW(pszSound: *const u16, hmod: *mut c_void, fdwSound: u32) -> i32;
+    }
+
+    /// 同步播放：函数返回时这段音频已经放完。放在独立线程里调，
+    /// 不占命令线程，也不会让界面（哪怕它正藏着）卡住。
+    pub const SND_SYNC: u32 = 0x0000_0000;
+    /// pszSound 是文件名（而不是内存指针 / 资源 id）
+    pub const SND_FILENAME: u32 = 0x0002_0000;
+    /// 找不到 / 打不开时不播默认「叮」声 —— 那声「叮」会被用户当成程序出怪声
+    pub const SND_NODEFAULT: u32 = 0x0000_0002;
+}
+
+/// 停止当前原生播放（传 NULL 即停）。与前端 `stop()` 对齐：
+/// 用户在窗口里点了停止，藏起来的那条原生播放也得跟着停。
+pub fn stop_playback() {
+    #[cfg(windows)]
+    {
+        unsafe {
+            winmm::PlaySoundW(std::ptr::null(), std::ptr::null_mut(), 0);
+        }
+    }
+}
+
+/// 把一段 WAV 字节交给系统原生播放。返回是否真的交出去了。
+///
+/// 刻意**不等待**播放结束：命令要在几十毫秒内返回，否则隐藏状态下的
+/// IPC 会让界面（恢复显示时）出现一次明显卡顿。播放本身在独立线程里跑完。
+pub fn play_wav_bytes(bytes: &[u8]) -> bool {
+    if bytes.len() < 44 || &bytes[0..4] != b"RIFF" || &bytes[8..12] != b"WAVE" {
+        log::warn!("原生播放跳过：不是合法 WAV（{} 字节）", bytes.len());
+        return false;
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = bytes;
+        log::warn!("原生播放仅 Windows 实现");
+        return false;
+    }
+    #[cfg(windows)]
+    {
+        let seq = PLAY_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!(
+            "ww-play-{}-{}-{}.wav",
+            std::process::id(),
+            crate::timeutil::now_ts(),
+            seq
+        ));
+        if let Err(e) = std::fs::write(&path, bytes) {
+            log::warn!("原生播放写临时文件失败：{e}");
+            return false;
+        }
+        let owned = bytes.to_vec();
+        std::thread::spawn(move || {
+            // 已经写到盘上了，这里再落一次只是防御：万一上面的文件被清理，
+            // 线程里重写的这份仍能播完（路径带 pid + 序号，不会互相踩）。
+            let _ = std::fs::write(&path, &owned);
+            let wide: Vec<u16> = path
+                .to_string_lossy()
+                .encode_utf16()
+                .chain(std::iter::once(0))
+                .collect();
+            let ok = unsafe {
+                winmm::PlaySoundW(
+                    wide.as_ptr(),
+                    std::ptr::null_mut(),
+                    winmm::SND_FILENAME | winmm::SND_SYNC | winmm::SND_NODEFAULT,
+                )
+            };
+            if ok == 0 {
+                log::warn!("原生播放失败：系统没能播放 {}", path.display());
+            }
+            // 播完再删，避免 SND_SYNC 读到一半文件没了
+            let _ = std::fs::remove_file(&path);
+        });
+        log::info!("原生播放已送出（{} 字节）", bytes.len());
+        true
+    }
+}
+
 /// 下载编排的取消句柄（与 localllm 的**刻意不复用**：两边可能同时跑，
 /// 共用一个标志会让「取消语音下载」顺带把模型下载也掐掉）。
 pub type CancelFlag = Arc<AtomicBool>;
@@ -1590,6 +1696,27 @@ mod tests {
         // 垃圾输入不 panic
         assert_eq!(wav_sample_rate(b"not a wav at all"), 0);
         assert_eq!(wav_sample_rate(&[]), 0);
+    }
+
+    /// 原生播放必须**拒收**非 WAV：把一段合成失败的文本、半个文件、
+    /// 或者前端传错的字段丢给系统的波形接口，最好的结果是无声，
+    /// 最坏的是播出一串噪声。宁可返回 false 让上层换通路。
+    #[test]
+    fn play_wav_bytes_rejects_non_wav() {
+        assert!(!play_wav_bytes(&[]), "空字节必须拒收");
+        assert!(!play_wav_bytes(b"not a wav at all"), "非 WAV 必须拒收");
+        assert!(!play_wav_bytes(b"RIFF"), "太短的头也必须拒收");
+        // 合法 WAV 头 → 至少能通过校验（真的播放由系统完成，这里只验闸门）
+        let mut w = Vec::new();
+        w.extend_from_slice(b"RIFF");
+        w.extend_from_slice(&36u32.to_le_bytes());
+        w.extend_from_slice(b"WAVE");
+        w.extend_from_slice(b"fmt ");
+        w.extend_from_slice(&16u32.to_le_bytes());
+        w.extend_from_slice(&1u16.to_le_bytes());
+        w.extend_from_slice(&1u16.to_le_bytes());
+        w.extend_from_slice(&16000u32.to_le_bytes());
+        assert_eq!(wav_sample_rate(&w), 16000);
     }
 
     #[test]

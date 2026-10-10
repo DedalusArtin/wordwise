@@ -140,6 +140,8 @@ const Speak = (() => {
      自动播放限制，之后无论合成多久都能出声。 */
 
   let audioUnlocked = false;
+  /** 隐藏期间被吞掉的最后一次朗读请求（窗口回前台时补播）。 */
+  let pendingSpeak = null;
 
   /** 10ms 静音 WAV 的 data URL（现生成，44 字节头 + 160 字节数据）。 */
   function silentWavUrl() {
@@ -263,6 +265,44 @@ const Speak = (() => {
     return el.setSinkId(id).catch(() => { /* 设备可能已拔出，按默认走 */ });
   }
 
+  /* ---------------- 页面可见性 ----------------
+
+     ★ 为什么必须关心它：窗口最小化或收进托盘后，页面进入 hidden ——
+       Chromium 会**挂起隐藏页面的 AudioContext**，并节流定时器。于是
+       「合成成功却一点声音都没有」，而且因为 `src.start()` 不抛错，
+       上层还以为播成功了（既不降级也不报错）。
+
+       修改前全项目 0 处 `document.hidden` / `visibilitychange`，
+       所以隐藏态下的失败既没人发现、也没人兜底。 */
+
+  function isHidden() {
+    try {
+      if (typeof document.hidden === 'boolean') return document.hidden;
+      if (document.visibilityState) return document.visibilityState !== 'visible';
+    } catch (e) { /* 极简 DOM（冒烟）里没有这些字段 */ }
+    return false;
+  }
+
+  /**
+   * 把 AudioContext 真正拉到 running，**返回 Promise**。
+   *
+   * ★ 曾经的写法是 `if (ac.state === 'suspended') ac.resume();` ——
+   *   resume() 返回 Promise 却被丢弃，紧接着就 decodeAudioData + start()，
+   *   此时上下文多半还挂着：start() 不报错、不出声，上层 resolve(true)，
+   *   「没声音」于是被当成成功。这里 await 结果并给一个 500ms 上限，
+   *   起不来就如实返回 false，让调用方换通路。
+   */
+  function resumeCtx(ac) {
+    if (!ac) return Promise.resolve(false);
+    if (ac.state === 'running') return Promise.resolve(true);
+    if (typeof ac.resume !== 'function') return Promise.resolve(ac.state === 'running');
+    const done = Promise.resolve(ac.resume())
+      .then(() => ac.state === 'running')
+      .catch(() => false);
+    const timer = new Promise((r) => setTimeout(() => r(ac.state === 'running'), 500));
+    return Promise.race([done, timer]);
+  }
+
   function ensureAudioCtx() {
     if (!audioCtx) {
       const AC = window.AudioContext || window.webkitAudioContext;
@@ -339,39 +379,74 @@ const Speak = (() => {
     const native = wavNativeRate(bytes);
     const ac = ctxFor(native);
     if (!ac || !ac.decodeAudioData) return Promise.resolve(false);
-    return ac.decodeAudioData(bytes.slice(0)).then((audioBuf) => {
-      return new Promise((resolve) => {
-        let src;
-        try {
-          src = ac.createBufferSource();
-          src.buffer = audioBuf;
-          src.connect(ac.destination);
-        } catch (e) { resolve(false); return; }
-        webAudioSrc = src;
-        let done = false;
-        const finish = () => {
-          if (done) return;
-          done = true;
-          speaking = false;
-          if (webAudioSrc === src) webAudioSrc = null;
-        };
-        src.onended = finish;
-        try {
-          src.start();
-        } catch (e) {
-          finish();
-          resolve(false);
-          return;
-        }
-        // 真的开播了就算成功。不等 onended —— 那要等整段读完（好几秒），
-        // 「要不要回退 <audio>」这个决策没必要跟着等。
-        resolve(true);
+    // ★ 先确认上下文真的在跑，再解码开播。隐藏窗口下它多半是 suspended，
+    //   不等这一步就会出现「start() 成功、耳朵里没声」。
+    return resumeCtx(ac).then((running) => {
+      if (!running) return false;
+      return ac.decodeAudioData(bytes.slice(0)).then((audioBuf) => {
+        return new Promise((resolve) => {
+          let src;
+          try {
+            src = ac.createBufferSource();
+            src.buffer = audioBuf;
+            src.connect(ac.destination);
+          } catch (e) { resolve(false); return; }
+          webAudioSrc = src;
+          let done = false;
+          const finish = () => {
+            if (done) return;
+            done = true;
+            speaking = false;
+            if (webAudioSrc === src) webAudioSrc = null;
+          };
+          src.onended = finish;
+          try {
+            src.start();
+          } catch (e) {
+            finish();
+            resolve(false);
+            return;
+          }
+          // ★ 开播那一刻状态必须仍是 running。start() 本身不校验可见性，
+          //   隐藏页面上它照样返回成功 —— 只有看 state 才分得清
+          //   「真的在响」和「排了个队但没声」。
+          if (ac.state !== 'running') {
+            try { src.stop(); } catch (e) { /* 忽略 */ }
+            finish();
+            resolve(false);
+            return;
+          }
+          // 真的开播了就算成功。不等 onended —— 那要等整段读完（好几秒），
+          // 「要不要回退」这个决策没必要跟着等。
+          resolve(true);
         // 兜底清状态：个别环境不派发 onended，speaking 会永久为真，之后所有
         // 朗读都被当成「正在播」而点不动。按时长 + 余量收尾。
-        const tail = ((audioBuf && audioBuf.duration) || 0) * 1000 + 1500;
-        if (tail > 0) setTimeout(finish, tail);
-      });
-    }).catch(() => Promise.resolve(false));
+          // 兜底清状态：个别环境不派发 onended，speaking 会永久为真，之后所有
+          // 朗读都被当成「正在播」而点不动。按时长 + 余量收尾。
+          // （隐藏页面的 setTimeout 会被节流，所以 speak() 入口另有一道
+          //   「按活动源复位」的兜底，两条一起才不会把状态锁死。）
+          const tail = ((audioBuf && audioBuf.duration) || 0) * 1000 + 1500;
+          if (tail > 0) setTimeout(finish, tail);
+        });
+      }).catch(() => false);
+    }).catch(() => false);
+  }
+
+  /**
+   * 交给**系统原生**播放（Windows：Rust 侧 winmm `PlaySoundW`）。
+   *
+   * 窗口最小化 / 收进托盘时页面进入 hidden，WebView 里的两条管线都会失灵，
+   * 而原生播放由后端直接把字节送给系统音频接口，与页面可见性、自动播放
+   * 策略、后台节流统统无关 —— 是隐藏态下唯一稳的一条路。
+   *
+   * @returns {Promise<boolean>} true = 已交出去
+   */
+  function playViaNative(dataUri) {
+    const API = (window.WordWiseAPI && window.WordWiseAPI.API) || null;
+    if (!dataUri || !API || typeof API.ttsPlayNative !== 'function') {
+      return Promise.resolve(false);
+    }
+    return API.ttsPlayNative(dataUri).then((ok) => !!ok).catch(() => false);
   }
 
 
@@ -412,10 +487,42 @@ const Speak = (() => {
     } catch (e) { /* 日志失败不能拖累发声 */ }
   }
 
-  /** 朗读成功 → 清除错误态。 */
+  /** 朗读成功 → 清除错误态（顺带清掉「隐藏期间待补播」的那一条）。 */
   function healthOk() {
+    pendingSpeak = null;
     if (ttsHealth.state !== 'ok') notifyHealth('ok', '');
   }
+
+  /**
+   * 窗口可见性变化。
+   *
+   * 回到前台做两件事：
+   *   ① 把所有缓存的 AudioContext 拉回 running —— 隐藏期间它们被浏览器
+   *      挂起过，不恢复的话回前台第一次朗读照样没声（要等第二次 resume）；
+   *   ② 补播隐藏期间被吞掉的那一次（超过 30 秒就算了 —— 隔半天突然响
+   *      一声比不响更吓人）。
+   */
+  function onVisibilityChange() {
+    if (isHidden()) return;
+    try {
+      ctxByRate.forEach((ac) => {
+        if (ac && ac.state !== 'running' && typeof ac.resume === 'function') {
+          Promise.resolve(ac.resume()).catch(() => {});
+        }
+      });
+      if (audioCtx && audioCtx.state !== 'running' && typeof audioCtx.resume === 'function') {
+        Promise.resolve(audioCtx.resume()).catch(() => {});
+      }
+    } catch (e) { /* 恢复失败不影响主流程 */ }
+    if (pendingSpeak && Date.now() - pendingSpeak.at < 30000) {
+      const p = pendingSpeak;
+      pendingSpeak = null;
+      setTimeout(() => speak(p.text, Object.assign({}, p.opts, { force: true })), 120);
+    }
+  }
+  try {
+    document.addEventListener('visibilitychange', onVisibilityChange);
+  } catch (e) { /* 极简 DOM 没有 document */ }
 
   /* ---------------- 朗读引擎策略 ---------------- */
 
@@ -600,17 +707,34 @@ const Speak = (() => {
         //   <audio> 元素做不到这一点：它只能按设备采样率（本机 48k）重采样，
         //   而 16k→48k 的重采样实测过冲到 1.4589（827 个样本被削）—— 就是
         //   用户说的「喷麦很炸」。所以顺序倒过来：<audio> 降级成兜底。
-        return playViaWebAudio(res.audio, anchor).then((ok) => {
+        // WebAudio 主通路 → <audio> 兜底 → 原生播放最后兜一道。
+        const viaWebView = () => playViaWebAudio(res.audio, anchor).then((ok) => {
           if (ok) { healthOk(); return true; }
           // WebAudio 这条路走不通（极少数环境的 WebView2）才回到元素播放
           return playViaElement(res.audio, key).then((ok2) => {
             if (ok2) { healthOk(); return true; }
-            reportPlayError(
-              { name: 'NotSupportedError', message: 'WebAudio 与 <audio> 两条通路都没能出声' },
-              anchor);
-            return false;
+            // ★ 最后再试原生：窗口刚被藏起来的那一瞬间也会落到这里 ——
+            //   AudioContext 挂起、元素被自动播放策略挡住，只有原生还能出声。
+            return playViaNative(res.audio).then((ok3) => {
+              if (ok3) { healthOk(); return true; }
+              reportPlayError(
+                { name: 'NotSupportedError', message: 'WebAudio、<audio> 与原生播放三条通路都没能出声' },
+                anchor);
+              return false;
+            });
           });
         });
+
+        // ★ 窗口不可见（最小化 / 收进托盘）时，页面里的两条管线大概率失灵：
+        //   AudioContext 被挂起、<audio> 受限。这时**先**走原生，
+        //   走不通再退回页面里的通路（万一只是「藏起来的瞬间」，页面还活着）。
+        if (isHidden()) {
+          return playViaNative(res.audio).then((ok) => {
+            if (ok) { healthOk(); return true; }
+            return viaWebView();
+          });
+        }
+        return viaWebView();
       })
       .catch((err) => {
         // 后端合成失败：原因要留档（回退系统语音若也发不出声，
@@ -673,12 +797,21 @@ const Speak = (() => {
     const key = opts.key || (text + '|' + accent + '|' + lang);
     const anchor = opts.anchor || null;
 
+    // ★ 状态自愈：隐藏页面的 setTimeout 会被 Chromium 节流（钳到 1 秒，
+    //   长时间隐藏后甚至 1 分钟一次），收尾定时器可能迟迟不到，speaking
+    //   就一直为真 —— 之后每次点朗读都被当成「正在播」而走停止分支，
+    //   表现为「点了没声音」。这里按「有没有真的活动源」复位，不依赖定时器。
+    if (speaking && !webAudioSrc && (!audioEl || audioEl.paused)) speaking = false;
+
     // 重复点击同一段 → 停止
     if (currentKey === key && (speaking || (audioEl && !audioEl.paused))) {
       stop();
       currentKey = '';
       return;
     }
+    // 隐藏期间发起的朗读：先记下来，等窗口回到前台补一次（见 visibilitychange）。
+    // 不记的话，最小化后点发音就等于石沉大海。
+    if (isHidden()) pendingSpeak = { text, opts, at: Date.now() };
     // ★ 媒体解锁必须在**这个同步栈**里做（此刻还握着用户手势）：
     //   Piper 冷启动合成要 3~10 秒，等到能 play() 时手势早过期了，
     //   Chromium 会以 NotAllowedError 拒绝 —— 「合成成功却没声音」的主因。
@@ -856,6 +989,12 @@ const Speak = (() => {
     } catch (e) { /* 忽略 */ }
     try { if (webAudioSrc) { webAudioSrc.stop(); webAudioSrc = null; } } catch (e) { /* 忽略 */ }
     try { window.speechSynthesis && window.speechSynthesis.cancel(); } catch (e) { /* 忽略 */ }
+    // 窗口藏着时可能是原生通路在响 —— 点停止也得让它停
+    try {
+      const API = (window.WordWiseAPI && window.WordWiseAPI.API) || null;
+      if (API && typeof API.ttsStopNative === 'function') Promise.resolve(API.ttsStopNative()).catch(() => {});
+    } catch (e) { /* 忽略 */ }
+    pendingSpeak = null;
     try { if (window.WW && window.WW.voiceTipHide) window.WW.voiceTipHide(); } catch (e) { /* 忽略 */ }
   }
 
@@ -969,6 +1108,8 @@ const Speak = (() => {
     playUrl, playTts, voices, availableLang,
     playViaWebAudio,   // 导出：冒烟测试直接断言 WebAudio 播放
     playViaElement,    // 导出：冒烟测试直接断言 <audio> 兜底
+    playViaNative,     // 导出：冒烟测试直接断言「隐藏态走原生通路」
+    resumeCtx, isHidden,   // 导出：窗口收起时的播放守卫（冒烟断言用）
     outputPref, setOutputPref,   // 导出：朗读输出设备偏好（设置页读写）
     activeCtxRate,               // 导出：当前 WebAudio 上下文采样率（诊断用）
     voicePref, setVoicePref, ratePref, setRatePref, resetPrefs,

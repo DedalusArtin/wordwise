@@ -3536,6 +3536,77 @@ const cases = [
 
   ['Plan.load()', () => sandbox.Plan.load()],
 
+  /* ---------------- 窗口收起 / 最小化时也要出声 ---------------- */
+
+  ['朗读：AudioContext 先 resume 再 start（不丢弃 resume 的 Promise）', () => {
+    const sp = fs.readFileSync(path.join(ROOT, 'src/js/speak.js'), 'utf8');
+    // ★ 历史写法：`if (ac.state === 'suspended') ac.resume();` —— 不等结果就
+    //   decodeAudioData + start()。上下文还挂着时 start() 不报错也不出声，
+    //   上层却 resolve(true)，于是「没声音」被当成成功，既不降级也不报错。
+    if (/if \(ac\.state === 'suspended'\) ac\.resume\(\);/.test(sp)) {
+      // ensureAudioCtx 里保留这句无妨（手势内预热），但主通路不能靠它
+      const i = sp.indexOf('function playViaWebAudio');
+      const body = sp.slice(i, i + 1500);
+      if (/ac\.resume\(\);/.test(body) && !/resumeCtx\(ac\)/.test(body)) {
+        throw new Error('主通路仍在丢弃 resume() 的 Promise');
+      }
+    }
+    if (!/function resumeCtx\(/.test(sp)) throw new Error('缺少 resumeCtx');
+    if (!/Promise\.resolve\(ac\.resume\(\)\)/.test(sp)) throw new Error('resume 没有 await');
+    // 开播后必须复核状态：start() 在隐藏页面上照样「成功」
+    if (!/if \(ac\.state !== 'running'\)/.test(sp)) {
+      throw new Error('开播后没有复核 AudioContext 状态，隐藏窗口下会误判成功');
+    }
+    return 'resume 已 await + 开播后复核状态';
+  }],
+
+  ['朗读：窗口不可见时先走原生通路，三条通路依次兜底', () => {
+    const sp = fs.readFileSync(path.join(ROOT, 'src/js/speak.js'), 'utf8');
+    const apijs = fs.readFileSync(path.join(ROOT, 'src/js/api.js'), 'utf8');
+    const win = fs.readFileSync(path.join(ROOT, 'src-tauri/src/windows.rs'), 'utf8');
+    const tt = fs.readFileSync(path.join(ROOT, 'src-tauri/src/tts/mod.rs'), 'utf8');
+    const cmds = fs.readFileSync(path.join(ROOT, 'src-tauri/src/commands/tts.rs'), 'utf8');
+
+    // 前端：隐藏判定 + 原生优先
+    if (!/function isHidden\(\)/.test(sp)) throw new Error('没有页面可见性判定');
+    if (!/function playViaNative\(/.test(sp)) throw new Error('缺少原生播放通路');
+    const i = sp.indexOf('function playLocalTts');
+    const body = sp.slice(i, i + 2600);
+    if (!/if \(isHidden\(\)\)[\s\S]{0,200}playViaNative/.test(body)) {
+      throw new Error('隐藏态没有优先走原生播放');
+    }
+    // 三条通路都要在降级链上
+    for (const fn of ['playViaWebAudio', 'playViaElement', 'playViaNative']) {
+      if (!body.includes(fn)) throw new Error('降级链缺少 ' + fn);
+    }
+    // 后端：命令注册 + 原生实现
+    if (!/cmd_tts_play_native/.test(win)) throw new Error('原生播放命令未注册');
+    if (!/pub fn play_wav_bytes/.test(tt)) throw new Error('tts 缺少原生播放实现');
+    if (!/PlaySoundW/.test(tt)) throw new Error('没有调用系统波形音频接口');
+    if (!/ttsPlayNative/.test(apijs)) throw new Error('前端 API 没有接上原生播放');
+    // 停止也要能停掉藏起来的那条原生播放
+    if (!/ttsStopNative/.test(apijs) || !/cmd_tts_stop_native/.test(cmds)) {
+      throw new Error('缺少原生播放的停止入口');
+    }
+    return '原生优先 + 三通路兜底 + 可停止';
+  }],
+
+  ['朗读：恢复可见要拉回上下文并补播，后台节流不锁死 speaking', () => {
+    const sp = fs.readFileSync(path.join(ROOT, 'src/js/speak.js'), 'utf8');
+    // 回到前台：resume 所有缓存上下文
+    if (!/visibilitychange/.test(sp)) throw new Error('没有监听可见性变化');
+    const i = sp.indexOf('function onVisibilityChange');
+    if (i < 0) throw new Error('缺少 onVisibilityChange');
+    const body = sp.slice(i, i + 900);
+    if (!/ac\.resume\(\)/.test(body)) throw new Error('回前台没有恢复 AudioContext');
+    if (!/pendingSpeak/.test(body)) throw new Error('没有补播隐藏期间被吞掉的那次朗读');
+    // 隐藏页面的 setTimeout 被节流 → speaking 可能永远为真 → 之后点了没声音
+    if (!/if \(speaking && !webAudioSrc && \(!audioEl \|\| audioEl\.paused\)\) speaking = false;/.test(sp)) {
+      throw new Error('缺少 speaking 状态自愈（后台节流会把状态锁死）');
+    }
+    return '回前台恢复 + 补播 + 状态自愈';
+  }],
+
   /* ---------------- 语种闸门（背词表只留目标语种） ---------------- */
 
   ['语种：唯一一份书写系统判定，假名/汉字词进不了英语词表', () => {
