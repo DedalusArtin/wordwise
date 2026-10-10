@@ -68,19 +68,44 @@ pub fn format_ts(ts: i64) -> String {
     }
 }
 
-/// 把秒数差异转成「刚刚 / 3 小时后 / 2 天后」这样的文案。
+/// 界面语言是不是英文。只认 `en`（含 `en-US` 这类变体）。
+///
+/// 判定刻意收在这里、只写一份：文案语言在界面里散落成多处 `if` 之后，
+/// 「界面选了英文、某个角落还在说中文」这种不一致就再也查不干净了。
+pub fn ui_lang_is_en(ui_lang: &str) -> bool {
+    let l = ui_lang.trim().to_ascii_lowercase();
+    l == "en" || l.starts_with("en-") || l.starts_with("en_")
+}
+
+/// 把秒数差异转成「3 小时后 / 2 天后」这样的文案（简体中文）。
 pub fn humanize_due(due_at: i64, now: i64) -> String {
+    humanize_due_lang(due_at, now, "zh-CN")
+}
+
+/// 同上，但按**界面语言**输出。
+///
+/// 为什么非要在后端做：这句文案是后端拼好直接塞进 JSON 的
+/// （`cmd_word_state.due_text`），前端拿到的已经是成品字符串，
+/// 而它又被嵌在前端拼的句子里（「下次复习 3 天后」）——
+/// 前端那层按「整段文本查字典」的翻译机制**够不着**它的内部。
+/// 界面语言切成英文后，整句英文里夹一句「3 天后」，
+/// 就是用户看到的「语言一会儿中文一会儿英文」。
+pub fn humanize_due_lang(due_at: i64, now: i64, ui_lang: &str) -> String {
+    let en = ui_lang_is_en(ui_lang);
     let diff = due_at - now;
     if diff <= 0 {
-        return "现在".to_string();
+        return if en { "now".into() } else { "现在".into() };
     }
     let mins = diff / 60;
     if mins < 60 {
-        format!("{} 分钟后", mins.max(1))
+        let n = mins.max(1);
+        if en { format!("in {n} min") } else { format!("{n} 分钟后") }
     } else if mins < 60 * 24 {
-        format!("{} 小时后", mins / 60)
+        let n = mins / 60;
+        if en { format!("in {n} h") } else { format!("{n} 小时后") }
     } else {
-        format!("{} 天后", mins / (60 * 24))
+        let n = mins / (60 * 24);
+        if en { format!("in {n} d") } else { format!("{n} 天后") }
     }
 }
 
@@ -302,6 +327,49 @@ mod tests {
         let r2 = schedule(&mut st, Grade::Good, &c, now + 86400);
         // 第二次间隔应大于第一次（沿周期表前进）
         assert!(r2.interval_days > r1.interval_days);
+    }
+
+    /* -------- 界面语言：下次复习文案不得在英文界面里漏出中文 -------- */
+
+    #[test]
+    fn humanize_due_follows_ui_lang() {
+        let now = 1_700_000_000;
+        // 中文（默认）
+        assert_eq!(humanize_due(now - 1, now), "现在");
+        assert_eq!(humanize_due(now + 5 * 60, now), "5 分钟后");
+        assert_eq!(humanize_due(now + 3 * 3600, now), "3 小时后");
+        assert_eq!(humanize_due(now + 2 * 86400, now), "2 天后");
+        // 英文：同一条时间轴，必须一个汉字都不剩
+        let en = |d: i64| humanize_due_lang(d, now, "en");
+        assert_eq!(en(now - 1), "now");
+        assert_eq!(en(now + 5 * 60), "in 5 min");
+        assert_eq!(en(now + 3 * 3600), "in 3 h");
+        assert_eq!(en(now + 2 * 86400), "in 2 d");
+        for d in [now - 1, now + 60, now + 3600, now + 86400 * 3] {
+            let s = en(d);
+            assert!(
+                !s.chars().any(|c| ('\u{4e00}'..='\u{9fff}').contains(&c)),
+                "英文界面的文案里混进了汉字：{s}"
+            );
+        }
+        // 边角：不足 1 分钟按 1 分钟算，别出现「0 分钟后」
+        assert_eq!(humanize_due_lang(now + 10, now, "en"), "in 1 min");
+        assert_eq!(humanize_due_lang(now + 10, now, "en-US"), "in 1 min");
+        assert_eq!(humanize_due_lang(now + 10, now, "zh-CN"), "1 分钟后");
+    }
+
+    #[test]
+    fn ui_lang_is_en_only_accepts_en() {
+        assert!(ui_lang_is_en("en"));
+        assert!(ui_lang_is_en("EN"));
+        assert!(ui_lang_is_en(" en-US "));
+        // ★ 关键反例：`zh-CN` 里也含 "en" 吗？不含，但 `en` 的判定若写成
+        //   `contains("en")` 就会把 `zh-CN`… 之外的奇怪值也放进来。
+        //   这里钉死「只有 en 开头才算」。
+        assert!(!ui_lang_is_en("zh-CN"));
+        assert!(!ui_lang_is_en(""));
+        assert!(!ui_lang_is_en("ja"));
+        assert!(!ui_lang_is_en("zh-en"));
     }
 
     #[test]

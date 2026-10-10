@@ -1736,10 +1736,12 @@ fn build_card(
 }
 
 /// 词干回退策略（整词没匹配上时用什么再试一次）。
+///
+/// 「不回退」不是一种策略 —— 它就是 `find` 返回 `None` 之后不再试第二遍，
+/// 由 `_ => return None` 这条兜底覆盖，所以这里没有也不需要一个 `Exact` 变体
+/// （曾经有过一个同名变体，从来没有被构造过，只留了个 dead_code 警告）。
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) enum MaskStem {
-    /// 不做词干回退
-    Exact,
     /// 用词的前 3/4（字符数，至少 2）—— 拼写/选择题的词形变化覆盖
     Prefix3_4,
     /// 去掉词的最后一个字符 —— 例句挖空的复数/时态覆盖
@@ -1797,9 +1799,9 @@ pub(crate) fn mask_word_chars(
         .map(|(a, b)| (idx[a], idx[b - 1] + 1))
         .or_else(|| {
             let n = match stem {
-                MaskStem::Exact => return None,
                 MaskStem::Prefix3_4 if wl.len() > 4 => std::cmp::max(2, wl.len() * 3 / 4),
                 MaskStem::DropLast if wl.len() > 4 => wl.len() - 1,
+                // 词太短、或该策略对本词不适用 → 不做回退
                 _ => return None,
             };
             if n == 0 || n >= wl.len() {
@@ -2102,22 +2104,29 @@ pub fn cmd_word_state(
     word: String,
     lang: Option<String>,
 ) -> Result<Option<WordStateView>, String> {
-    let lang = lang.unwrap_or_else(|| state.cfg().target_lang);
+    let cfg = state.cfg();
+    let lang = lang.unwrap_or_else(|| cfg.target_lang.clone());
     let now = timeutil::now_ts();
     let st = state.db.get_state(&word, &lang).map_err(err)?;
     Ok(st.map(|s| WordStateView {
         retention: retention(&s, now),
-        interval_text: humanize_interval(s.interval_days),
-        due_text: srs::humanize_due(s.due_at, now),
+        interval_text: humanize_interval(s.interval_days, &cfg.ui_lang),
+        // ★ 这句要跟着**界面语言**走：它被前端直接拼进「下次复习 …」的句子里，
+        //   前端那层整段查字典的翻译够不到字符串内部（详见 humanize_due_lang）。
+        due_text: srs::humanize_due_lang(s.due_at, now, &cfg.ui_lang),
         state: s,
     }))
 }
 
-fn humanize_interval(days: f64) -> String {
+fn humanize_interval(days: f64, ui_lang: &str) -> String {
+    let en = srs::ui_lang_is_en(ui_lang);
     if days < 1.0 {
-        format!("{:.0} 小时", (days * 24.0).max(1.0))
+        let n = (days * 24.0).max(1.0);
+        if en { format!("{n:.0} h") } else { format!("{n:.0} 小时") }
+    } else if en {
+        format!("{days:.0} d")
     } else {
-        format!("{:.0} 天", days)
+        format!("{days:.0} 天")
     }
 }
 
@@ -2831,6 +2840,29 @@ mod tests {
             queue: words.iter().map(|w| WordEntry::new(*w)).collect(),
             ..Default::default()
         }
+    }
+
+    /* ---------------- 界面语言：后端拼好的文案不得漏中文 ---------------- */
+
+    #[test]
+    fn word_state_texts_follow_ui_lang() {
+        // 间隔文案：中文界面给「小时 / 天」，英文界面一个汉字都不能有
+        assert_eq!(humanize_interval(0.5, "zh-CN"), "12 小时");
+        assert_eq!(humanize_interval(3.0, "zh-CN"), "3 天");
+        assert_eq!(humanize_interval(0.5, "en"), "12 h");
+        assert_eq!(humanize_interval(3.0, "en"), "3 d");
+        for lang in ["en", "en-US"] {
+            for d in [0.2, 0.5, 1.0, 7.0] {
+                let s = humanize_interval(d, lang);
+                assert!(
+                    !s.chars().any(|c| ('\u{4e00}'..='\u{9fff}').contains(&c)),
+                    "英文界面的间隔文案漏了中文：{s}"
+                );
+            }
+        }
+        // 上限：不足 1 小时按 1 小时算，别出现「0 小时」
+        assert_eq!(humanize_interval(0.0, "zh-CN"), "1 小时");
+        assert_eq!(humanize_interval(0.0, "en"), "1 h");
     }
 
     /* ---------------- P2：挖空必须按字符切，多字节词不得 panic ---------------- */

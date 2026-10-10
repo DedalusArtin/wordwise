@@ -62,7 +62,7 @@ $DefaultIscc      = "G:\Programming\07-utils\Inno Setup 7\ISCC.exe"
 $SupportedIsccMajors = @(6, 7)
 
 # 版本号统一从 tauri.conf.json 读，避免与安装包、界面显示的版本脱节
-$AppVersion = "0.49.2"
+$AppVersion = "0.49.3"
 try {
     $cfgPath = Join-Path $Root "src-tauri\tauri.conf.json"
     $cfg = Get-Content $cfgPath -Raw -ErrorAction Stop | ConvertFrom-Json
@@ -244,6 +244,22 @@ if ($nodeExe -and (Test-Path $smoke)) {
     Write-Ok "前端渲染冒烟测试通过"
 } else {
     Write-Warn2 "未找到 node 或 scripts\smoke_frontend.cjs，已跳过前端冒烟测试"
+}
+
+# 界面语言的渲染检查：字典**死键** + 渲染后文本能不能真翻出来。
+# 为什么单列一个闸门：这类错全是"安静"的 —— 死键照样被算作"已翻译"、
+# 漏翻只是继续显示中文，冒烟测试（只验渲染不炸）永远发现不了。
+$i18nRender = Join-Path $Root "scripts\check_i18n_render.cjs"
+if ($nodeExe -and (Test-Path $i18nRender)) {
+    Write-Dim "界面语言渲染检查（$nodeExe）"
+    & $nodeExe $i18nRender
+    if ($LASTEXITCODE -ne 0) {
+        Write-Err2 "界面语言检查未通过，已中止构建（漏翻/死键不会报错，只会在英文界面里露出来）"
+        exit 1
+    }
+    Write-Ok "界面语言渲染检查通过"
+} else {
+    Write-Warn2 "未找到 scripts\check_i18n_render.cjs，已跳过界面语言检查"
 }
 
 # ============================================================

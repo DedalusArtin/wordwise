@@ -179,6 +179,9 @@
     // ---- 语言名（下拉里的选项）----
     '英语': 'English', '中文': 'Chinese', '日语': 'Japanese', '韩语': 'Korean',
     '法语': 'French', '德语': 'German', '俄语': 'Russian', '西班牙语': 'Spanish',
+    // 语种统计里会列出**词库里真实存在**的语种，不止上面那几个
+    '意大利语': 'Italian', '葡萄牙语': 'Portuguese', '阿拉伯语': 'Arabic',
+    '泰语': 'Thai', '印地语': 'Hindi', '希伯来语': 'Hebrew', '希腊语': 'Greek',
 
     // ---- 词库 / 学习 / 统计 ----
     '单词列表': 'Word list', '多级词库': 'Nested book', '新建词库': 'New book',
@@ -316,6 +319,140 @@
     '连对 {n} 次': '{n} correct in a row',
     '攻坚中：再连对 {n} 次出队': '{n} more correct in a row to clear it',
     '攻坚成功，{n} 已出队 —— 连对 {n} 次': 'Got it — {n} cleared after {n} correct in a row',
+
+    /* ============================================================
+       以下三块是 v0.49 新增界面的文案。
+
+       为什么单列而不是随手混进上面的分组：这几处的**键是从渲染结果反推出来的**，
+       不是从源码字面量抄的 —— 源码里是 `<span>共 <b>${n}</b> 个词 / …</span>`
+       这种被标签拆散的模板，真正被翻译的是**每个文本节点**。
+       抄源码字面量会写出一条永远命不中的死键（覆盖率还照算），
+       所以这里只写「界面上真正会出现的那一小段」。
+       ============================================================ */
+
+    // ---- 迷你悬浮窗（v0.49.0 新增的独立窗口）----
+    '背词': 'Review',
+    '正在取词…': 'Loading a word…',
+    '认识': 'Know',
+    '不认识': 'Don’t know',
+    '词库里还没有可背的词。先在主窗口导入或下载一本词库。':
+      'Nothing to review yet. Import or download a wordbook in the main window first.',
+    '取词失败：{n}': 'Failed to load a word: {n}',
+    '这个词还没有释义 —— 点右上角「补全」让 AI 生成完整词条。':
+      'No definition yet — click “Complete” in the top-right to have the AI generate the full entry.',
+    '…共 {n} 个义项': '…{n} senses in total',
+    '朗读例句': 'Read the example aloud',
+    '词组 / 变形': 'Phrases / Inflections',
+    '还没背过': 'Not reviewed yet',
+    '熟练度 {n}% · 正确率 {n}% · 下次复习 {n}': 'Mastery {n}% · Accuracy {n}% · Next review {n}',
+    '今日 {n} · 待复习 {n}': 'Today {n} · Due {n}',
+    '认识 · 下次复习 {n}': 'Know · Next review {n}',
+    '不认识 · 下次复习 {n}': 'Don’t know · Next review {n}',
+    // 兜底文案「很快」会落进上面两条 {n} 的捕获组里原样带出来，
+    // 而捕获的内容不会被二次翻译 —— 所以这两种组合要单独建键。
+    '认识 · 下次复习 很快': 'Know · next review soon',
+    '不认识 · 下次复习 很快': 'Don’t know · next review soon',
+    '很快': 'soon',
+    '「{n}」已掌握': '“{n}” mastered',
+    '提交失败': 'Submit failed',
+    '补全': 'Complete',
+    '补全中…': 'Completing…',
+    '补全失败': 'Completion failed',
+    '补全这个词条（例句 / 变形 / 相关词）':
+      'Complete this entry (examples / inflections / related words)',
+    '没补出新内容（可先在设置页部署本地大模型）':
+      'Nothing new to add (you can set up the local LLM on the Settings page first)',
+    '已补全「{n}」的词条': 'Completed the entry for “{n}”',
+    '窗口置顶': 'Keep the window on top',
+    '已置顶': 'Pinned',
+    '已取消置顶': 'Unpinned',
+    '切换尺寸': 'Switch size',
+    '尺寸 {n}×{n}': 'Size {n}×{n}',
+    '切换透明度': 'Switch opacity',
+    '不透明度 {n}%': 'Opacity {n}%',
+
+    // ---- 详情卡的掌握度行（和迷你窗同一句话的两个渲染点）----
+    '尚未学习': 'Not studied yet',
+    '熟练度 {n}%': 'Mastery {n}%',
+    '· 正确率': '· Accuracy',
+    '% · 下次复习 {n}': '% · Next review {n}',
+
+    // ---- 词图：介绍面板与状态条（v0.49.0 新增）----
+    '同义': 'Synonym',
+    '反义': 'Antonym',
+    '派生': 'Derived',
+    '相关': 'Related',
+    '上义': 'Hypernym',
+    '下义': 'Hyponym',
+    '构建中…': 'Building…',
+    '已清空图谱关系': 'Graph relations cleared',
+    'AI 发散中…': 'AI exploring…',
+    '先在图上点一个词，或搜索一个词': 'Click a word on the graph, or search for one',
+    '没有匹配的词': 'No matching words',
+    '以它为中心展开': 'Expand around it',
+    '回到全局': 'Back to global',
+    '全局视图 · 点任意词以它为中心展开': 'Global view · click any word to expand around it',
+    '还没有关系数据。点「构建图谱」从词库抽取关系。':
+      'No relation data yet. Click “Build the graph” to extract relations from your wordbook.',
+    '暂无释义（这个词只有关系数据，没有完整词条）。':
+      'No definition yet (this word only has relation data, not a full entry).',
+    '连接 {n} 条': '{n} links',
+    '· 熟练度 {n}%': '· Mastery {n}%',
+    '连接 {n} 条 · 词库已收录': '{n} links · in your dictionary',
+    '连接 {n} 条 · 熟练度 {n}% · 词库已收录': '{n} links · Mastery {n}% · in your dictionary',
+    '连接 {n} 条 · 词库外（模型发散）': '{n} links · outside the wordbook (model exploration)',
+    '连接 {n} 条 · 单击看介绍 · 双击发散': '{n} links · click for details · double-click to explore',
+    '已从词库抽取 {n} 条新关系': 'Extracted {n} new relations from the wordbook',
+    // ★ 多占位符的键，**译文里的 {n} 顺序必须与键里一致**（回填是按捕获组
+    //   顺序来的，不是按语义）。键是「为「词」新增 N 条」，英文就只能
+    //   把词放在前面 —— 写成 "Added {n} relations for “{n}”" 会输出
+    //   `Added apple relations for “8”`。
+    '为「{n}」新增 {n} 条关系': '“{n}” gained {n} new relations',
+    '已隐藏 {n} 类': '{n} types hidden',
+    '（可在设置页「本地大模型」一键部署）':
+      '(one-click setup under “Local model” on the Settings page)',
+    '搜索失败：{n}': 'Search failed: {n}',
+    '读取图谱失败：{n}': 'Failed to load the graph: {n}',
+    '（当前显示 {n} 条）': '({n} shown)',
+    // ★ 下面四条是**被 <b> 拆散的文本节点**：`共 <b>128</b> 个词 / <b>45</b> 条关系`。
+    //   整段 HTML 从来不会成为文本节点，只能按碎片建键（已确认全项目没有
+    //   其它地方出现独立的「共」「以」「条关系」节点，不会误伤）。
+    '共': 'Total',
+    '个词 /': 'words /',
+    '条关系': 'relations',
+    '以': 'Centered on',
+    '为中心': '',
+
+    // ---- 设置页「词条质量」面板（v0.49.0 新增）----
+    '词条质量': 'Entry quality',
+    '语种统计': 'Language stats',
+    '清理语种错标': 'Fix mislabeled languages',
+    '把语种标错的存量词条搬回它真正该在的语言下（不删词）':
+      'Move entries labeled with the wrong language back under the right one (nothing is deleted)',
+    'AI 自检一批': 'Audit a batch with AI',
+    '停止': 'Stop',
+    '自检条数': 'Entries to audit',
+    '语种闸门': 'Language gate',
+    '：词条入库前按书写系统判定 —— 含假名判日语、含谚文判韩语、纯汉字判中文，只有拉丁字母的词才归入英语词表。第三方词表、粘贴导入、手动加词全部过这道闸门，混进来的日语会被拦下并计进报告。':
+      ': every entry is classified by writing system before it is saved — kana means Japanese, hangul means Korean, pure Han means Chinese, and only Latin-script words go into an English wordbook. Third-party wordlists, pasted imports and manual additions all pass this gate; anything that slips in is blocked and counted in the report.',
+    'AI 自检': 'AI audit',
+    '：每个词条纳入背词表时由本地大模型校一遍拼写、词性、中文释义与例句；有问题就修正并':
+      ': when an entry joins the review list, the local LLM checks its spelling, part of speech, Chinese definition and examples; problems are fixed and then',
+    '复检一轮': 're-audited once',
+    '，仍不合格才标记剔除（不真删，只是不再进出题队列）。每次校验都留日志，可在下面查。':
+      ', and only then marked as rejected (nothing is deleted — it just stops appearing in the quiz queue). Every check is logged below.',
+    '通过': 'Passed',
+    '已修正': 'Fixed',
+    '已剔除': 'Rejected',
+    '自检中…': 'Auditing…',
+    '自检失败': 'Audit failed',
+    '还没有自检记录。': 'No audit records yet.',
+    '已请求停止，当前这个词跑完就停': 'Stop requested — it will stop after the current word',
+    '词库还是空的。': 'The wordbook is still empty.',
+    '清理中…': 'Cleaning…',
+    '学习数据': 'Study data',
+    '读取失败：{n}': 'Failed to read: {n}',
+    '读取自检日志失败：{n}': 'Failed to read the audit log: {n}',
   };
 
   /** `EN` 里所有含 `{n}` 的键，抽出来是为了跳过无关的精确键、少跑几次正则。 */
@@ -403,20 +540,35 @@
   }
 
   /**
-   * 带占位符的翻译：把动态数字从原文里抠出来、再塞回译文的同一位置。
+   * 带占位符的翻译：把动态内容从原文里抠出来、再塞回译文的同一位置。
    *
    * 例如键 `'已收录 {n} 个单词'`，收到 `'已收录 128 个单词'` →
    * 取出 `128` → 产出 `'128 words saved'`。
    *
-   * 只在文本**含数字**时才尝试：绝大多数文本没有插值，没必要每个节点都把
-   * 全部模板键跑一遍。
+   * ★ 候选键按**首字符**分桶，而不是「文本里有没有数字」。
+   *
+   *   旧实现用 `/\d/.test(text)` 当「这条文本可能有插值」的近似判据，
+   *   两个方向都会错：
+   *     - 该翻的漏翻：`取词失败：网络不可用`、`「carpet」已掌握` 里没有数字，
+   *       直接被挡在模板键之外 —— 界面切成英文后这几句永远是中文；
+   *     - 白跑正则：一句含数字的普通文本会把**全部**模板键都试一遍。
+   *   改成按首字符取候选：一次 Map 查询，命中不了就退出（绝大多数文本如此），
+   *   命中也只跑同首字符的那两三条正则。**更快而且不漏。**
    */
+  const patternByFirst = new Map();
+  for (const k of PATTERN_KEYS) {
+    const c = k[0];
+    if (!patternByFirst.has(c)) patternByFirst.set(c, []);
+    patternByFirst.get(c).push(k);
+  }
+
   function tPattern(text) {
     if (!text || current === 'zh-CN') return text;
-    if (!/\d/.test(text)) return text;
+    const cands = patternByFirst.get(text[0]);
+    if (!cands) return text;
     const d = DICTS[current];
     if (!d) return text;
-    for (const key of PATTERN_KEYS) {
+    for (const key of cands) {
       if (d[key] == null) continue;
       const m = regexFor(current, key).exec(text);
       if (!m) continue;

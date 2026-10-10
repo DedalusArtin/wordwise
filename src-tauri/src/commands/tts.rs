@@ -451,6 +451,13 @@ pub async fn cmd_tts_speak(
 /// 枚举本机音频输出设备（读 Windows 注册表 MMDevices，绕过 WebView2 的
 /// enumerateDevices 权限限制——那边拿不到设备真名，本命令能拿到全部
 /// 渲染终结点的名字与状态）。DeviceState：1=活动 2=禁用 4=未插入 8=拔出。
+///
+/// ★ 必须整段 `#[cfg(windows)]`：`winreg` 只在
+///   `[target.'cfg(windows)'.dependencies]` 里，其它平台根本没有这个 crate。
+///   漏了守卫的后果不是「降级」而是**编译失败**，而且因为
+///   `cargo build`（桌面）走的是 windows 分支，本地永远发现不了 ——
+///   只有 `cargo tauri android build` 才会炸出来。
+#[cfg(windows)]
 #[tauri::command(async)]
 pub fn cmd_audio_devices() -> Result<serde_json::Value, String> {
     use winreg::enums::HKEY_LOCAL_MACHINE;
@@ -492,6 +499,17 @@ pub fn cmd_audio_devices() -> Result<serde_json::Value, String> {
         ka.cmp(&kb).then(a["name"].as_str().cmp(&b["name"].as_str()))
     });
     Ok(serde_json::json!({ "devices": devs }))
+}
+
+/// 非 Windows：没有注册表可读，直接给空列表。
+///
+/// 为什么不干脆删掉这个命令：设置页会调它填「输出设备」下拉，
+/// 命令不存在时 IPC 会抛 "command not found"，整个设置页渲染中断；
+/// 返回空列表则让前端自然落回「只列系统默认」的降级分支。
+#[cfg(not(windows))]
+#[tauri::command(async)]
+pub fn cmd_audio_devices() -> Result<serde_json::Value, String> {
+    Ok(serde_json::json!({ "devices": [] }))
 }
 
 /// 清空 TTS 缓存（设置页的「清理缓存」）。

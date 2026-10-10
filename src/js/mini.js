@@ -310,12 +310,15 @@ const Mini = (() => {
       const due = res && res.schedule ? res.schedule.due_text : '';
       if (meta) meta.textContent = `${ok ? '认识' : '不认识'} · 下次复习 ${due || '很快'}`;
       refreshProgress();
-      if (res && res.became_mastered) U().toast(`「${word}」已掌握`, 'ok');
+      // ★ `became_mastered` 在 `ScheduleResult` 上，不在 `AnswerResult` 上。
+      //   写成 `res.became_mastered` 永远是 undefined —— 提示一次都弹不出来，
+      //   而且没有任何报错（读一个不存在的属性是合法的）。
+      if (res && res.schedule && res.schedule.became_mastered) U().toast(`「${word}」已掌握`, 'ok');
     } catch (e) {
       U().toast(e && e.message ? e.message : '提交失败', 'err');
     } finally {
       busy = false;
-      // 留一点时间看反馈（间隔 / 熟��度），再上下一词
+      // 留一点时间看反馈（间隔 / 熟练度），再上下一词
       setTimeout(() => { void next(); }, 520);
     }
   }

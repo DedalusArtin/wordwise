@@ -2133,6 +2133,62 @@ const cases = [
     if (!ids.includes('en')) throw new Error('缺 English');
     return ids.join(',');
   }],
+  ['界面语言：无数字的动态文案也必须能走模板键（tPattern 不能拿「有没有数字」当门槛）', () => {
+    // ★ 旧实现 `if (!/\d/.test(text)) return text;` —— 「取词失败：网络不可用」
+    //   这种没有数字的句子永远进不了模板键，界面切成英文后这几句永远是中文。
+    //   改成按首字符取候选后必须全中。
+    sandbox.I18n.setLang('en', { persist: false });
+    const tr = (s) => sandbox.I18n.translate(s);
+    const cases = [
+      ['「carpet」已掌握', '“carpet” mastered'],
+      ['已补全「carpet」的词条', 'Completed the entry for “carpet”'],
+      // ★ 多占位符：回填按**捕获顺序**，英文语序必须跟着键走
+      ['为「apple」新增 8 条关系', '“apple” gained 8 new relations'],
+    ];
+    for (const [src, exp] of cases) {
+      const got = tr(src);
+      if (got !== exp) throw new Error(`${src} → ${got}，应为 ${exp}`);
+    }
+    // 前缀要翻掉（内嵌的后端错误原文不属于 i18n 范围，不在这里断言）
+    const err = tr('取词失败：网络不可用');
+    if (!err.startsWith('Failed to load a word: ')) throw new Error('前缀没翻：' + err);
+    sandbox.I18n.setLang('zh-CN', { persist: false });
+    return '';
+  }],
+  ['界面语言：v0.49 新窗口（迷你窗 / 词图 / 词条质量）的文案必须全在字典里', () => {
+    sandbox.I18n.setLang('en', { persist: false });
+    const tr = (s) => sandbox.I18n.translate(s);
+    // 这些串全部是**渲染后**真正出现的文本节点值，含被 <b> 拆开的碎片：
+    // 写整段 HTML 会得到一条永远命不中的死键，而覆盖率统计照样算它「已翻译」。
+    const must = [
+      // 迷你窗
+      '背词', '认识', '不认识', '还没背过', '补全中…', '词组 / 变形', '朗读例句',
+      '词库里还没有可背的词。先在主窗口导入或下载一本词库。',
+      '熟练度 40% · 正确率 75% · 下次复习 in 3 d',
+      '今日 12 · 待复习 30',
+      '认识 · 下次复习 2026-10-13 09:00',
+      '「carpet」已掌握',
+      // 词图（含被 <b> 拆散的碎片）
+      '同义', '下义', '构建中…', '连接 3 条',
+      '连接 3 条 · 熟练度 40% · 词库已收录',
+      '共', '个词 /', '条关系', '以', '为中心',
+      // 词条质量面板
+      '词条质量', '语种统计', '清理语种错标', 'AI 自检一批', '自检条数',
+      '通过', '已修正', '已剔除', '还没有自检记录。', '学习数据',
+      // 语种统计里会出现的语种名（下拉里没有的那几个）
+      '意大利语', '葡萄牙语', '阿拉伯语', '泰语', '印地语', '希伯来语', '希腊语',
+    ];
+    const HAN = /[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]/;
+    const miss = [];
+    for (const s of must) {
+      const out = tr(s);
+      if (out === s) miss.push(`没翻:${s}`);
+      else if (HAN.test(out)) miss.push(`残留汉字:${s}→${out}`);
+    }
+    sandbox.I18n.setLang('zh-CN', { persist: false });
+    if (miss.length) throw new Error(miss.slice(0, 6).join(' | '));
+    return must.length + ' 条';
+  }],
 
   // ---- 版本号一致性 ----
   //
@@ -3819,6 +3875,51 @@ const cases = [
     } finally {
       api.startSession = orig.start; api.currentQuestion = orig.q;
       api.getWord = orig.w; api.wordState = orig.st;
+    }
+  }],
+
+  ['迷你窗：掌握提示真的会弹（became_mastered 挂在 schedule 上，不在 res 上）', async () => {
+    // ★ 回归点：`res.became_mastered` 永远是 undefined（`AnswerResult` 没这个
+    //   字段，它在 `ScheduleResult` 上），读不存在的属性不报错，所以这条提示
+    //   曾经**一次都弹不出来**且毫无症状。这里真按一次「认识」看提醒有没有来。
+    const api = sandbox.WordWiseAPI.API;
+    const WW = sandbox.WW;
+    const orig = {
+      start: api.startSession, q: api.currentQuestion, s: api.submitAnswer,
+      w: api.getWord, st: api.wordState, toast: WW.toast,
+    };
+    const toasts = [];
+    api.startSession = async () => ({ total: 20, index: 0 });
+    api.currentQuestion = async () => ({
+      prompt: 'carpet', answer: 'n. 地毯', mode: 'en_to_zh', options: [],
+      entry: { word: 'carpet', lang: 'en', senses: [{ pos: 'n.', definition: '地毯' }], phonetic: {}, related: [], inflections: [] },
+    });
+    api.getWord = async () => null;
+    api.wordState = async () => null;
+    api.submitAnswer = async () => ({
+      word: 'carpet', grade: 'good', correct: true,
+      schedule: { became_mastered: true, due_text: '2026-10-13 09:00' },
+    });
+    WW.toast = (msg) => { toasts.push(String(msg)); };
+    try {
+      sandbox.Mini.bind();
+      await sandbox.Mini.next();
+      elById('mn-know')._fire('click');
+      // 先在「反馈还挂在窗面上」的时候断言，再等 answer() 那个 520ms 的
+      // 自动上下一词的计时器跑完 —— 否则它会在**别的**用例执行期间触发
+      // next()，污染那边的断言。
+      await new Promise((r) => setTimeout(r, 60));
+      if (!toasts.some((t) => t.includes('已掌握'))) {
+        throw new Error('掌握提示没弹（读错对象了？）：' + JSON.stringify(toasts));
+      }
+      const meta = elById('mn-meta').textContent;
+      if (!meta.includes('下次复习')) throw new Error('间隔反馈没上屏：' + meta);
+      await new Promise((r) => setTimeout(r, 600));
+      return toasts.join(' / ');
+    } finally {
+      api.startSession = orig.start; api.currentQuestion = orig.q;
+      api.submitAnswer = orig.s; api.getWord = orig.w; api.wordState = orig.st;
+      WW.toast = orig.toast;
     }
   }],
 
