@@ -3,6 +3,7 @@
 //! 命名约定：`cmd_` 前缀便于在主入口统一注册。
 //! 所有命令统一返回 `Result<T, String>`，错误转成中文文案直接给用户看。
 
+pub mod audit;
 pub mod books;
 pub mod explain;
 pub mod extra;
@@ -1082,10 +1083,30 @@ pub fn cmd_list_words(
 }
 
 /// 新增/更新一个词条到词库。
+///
+/// ★ 语种闸门：以前这里完全信任前端传来的 `entry.lang`，于是「查询语言=英语
+///   时加入一个日语词」会直接写出 `('en','嗚呼')`。现在先按字形决议语言
+///   （假名 → ja、谚文 → ko…，见 [`crate::lang::resolve_lang`]），
+///   再过一遍闸门，两道都不通过就报错——绝不让脏数据落库。
 #[tauri::command(async)]
 pub fn cmd_add_word(state: State<'_, Arc<AppState>>, entry: WordEntry) -> Result<(), String> {
     let now = timeutil::now_ts();
-    state.db.upsert_word(&entry, now).map_err(err)?;
+    let cfg = state.cfg();
+    let want = crate::lang::resolve_lang(&entry.word, Some(&entry.lang), &cfg.target_lang);
+    let mut entry = entry;
+    if want != entry.lang {
+        log::warn!(
+            "加词语种纠正：{}",
+            crate::lang::mismatch_reason(&entry.word, &entry.lang)
+        );
+        entry.lang = want.clone();
+    }
+    if !state.db.upsert_word_gated(&entry, now).map_err(err)? {
+        return Err(format!(
+            "没能加入词库：{}",
+            crate::lang::mismatch_reason(&entry.word, &want)
+        ));
+    }
     // 同时建立学习状态，让它进入复习队列
     let st = StudyState::new(&entry.word, &entry.lang, now);
     state.db.upsert_state(&st).map_err(err)
@@ -1104,12 +1125,25 @@ pub async fn cmd_import_words(
     let now = timeutil::now_ts();
 
     let mut report = ImportReport::default();
+    let mut kept: Vec<String> = Vec::new();
 
     // 先落库建立学习状态，保证即使联网失败也能开始背
     for w in &words {
         let w = w.trim();
         if w.is_empty() || !search::is_plausible_word(w) {
             report.skipped += 1;
+            continue;
+        }
+        // ★ 语种闸门：用户从别处粘贴一大段文本时，日语/韩语词会跟着进来。
+        //   以前只会按形态过滤（`is_plausible_word` 对假名一律放行），
+        //   现在按书写系统拦下，并如实记进报告里让用户看见过滤生效了。
+        if !crate::lang::lang_compatible(w, &lang) {
+            report.filtered += 1;
+            if report.filtered_samples.len() < 20 {
+                report
+                    .filtered_samples
+                    .push(crate::lang::mismatch_reason(w, &lang));
+            }
             continue;
         }
         let key = w.to_lowercase();
@@ -1122,21 +1156,21 @@ pub async fn cmd_import_words(
             lang: lang.clone(),
             ..Default::default()
         };
-        state.db.upsert_word(&entry, now).map_err(err)?;
+        if !state.db.upsert_word_gated(&entry, now).map_err(err)? {
+            report.filtered += 1;
+            continue;
+        }
         state
             .db
             .upsert_state(&StudyState::new(&key, &lang, now))
             .map_err(err)?;
         report.added += 1;
+        kept.push(key);
     }
 
-    // 可选：立即联网预热释义
+    // 可选：立即联网预热释义（只预热真正进库的词）
     if prefetch.unwrap_or(true) {
-        let keys: Vec<String> = words
-            .iter()
-            .map(|w| w.trim().to_lowercase())
-            .filter(|w| !w.is_empty())
-            .collect();
+        let keys: Vec<String> = kept;
         report.prefetched = dict::prefetch(
             &state.db,
             &keys,
@@ -1156,6 +1190,10 @@ pub async fn cmd_import_words(
 pub struct ImportReport {
     pub added: i64,
     pub skipped: i64,
+    /// 被语种闸门拦下的条数（混入的日语 / 韩语等）
+    pub filtered: i64,
+    /// 前若干条被拦下的原因，界面要能解释「为什么没进去」
+    pub filtered_samples: Vec<String>,
     pub prefetched: usize,
 }
 

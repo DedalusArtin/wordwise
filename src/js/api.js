@@ -52,12 +52,14 @@ async function listen(event, handler) {
  *   而且查起来毫无线索。invoke 走的是 __TAURI_INTERNALS__，一直可用。
  */
 
-/** 当前窗口的 label（主窗口 main / 侧边栏 sidebar）。 */
+/** 当前窗口的 label（主窗口 main / 侧边栏 sidebar / 迷你窗 mini）。 */
 function currentWindowLabel() {
-  // 侧边栏用的就是同一个 index.html，只是加了 ?view=sidebar，
-  // 与 windows.rs 的 SIDEBAR_LABEL + WebviewUrl::App("index.html?view=sidebar") 对应。
+  // 三个窗口用的是同一个 index.html，只是加了 ?view=xxx，
+  // 与 windows.rs 的 MAIN_LABEL / SIDEBAR_LABEL / MINI_LABEL 一一对应。
   try {
-    if (new URLSearchParams(window.location.search).get('view') === 'sidebar') return 'sidebar';
+    const v = new URLSearchParams(window.location.search).get('view');
+    if (v === 'sidebar') return 'sidebar';
+    if (v === 'mini') return 'mini';
   } catch (e) { /* 解析不了就当主窗口 */ }
   return 'main';
 }
@@ -489,6 +491,32 @@ const API = {
   sidebarHide: () => invoke('sidebar_hide'),
   sidebarToggle: () => invoke('sidebar_toggle'),
   mainShow: () => invoke('main_show'),
+
+  // 迷你悬浮窗（桌面小窗背词）
+  miniShow: () => invoke('mini_show'),
+  miniHide: () => invoke('mini_hide'),
+  miniToggle: () => invoke('mini_toggle'),
+  miniSetSize: (w, h) => invoke('mini_set_size', { width: w, height: h }),
+  miniSetPosition: (x, y) => invoke('mini_set_position', { x, y }),
+  miniSetAlwaysOnTop: (on) => invoke('mini_set_always_on_top', { on: !!on }),
+
+  // 语种统计（污染规模可见）
+  langStats: () => invoke('cmd_lang_stats'),
+
+  // AI 词条自检（纳表前自校：拼写 / 词性 / 中文释义 / 例句）
+  aiAuditEntry: (word, lang) => invoke('cmd_ai_audit_entry', { word, lang: lang || null }),
+  aiAuditBatch: (lang, limit) =>
+    invoke('cmd_ai_audit_batch', { lang: lang || null, limit: limit || 50 }),
+  aiAuditApply: (word, lang) => invoke('cmd_ai_audit_apply', { word, lang: lang || null }),
+  aiAuditLog: (opts) =>
+    invoke('cmd_ai_audit_log', {
+      batchId: (opts && opts.batchId) || null,
+      word: (opts && opts.word) || null,
+      limit: (opts && opts.limit) || 200,
+    }),
+  aiAuditStatus: () => invoke('cmd_ai_audit_status'),
+  aiAuditStop: () => invoke('cmd_ai_audit_stop'),
+  onAiAuditProgress: (fn) => listen('ai-audit://progress', fn),
 };
 
 /* ============================================================

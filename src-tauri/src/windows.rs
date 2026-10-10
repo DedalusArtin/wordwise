@@ -35,6 +35,8 @@ use tauri::{AppHandle, Manager};
 pub const SIDEBAR_LABEL: &str = "sidebar";
 /// 主窗口标签
 pub const MAIN_LABEL: &str = "main";
+/// 迷你悬浮窗标签（参照 ToastFish / 摸鱼背词的桌面小窗）
+pub const MINI_LABEL: &str = "mini";
 
 /// 命令占用主线程的告警阈值（毫秒）。
 ///
@@ -240,6 +242,22 @@ fn build_invoke_handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync +
         sidebar_hide,
         sidebar_toggle,
         main_show,
+        // 迷你悬浮窗（桌面端小窗背词）
+        mini_show,
+        mini_hide,
+        mini_toggle,
+        mini_set_size,
+        mini_set_position,
+        mini_set_always_on_top,
+        // 语种统计与清理（语种污染治理）
+        commands::maint::cmd_lang_stats,
+        // AI 词条自检
+        commands::audit::cmd_ai_audit_entry,
+        commands::audit::cmd_ai_audit_batch,
+        commands::audit::cmd_ai_audit_apply,
+        commands::audit::cmd_ai_audit_log,
+        commands::audit::cmd_ai_audit_status,
+        commands::audit::cmd_ai_audit_stop,
     ];
 
     move |invoke: tauri::ipc::Invoke| -> bool {
@@ -313,6 +331,143 @@ fn create_sidebar_window(app: &AppHandle) -> tauri::Result<()> {
         });
     }
     Ok(())
+}
+
+/// 创建迷你悬浮窗：贴屏幕右下角的一条小窗，随时背词。
+///
+/// 与侧边栏的区别不是尺寸而是**形态**：
+///   - 侧边栏是「窄高条」，主打查词；
+///   - 迷你窗是「矮宽条」，主打**过单词**：显示单词 + 释义 → 认识/不认识 →
+///     自动下一词，并显示复习间隔与今日进度。
+///
+/// 三个必须的属性：`always_on_top`（不然一背就被别的应用盖住）、
+/// `decorations(false)`（标题栏在小窗上是纯浪费）、`skip_taskbar(true)`
+/// （它不该和主窗口抢任务栏位置）。
+#[cfg(desktop)]
+fn create_mini_window(app: &AppHandle) -> tauri::Result<()> {
+    if app.get_webview_window(MINI_LABEL).is_some() {
+        return Ok(());
+    }
+    WebviewWindowBuilder::new(
+        app,
+        MINI_LABEL,
+        WebviewUrl::App("index.html?view=mini".into()),
+    )
+    .title("WordWise 迷你窗")
+    .inner_size(360.0, 220.0)
+    .min_inner_size(260.0, 150.0)
+    .always_on_top(true)
+    .resizable(true)
+    .decorations(false)
+    .skip_taskbar(true)
+    .visible(false)
+    .build()?;
+
+    // 与侧边栏一致：关闭 = 隐藏，保持常驻，下次呼出不重建
+    if let Some(win) = app.get_webview_window(MINI_LABEL) {
+        let w = win.clone();
+        win.on_window_event(move |e| {
+            if let WindowEvent::CloseRequested { api, .. } = e {
+                api.prevent_close();
+                let _ = w.hide();
+            }
+        });
+    }
+    Ok(())
+}
+
+/// 显示迷你窗（贴右下角，避开任务栏）。
+#[cfg(desktop)]
+#[tauri::command]
+fn mini_show(app: AppHandle) -> Result<(), String> {
+    let win = app
+        .get_webview_window(MINI_LABEL)
+        .ok_or_else(|| "迷你窗未创建".to_string())?;
+
+    if !win.is_visible().unwrap_or(false) {
+        if let Ok(Some(monitor)) = win.primary_monitor() {
+            let size = monitor.size();
+            let scale = monitor.scale_factor();
+            let lw = size.width as f64 / scale;
+            let lh = size.height as f64 / scale;
+            let (ww, wh) = win
+                .outer_size()
+                .map(|s| (s.width as f64 / scale, s.height as f64 / scale))
+                .unwrap_or((360.0, 220.0));
+            // 任务栏一般在底部，往上留 56px
+            let x = (lw - ww - 16.0).max(0.0);
+            let y = (lh - wh - 56.0).max(0.0);
+            let _ = win.set_position(tauri::LogicalPosition::new(x, y));
+        }
+    }
+    win.show().map_err(|e| e.to_string())?;
+    win.set_focus().ok();
+    win.set_always_on_top(true).ok();
+    Ok(())
+}
+
+/// 隐藏迷你窗。
+#[cfg(desktop)]
+#[tauri::command]
+fn mini_hide(app: AppHandle) -> Result<(), String> {
+    if let Some(win) = app.get_webview_window(MINI_LABEL) {
+        win.hide().map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+/// 切换迷你窗显隐。
+#[cfg(desktop)]
+#[tauri::command]
+fn mini_toggle(app: AppHandle) -> Result<bool, String> {
+    let win = app
+        .get_webview_window(MINI_LABEL)
+        .ok_or_else(|| "迷你窗未创建".to_string())?;
+    if win.is_visible().unwrap_or(false) {
+        win.hide().map_err(|e| e.to_string())?;
+        Ok(false)
+    } else {
+        mini_show(app)?;
+        Ok(true)
+    }
+}
+
+/// 改迷你窗尺寸（逻辑像素）。前端把用户拖出来的尺寸存起来，下次呼出还原。
+#[cfg(desktop)]
+#[tauri::command]
+fn mini_set_size(app: AppHandle, width: f64, height: f64) -> Result<(), String> {
+    let win = app
+        .get_webview_window(MINI_LABEL)
+        .ok_or_else(|| "迷你窗未创建".to_string())?;
+    // 夹在最小/最大值之间：太小放不下释义，太大就不是「迷你」窗了
+    let w = width.clamp(260.0, 900.0);
+    let h = height.clamp(150.0, 700.0);
+    win.set_size(tauri::LogicalSize::new(w, h))
+        .map_err(|e| e.to_string())
+}
+
+/// 把迷你窗挪到指定位置（逻辑像素）。
+#[cfg(desktop)]
+#[tauri::command]
+fn mini_set_position(app: AppHandle, x: f64, y: f64) -> Result<(), String> {
+    let win = app
+        .get_webview_window(MINI_LABEL)
+        .ok_or_else(|| "迷你窗未创建".to_string())?;
+    win.set_position(tauri::LogicalPosition::new(x.max(0.0), y.max(0.0)))
+        .map_err(|e| e.to_string())
+}
+
+/// 开关置顶。
+///
+/// 默认置顶（悬浮窗的本分），但用户在全屏看视频/写文档时会想关掉它，
+/// 所以这个开关必须留给用户。
+#[cfg(desktop)]
+#[tauri::command]
+fn mini_set_always_on_top(app: AppHandle, on: bool) -> Result<(), String> {
+    let win = app
+        .get_webview_window(MINI_LABEL)
+        .ok_or_else(|| "迷你窗未创建".to_string())?;
+    win.set_always_on_top(on).map_err(|e| e.to_string())
 }
 
 /// 显示侧边栏。
@@ -395,11 +550,15 @@ fn main_show(app: AppHandle) -> Result<(), String> {
 fn build_tray(app: &AppHandle) -> tauri::Result<()> {
     let open_main = MenuItem::with_id(app, "open_main", "打开主界面", true, None::<&str>)?;
     let toggle_side = MenuItem::with_id(app, "toggle_sidebar", "显示/隐藏侧边栏", true, None::<&str>)?;
+    let toggle_mini = MenuItem::with_id(app, "toggle_mini", "显示/隐藏迷你背词窗", true, None::<&str>)?;
     let start_review = MenuItem::with_id(app, "start_review", "开始复习", true, None::<&str>)?;
     let sep = PredefinedMenuItem::separator(app)?;
     let quit = MenuItem::with_id(app, "quit", "退出 WordWise", true, None::<&str>)?;
 
-    let menu = Menu::with_items(app, &[&open_main, &toggle_side, &start_review, &sep, &quit])?;
+    let menu = Menu::with_items(
+        app,
+        &[&open_main, &toggle_side, &toggle_mini, &start_review, &sep, &quit],
+    )?;
 
     let mut builder = TrayIconBuilder::with_id("main-tray")
         .tooltip("WordWise · 背单词与 AI 讲解")
@@ -412,6 +571,9 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
             }
             "toggle_sidebar" => {
                 let _ = sidebar_toggle(app.clone());
+            }
+            "toggle_mini" => {
+                let _ = mini_toggle(app.clone());
             }
             "start_review" => {
                 let _ = main_show(app.clone());
@@ -490,6 +652,47 @@ fn sidebar_hide(_app: AppHandle) -> Result<(), String> {
 #[tauri::command]
 fn sidebar_toggle(_app: AppHandle) -> Result<bool, String> {
     Err(MOBILE_WINDOW_UNAVAILABLE.to_string())
+}
+
+// 迷你窗在移动端同样是「桌面端能力」，四个命令一起给出同一句人话，
+// 免得前端拿到 "command not found" 还得猜。
+#[cfg(mobile)]
+const MOBILE_MINI_UNAVAILABLE: &str = "迷你悬浮窗是桌面端能力，移动端没有常驻窗口";
+
+#[cfg(mobile)]
+#[tauri::command]
+fn mini_show(_app: AppHandle) -> Result<(), String> {
+    Err(MOBILE_MINI_UNAVAILABLE.to_string())
+}
+
+#[cfg(mobile)]
+#[tauri::command]
+fn mini_hide(_app: AppHandle) -> Result<(), String> {
+    Err(MOBILE_MINI_UNAVAILABLE.to_string())
+}
+
+#[cfg(mobile)]
+#[tauri::command]
+fn mini_toggle(_app: AppHandle) -> Result<bool, String> {
+    Err(MOBILE_MINI_UNAVAILABLE.to_string())
+}
+
+#[cfg(mobile)]
+#[tauri::command]
+fn mini_set_size(_app: AppHandle, _width: f64, _height: f64) -> Result<(), String> {
+    Err(MOBILE_MINI_UNAVAILABLE.to_string())
+}
+
+#[cfg(mobile)]
+#[tauri::command]
+fn mini_set_position(_app: AppHandle, _x: f64, _y: f64) -> Result<(), String> {
+    Err(MOBILE_MINI_UNAVAILABLE.to_string())
+}
+
+#[cfg(mobile)]
+#[tauri::command]
+fn mini_set_always_on_top(_app: AppHandle, _on: bool) -> Result<(), String> {
+    Err(MOBILE_MINI_UNAVAILABLE.to_string())
 }
 
 /// 移动端只有一个窗口，且它一定在前台 —— 无事可做，返回成功。
@@ -573,6 +776,10 @@ pub fn run_app() {
             // 侧边栏预先创建但隐藏，点托盘时才显示
             if let Err(e) = create_sidebar_window(&handle) {
                 eprintln!("创建侧边栏失败：{}", e);
+            }
+            // 迷你悬浮窗同理：预建隐藏，托盘/快捷键呼出
+            if let Err(e) = create_mini_window(&handle) {
+                eprintln!("创建迷你窗失败：{}", e);
             }
             if let Err(e) = build_tray(&handle) {
                 eprintln!("创建托盘失败：{}", e);

@@ -22,6 +22,8 @@ pub mod db;
 pub mod dict;
 pub mod enrich;
 pub mod graph;
+/// 语种判定与入库闸门（唯一一份书写系统判定实现，其余模块都调它）
+pub mod lang;
 pub mod llm;
 pub mod logging;
 pub mod localllm;

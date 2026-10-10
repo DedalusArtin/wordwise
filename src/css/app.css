@@ -1819,6 +1819,93 @@ h4.md-h, h5.md-h { font-size: 13.5px; font-weight: 600; color: var(--text); }
 .sb-entry .sense-def { font-size: 13.5px; }
 .sb-entry .dc-body { padding: 0; }
 
+/* ---------------- 迷你悬浮窗 ----------------
+   窗口本身无边框、置顶、常驻右下角（见 windows.rs create_mini_window），
+   这里只负责窗内的排版：上拖拽条 / 中间词区 / 下操作条三段式。
+   高度用 100vh（不是侧边栏那个 `100vh - 34px` 补偿值）——
+   小窗也是无边框，但它的标题条是窗内自绘且不遮挡内容。 */
+.mini-shell {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  background: var(--bg);
+  overflow: hidden;
+}
+.mn-drag {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 8px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+  cursor: move;
+  flex-shrink: 0;
+  user-select: none;
+}
+.mn-title { font-size: 12px; color: var(--text-3); }
+.mn-actions { margin-left: auto; display: flex; gap: 2px; }
+.mn-actions .icon-btn {
+  width: 22px; height: 22px;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 12px;
+  border: none; background: transparent;
+  color: var(--text-3);
+  border-radius: var(--radius-sm);
+}
+.mn-actions .icon-btn:hover { background: var(--blue-soft); color: var(--blue-dark); }
+.mn-actions .icon-btn.off { opacity: .45; }
+
+.mn-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px 14px;
+  overflow-y: auto;
+}
+.mn-word-row { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+.mn-word { font-size: 26px; font-weight: 700; line-height: 1.15; }
+.mn-phon { font-size: 12.5px; color: var(--text-3); }
+.mn-def { font-size: 14px; color: var(--text-2); line-height: 1.6; }
+.mn-meta { font-size: 12px; color: var(--text-3); min-height: 16px; }
+
+.mn-foot {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  background: var(--panel);
+  border-top: 1px solid var(--border);
+  flex-shrink: 0;
+}
+.mn-progress { font-size: 12px; color: var(--text-3); }
+.mn-btns { margin-left: auto; display: flex; gap: 8px; }
+.mn-btns button { min-width: 68px; }
+
+/* 词条自检日志 */
+.audit-log { margin-top: 8px; max-height: 260px; overflow-y: auto; }
+.audit-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 5px 0;
+  border-top: 1px solid var(--border);
+  font-size: 12.5px;
+}
+.audit-row:first-child { border-top: none; }
+.ar-word { font-weight: 600; flex-shrink: 0; }
+.ar-tag {
+  flex-shrink: 0;
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-size: 11.5px;
+}
+.audit-row.ok .ar-tag { background: var(--blue-soft); color: var(--blue-dark); }
+.audit-row.warn .ar-tag { background: #fff4d6; color: #8a5a00; }
+.audit-row.bad .ar-tag { background: #fdeaea; color: #b4232a; }
+.ar-detail { color: var(--text-2); line-height: 1.6; }
+
 /* ---------------- 滚动条 ---------------- */
 ::-webkit-scrollbar { width: 9px; height: 9px; }
 ::-webkit-scrollbar-track { background: transparent; }
@@ -2887,6 +2974,26 @@ body.col-resizing * { cursor: col-resize !important; }
   box-shadow: var(--shadow-2);
 }
 .graph-tip b { color: #fff; font-size: 13.5px; }
+
+/* 单击节点后在画布底部弹出的单词介绍：只盖在画布上，不动布局 */
+.graph-info {
+  position: absolute;
+  left: 12px;
+  right: 56px;          /* 给右下角缩放按钮留位置 */
+  bottom: 12px;
+  padding: 10px 14px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow-2);
+  font-size: 13px;
+  line-height: 1.65;
+}
+.gi-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.gi-word { font-size: 16px; }
+.gi-actions { margin-left: auto; display: flex; align-items: center; gap: 6px; }
+.gi-close { width: 24px; height: 24px; font-size: 15px; line-height: 1; }
+.gi-gloss { margin-top: 3px; color: var(--text-2); }
 
 /* ★ v0.46：单击节点的「下方介绍面板」（graph.js showInfo 渲染）。
    - 右侧留 130px：给右下角的缩放三件套让位，别把它盖住；

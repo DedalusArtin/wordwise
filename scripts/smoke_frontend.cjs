@@ -25,7 +25,7 @@ const ROOT = path.resolve(__dirname, '..');
 // 靠加载顺序决定谁先挂到 window 上。顺序错了，冒烟测试会报「undefined.bind」。
 const ORDER = ['i18n.js', 'theme.js', 'api.js', 'demo.js', 'dir.js', 'speak.js', 'ui.js', 'study.js', 'lookup.js',
                'translate.js', 'graph.js', 'library.js', 'maint.js', 'update.js', 'settings.js',
-               'sidebar.js', 'app.js'];
+               'sidebar.js', 'mini.js', 'app.js'];
 
 /** 假 style：支持 setProperty / removeProperty（分栏比例就走这两个）。 */
 function fakeStyle() {
@@ -3535,6 +3535,140 @@ const cases = [
   }],
 
   ['Plan.load()', () => sandbox.Plan.load()],
+
+  /* ---------------- 语种闸门（背词表只留目标语种） ---------------- */
+
+  ['语种：唯一一份书写系统判定，假名/汉字词进不了英语词表', () => {
+    const src = fs.readFileSync(path.join(ROOT, 'src-tauri/src/lang.rs'), 'utf8');
+    for (const fn of ['pub fn script_of', 'pub fn lang_compatible', 'pub fn resolve_lang', 'pub fn detect_lang']) {
+      if (!src.includes(fn)) throw new Error('lang.rs 缺少 ' + fn);
+    }
+    // 闸门必须真的把日语挡在英语词表外（不是「记一笔」就算了）
+    if (!/Script::Kana => lang == "ja"/.test(src)) throw new Error('假名词没有绑定 ja');
+    if (!/Script::Han => lang == "zh" \|\| lang == "ja"/.test(src)) {
+      throw new Error('汉字词必须只允许 zh/ja —— 否则日语汉字词照样混进英语表');
+    }
+    // 反向：不能误杀 café / naïve 这类带附加符号的合法拉丁词
+    if (!/_ if c.is_alphabetic\(\) => latin = true/.test(src)) {
+      throw new Error('非 ASCII 拉丁字母没判成拉丁，café 会被误杀');
+    }
+    // 单元测试必须逐条钉死上面这些规则
+    for (const t of ['闸门拦住日语混入英语词表', '带附加符号的拉丁词仍是拉丁', '决议语言时字形强判定优先']) {
+      if (!src.includes(t)) throw new Error('lang.rs 缺少测试：' + t);
+    }
+    return '假名→ja / 汉字→zh|ja / 拉丁放行';
+  }],
+
+  ['语种：入库闸门挂在写库唯一汇聚点，导入计数不含被拦下的', () => {
+    const db = fs.readFileSync(path.join(ROOT, 'src-tauri/src/db/mod.rs'), 'utf8');
+    const books = fs.readFileSync(path.join(ROOT, 'src-tauri/src/commands/books.rs'), 'utf8');
+    const cmds = fs.readFileSync(path.join(ROOT, 'src-tauri/src/commands/mod.rs'), 'utf8');
+    if (!/pub fn upsert_word_gated/.test(db)) throw new Error('缺少带闸门的单条写入');
+    if (!/pub fn bulk_upsert_words_gated/.test(db)) throw new Error('缺少带闸门的批量写入');
+    // 两条词库导入通道都必须走闸门版，否则「下载词表」这条路又漏了
+    const gated = (books.match(/bulk_upsert_words_gated/g) || []).length;
+    if (gated < 2) throw new Error('导入/下载两条通道没有都走闸门（找到 ' + gated + ' 处）');
+    // 导入报告要把「被拦下多少」如实报出去
+    if (!/pub filtered: i64/.test(cmds)) throw new Error('ImportReport 没有 filtered 字段');
+    // 手动加词也要决议语言
+    if (!/resolve_lang\(&entry\.word/.test(cmds)) throw new Error('cmd_add_word 没有按字形决议语言');
+    return '闸门在写库汇聚点 + 两条导入通道 + 计数如实';
+  }],
+
+  ['语种：存量错标可清理（只搬不删），进度不丢', () => {
+    const db = fs.readFileSync(path.join(ROOT, 'src-tauri/src/db/mod.rs'), 'utf8');
+    const maint = fs.readFileSync(path.join(ROOT, 'src-tauri/src/commands/maint.rs'), 'utf8');
+    const state = fs.readFileSync(path.join(ROOT, 'src-tauri/src/state.rs'), 'utf8');
+    if (!/pub fn purge_lang_mismatch/.test(db)) throw new Error('缺少存量清理');
+    if (!/"purge-lang-mismatch"/.test(maint)) throw new Error('维护动作里没挂上清理');
+    if (!/purge_lang_mismatch\(false\)/.test(state)) throw new Error('启动时没跑一遍清理');
+    // ★ 学习状态只能「目标行存在才删旧行」—— 直接删会把用户唯一的进度记录删掉
+    const i = db.indexOf('pub fn purge_lang_mismatch');
+    const body = db.slice(i, i + 5000);
+    if (!/if has_target > 0/.test(body)) throw new Error('清理时无条件删了旧学习状态，会丢进度');
+    if (!/INSERT OR IGNORE INTO words/.test(body)) throw new Error('清理不是「先搬到正确语言再删旧行」');
+    return '只搬不删 + 进度有守';
+  }],
+
+  /* ---------------- AI 词条自检 ---------------- */
+
+  ['自检：纳表前校验拼写/词性/释义/例句，不合格复检后才剔除', () => {
+    const a = fs.readFileSync(path.join(ROOT, 'src-tauri/src/commands/audit.rs'), 'utf8');
+    const win = fs.readFileSync(path.join(ROOT, 'src-tauri/src/windows.rs'), 'utf8');
+    for (const dim of ['spelling', 'pos', 'definition', 'example']) {
+      if (!a.includes(dim)) throw new Error('自检提示词里缺少维度 ' + dim);
+    }
+    // 修正后必须复检一轮（round + 1），一次模型的意见不能直接改用户数据
+    if (!/run_round\(state, &fresh, round \+ 1\)/.test(a)) throw new Error('修正后没有复检');
+    // 模型把词目也改了的话必须拒绝，否则 A 词的数据会被写成 B 词
+    if (!/模型给的修正换了词目或语言，已拒绝采纳/.test(a)) throw new Error('没有防「模型换词目」');
+    // 剔除 = 标记，不真删
+    if (!/set_audit_state/.test(a)) throw new Error('没有写 audit_state 标记');
+    // 命令必须注册，否则前端 invoke 拿到 command not found
+    for (const c of ['cmd_ai_audit_entry', 'cmd_ai_audit_batch', 'cmd_ai_audit_apply', 'cmd_ai_audit_log', 'cmd_ai_audit_stop']) {
+      if (!win.includes(c)) throw new Error('命令未注册：' + c);
+    }
+    // 被判死的词不能继续当干扰项/进出题队列
+    const db = fs.readFileSync(path.join(ROOT, 'src-tauri/src/db/mod.rs'), 'utf8');
+    if (!/audit_state[^\n]{0,20}<> 'rejected'/.test(db)) throw new Error('出题队列没有过滤 rejected 词条');
+    return '四维校验 + 复检 + 标记剔除 + 队列过滤';
+  }],
+
+  /* ---------------- 迷你悬浮窗 ---------------- */
+
+  ['迷你窗：窗口、权限、会话槽三件事都齐了', () => {
+    const win = fs.readFileSync(path.join(ROOT, 'src-tauri/src/windows.rs'), 'utf8');
+    const cap = JSON.parse(fs.readFileSync(path.join(ROOT, 'src-tauri/capabilities/default.json'), 'utf8'));
+    const st = fs.readFileSync(path.join(ROOT, 'src-tauri/src/state.rs'), 'utf8');
+    const html = fs.readFileSync(path.join(ROOT, 'src/index.html'), 'utf8');
+
+    if (!/pub const MINI_LABEL: &str = "mini"/.test(win)) throw new Error('缺少 mini 窗口标签');
+    if (!/fn create_mini_window/.test(win)) throw new Error('没有创建 mini 窗口');
+    if (!/create_mini_window\(&handle\)/.test(win)) throw new Error('启动时没有预建 mini 窗口');
+    // 悬浮窗三件套：置顶 / 无边框 / 不占任务栏
+    for (const p of ['.always_on_top(true)', '.decorations(false)', '.skip_taskbar(true)']) {
+      const seg = win.slice(win.indexOf('fn create_mini_window'), win.indexOf('fn create_mini_window') + 1600);
+      if (!seg.includes(p)) throw new Error('mini 窗口缺少 ' + p);
+    }
+    // ★ capabilities 里没有 "mini" 的话，这个窗口的 IPC 会被全拒（静默失效）
+    if (!cap.windows.includes('mini')) throw new Error('capabilities 没有给 mini 窗口授权');
+    // 会话槽：不带 kind 就会覆写主窗口的背诵会话
+    if (!/Some\("mini"\) => &self.mini/.test(st)) throw new Error('session_slot 不认 "mini"');
+    if (!/Some\("sidebar"\) => &self.sidebar/.test(st)) throw new Error('session_slot 不认 "sidebar"');
+    if (!html.includes('id="mini-shell"')) throw new Error('index.html 没有迷你窗骨架');
+    return '窗口 + 权限 + 独立槽位';
+  }],
+
+  ['迷你窗：会话命令一律带 kind，小窗不抢主窗口进度', () => {
+    const mini = fs.readFileSync(path.join(ROOT, 'src/js/mini.js'), 'utf8');
+    const sb = fs.readFileSync(path.join(ROOT, 'src/js/sidebar.js'), 'utf8');
+    // 小窗一打开就自动出题，不带 kind 会把主窗口正在背的那一轮整体覆写
+    if (!/startSession\([^)]*'mini'\)/.test(mini)) throw new Error('mini 的 startSession 没带 kind');
+    if (!/currentQuestion\(null, 'mini'\)/.test(mini)) throw new Error('mini 的 currentQuestion 没带 kind');
+    if (!/submitAnswer\([^)]*'mini'\)/.test(mini)) throw new Error('mini 的 submitAnswer 没带 kind');
+    // 侧边栏同病：以前 startSession 没传 kind，开侧栏就清掉主窗口进度
+    if (!/startSession\('en_to_zh', 1, false, null, null, 'sidebar'\)/.test(sb)) {
+      throw new Error('侧边栏的 startSession 没带 kind');
+    }
+    // 认识/不认识 = good/wrong 两档，与 SRS 对齐
+    if (!/'good' : 'wrong'/.test(mini)) throw new Error('小窗反馈没有映射到 SRS 档位');
+    return 'kind 齐全（mini/sidebar）';
+  }],
+
+  ['迷你窗：尺寸/透明度/置顶可调，进度与间隔上屏', () => {
+    const mini = fs.readFileSync(path.join(ROOT, 'src/js/mini.js'), 'utf8');
+    const win = fs.readFileSync(path.join(ROOT, 'src-tauri/src/windows.rs'), 'utf8');
+    for (const c of ['mini_set_size', 'mini_set_position', 'mini_set_always_on_top']) {
+      if (!win.includes(c)) throw new Error('缺少窗口命令 ' + c);
+    }
+    if (!/miniSetSize/.test(mini)) throw new Error('小窗没有尺寸调节');
+    if (!/ALPHAS/.test(mini) || !/style.opacity/.test(mini)) throw new Error('小窗没有透明度调节');
+    if (!/miniSetAlwaysOnTop/.test(mini)) throw new Error('小窗没有置顶开关');
+    // 复习间隔与今日进度是「小窗也要能背」的关键信息
+    if (!/due_text/.test(mini)) throw new Error('没有显示复习间隔');
+    if (!/API.stats\(/.test(mini)) throw new Error('没有显示进度统计');
+    return '尺寸/透明度/置顶 + 间隔 + 进度';
+  }],
 ];
 
 (async () => {

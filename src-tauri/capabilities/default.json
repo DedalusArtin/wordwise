@@ -2,7 +2,7 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
   "description": "WordWise 默认权限：窗口控制、对话、文件读写",
-  "windows": ["main", "sidebar"],
+  "windows": ["main", "sidebar", "mini"],
   "permissions": [
     "core:default",
     "core:window:default",

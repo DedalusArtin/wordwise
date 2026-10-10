@@ -206,8 +206,25 @@ const App = (() => {
   let config = null;
   let llmStatus = null;
 
+  /**
+   * 当前窗口是哪种视图：`main` / `sidebar` / `mini`。
+   *
+   * 三个窗口加载的是**同一个 index.html**，靠 `?view=` 区分 —— 所以这个
+   * 判断必须只有一个实现。以前 `app.js` 和 `api.js` 各写了一份判 sidebar 的
+   * 逻辑，加第三个窗口时必然只改一处、漏一处。
+   */
+  function viewKind() {
+    let v = '';
+    try {
+      v = new URLSearchParams(location.search).get('view') || '';
+    } catch (e) { /* 解析不了就当主窗口 */ }
+    if (v === 'sidebar') return 'sidebar';
+    if (v === 'mini') return 'mini';
+    return 'main';
+  }
+
   function isSidebarView() {
-    return new URLSearchParams(location.search).get('view') === 'sidebar';
+    return viewKind() === 'sidebar';
   }
 
   async function init() {
@@ -220,6 +237,14 @@ const App = (() => {
     //   [data-app-ver] 节点都在这里被一次性填好，前端不留版本字面量。
     //   侧边栏窗口走的是同一个 index.html，所以也会执行到这一行。
     window.Update?.applyVersion?.(info && info.version);
+
+    // 迷你悬浮窗：同样要先 init i18n —— 否则主窗口切成英文后，
+    // 小窗还是一整屏中文（与侧边栏此前那个「语言乱飘」是同一个病根）。
+    if (viewKind() === 'mini') {
+      try { window.I18n?.init(); } catch (e) { /* 字典坏了别挡小窗 */ }
+      setupMiniView();
+      return;
+    }
 
     if (isSidebarView()) {
       /* ★ R3 修复：侧栏窗口此前在这里提前 return，i18n 从没初始化过 ——
@@ -253,6 +278,21 @@ const App = (() => {
     API.wordCount().then(n => {
       if (n > 0) Sidebar.quickQuiz();
     }).catch(() => {});
+  }
+
+  /* ---------- 迷你悬浮窗 ---------- */
+
+  function setupMiniView() {
+    document.body.dataset.view = 'mini';
+    document.getElementById('main-shell')?.classList.add('hidden');
+    document.getElementById('sidebar-shell')?.classList.add('hidden');
+    document.getElementById('mini-shell')?.classList.remove('hidden');
+    document.getElementById('titlebar')?.classList.add('hidden');
+
+    window.Mini?.bind();
+    // 一打开就出一个词：悬浮窗的价值就是「抬手就能背一个」
+    window.Mini?.next();
+    window.Mini?.refreshProgress();
   }
 
   /* ---------- 主窗口 ---------- */
@@ -430,6 +470,12 @@ const App = (() => {
                        'leech', 'plan', 'stats', 'settings'];
         const p = pages[parseInt(e.key, 10) - 1];
         if (p) { e.preventDefault(); Pages.go(p); }
+      }
+      // Ctrl+M 呼出/收起迷你背词窗：主界面之外最顺手的一条路
+      // （另两条是托盘菜单，以及小窗自己的关闭按钮）。
+      if ((e.ctrlKey || e.metaKey) && (e.key === 'm' || e.key === 'M')) {
+        e.preventDefault();
+        API.miniToggle().catch(() => {});
       }
     });
 

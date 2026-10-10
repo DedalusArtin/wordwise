@@ -257,13 +257,21 @@ pub fn cmd_import_words_to_book(
     // 建库 + 落词
     state.db.upsert_wordbook(&book).map_err(err)?;
 
-    // 单词 -> WordEntry 全量入库（保留释义，便于离线背诵）
-    state
+    // 单词 -> WordEntry 全量入库（保留释义，便于离线背诵）。
+    //
+    // ★ 走**带语种闸门**的批量写：词表里混进来的日语 / 韩语行会被拦下，
+    //   且不计进 imported —— 否则界面显示「导入 5000 词」而实际少了几百，
+    //   用户只会以为过滤没生效、甚至以为程序丢了词。
+    let write = state
         .db
-        .bulk_upsert_words(&entries, now)
+        .bulk_upsert_words_gated(&entries, now)
         .map_err(err)?;
-
-    let words: Vec<String> = entries.iter().map(|e| e.word.clone()).collect();
+    let filtered = write.rejected.len() as i64;
+    let words: Vec<String> = entries
+        .iter()
+        .filter(|e| crate::lang::lang_compatible(&e.word, &e.lang))
+        .map(|e| e.word.clone())
+        .collect();
     let (imported, skipped) = state
         .db
         .add_words_to_book(&book.id, &words, &lang)
@@ -274,10 +282,17 @@ pub fn cmd_import_words_to_book(
         total,
         imported,
         skipped,
-        failed: total - imported - skipped,
+        failed: filtered,
         message: format!(
-            "已导入 {} 个单词到「{}」（去重跳过 {}）",
-            imported, book.name, skipped
+            "已导入 {} 个单词到「{}」（去重跳过 {}{}）",
+            imported,
+            book.name,
+            skipped,
+            if filtered > 0 {
+                format!("，语种不符拦下 {filtered} 个")
+            } else {
+                String::new()
+            }
         ),
     };
     let _ = state
@@ -478,9 +493,17 @@ pub async fn cmd_download_book(
         created_at: now,
     };
     state.db.upsert_wordbook(&book).map_err(err)?;
-    state.db.bulk_upsert_words(&entries, now).map_err(err)?;
-
-    let words: Vec<String> = entries.iter().map(|e| e.word.clone()).collect();
+    // 同样过语种闸门：下载的词表由第三方维护，里面混几行别的语言很常见
+    let write = state
+        .db
+        .bulk_upsert_words_gated(&entries, now)
+        .map_err(err)?;
+    let filtered = write.rejected.len() as i64;
+    let words: Vec<String> = entries
+        .iter()
+        .filter(|e| crate::lang::lang_compatible(&e.word, &e.lang))
+        .map(|e| e.word.clone())
+        .collect();
     let (imported, skipped) = state
         .db
         .add_words_to_book(&book.id, &words, &lang)
@@ -491,8 +514,17 @@ pub async fn cmd_download_book(
         total,
         imported,
         skipped,
-        failed: total - imported - skipped,
-        message: format!("已下载「{}」，导入 {} 词", book.name, imported),
+        failed: filtered,
+        message: format!(
+            "已下载「{}」，导入 {} 词{}",
+            book.name,
+            imported,
+            if filtered > 0 {
+                format!("（语种不符拦下 {filtered} 个）")
+            } else {
+                String::new()
+            }
+        ),
     };
     let _ = state.db.log_import(&result, &rb.source_url, now);
     Ok(result)

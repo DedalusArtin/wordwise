@@ -117,6 +117,7 @@ pub struct MaintResult {
 /// - `vacuum`   整理数据库（回收删除留下的空洞）
 /// - `check`    完整性检查
 /// - `backup`   导出一份一致性快照到数据目录
+/// - `purge-lang-mismatch`  清理语种错标的存量词条（如 `('en','嗚呼')`）
 #[tauri::command(async)]
 pub fn cmd_db_maintain(
     state: State<'_, Arc<AppState>>,
@@ -173,8 +174,49 @@ pub fn cmd_db_maintain(
                 path: Some(out.display().to_string()),
             })
         }
+        // 语种清理：把「字形与语言不自洽」的存量脏数据搬回它真正该在的语言下。
+        //
+        // 为什么做成维护动作而不是只靠启动迁移：用户需要**随时能手动跑一遍**，
+        // 尤其是刚导入了一批乱七八糟的文本之后 —— 入库闸门只管新数据，
+        // 历史遗留（以及被绕过的解析分支）得靠这一下收尾。
+        "purge-lang-mismatch" => {
+            let rep = state.db.purge_lang_mismatch(false).map_err(err)?;
+            let after_text = before_text.clone();
+            Ok(MaintResult {
+                action,
+                ok: true,
+                message: if rep.mismatched == 0 {
+                    format!("已扫 {} 条词条，没有语种错标的记录", rep.scanned)
+                } else {
+                    format!(
+                        "扫 {} 条，纠正 {} 条语种错标的词条（示例：{}）",
+                        rep.scanned,
+                        rep.moved,
+                        rep.samples
+                            .iter()
+                            .take(5)
+                            .cloned()
+                            .collect::<Vec<_>>()
+                            .join("、")
+                    )
+                },
+                before_text,
+                after_text,
+                path: None,
+            })
+        }
         other => Err(format!("不支持的维护动作：{other}")),
     }
+}
+
+/// 按语言统计词条数。
+///
+/// 「词库里到底混了多少别的语言」以前只能导出 JSON 才看得见，而界面
+/// （`index.html` 词条语言一节）又宣称程序会自动判定 —— 有了这个直读视图，
+/// 污染规模一眼可见，清理前后也能对账。
+#[tauri::command(async)]
+pub fn cmd_lang_stats(state: State<'_, Arc<AppState>>) -> Result<Vec<(String, i64)>, String> {
+    state.db.lang_stats().map_err(err)
 }
 
 /// 打开一个本地目录或文件所在的文件夹。

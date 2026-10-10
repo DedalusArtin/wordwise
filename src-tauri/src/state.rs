@@ -83,6 +83,15 @@ pub struct AppState {
     /// `batch_size`，而入口按钮显示的是「今天到期 + 错词」的真实数量
     /// （比如 12），点进去却变成 20 —— 数字对不上。
     pub review: RwLock<Session>,
+    /// **迷你窗会话**：桌面悬浮小窗独用一个槽位。
+    ///
+    /// ★ 为什么不能复用背诵槽：侧边栏的「快速背词」以前走默认槽（= 主窗口
+    ///   的背诵槽），而它在窗口打开时会自动出第一题（`app.js`），于是
+    ///   **只要打开侧边栏，主窗口正在进行的背诵就被整体覆写**。迷你窗同理
+    ///   —— 它比侧边栏更常开。与其让三个入口互相摧毁，不如各给一个槽。
+    pub mini: RwLock<Session>,
+    /// **侧边栏会话**：同上，侧边栏的查词/速背不该动主窗口的进度。
+    pub sidebar: RwLock<Session>,
     /// 学习数据、模型、备份的落点
     pub data_dir: PathBuf,
     /// 上面这个目录是**怎么选出来的**（设置页要如实说明，
@@ -150,6 +159,21 @@ impl AppState {
             log::warn!("词条语言对齐失败（读取时会自行兜底）：{e}");
         }
 
+        // 语种清理：把「字形与语言不自洽」的存量词条搬回它真正该在的语言下。
+        //
+        // 入库闸门只管**新**数据，历史上被绕过闸门写进来的那批
+        // （`('en','嗚呼')` 就是这么来的）得靠这一下收尾。只搬不删 ——
+        // 用户的词一条都不会消失，只是回到正确的语言下，背诵时也就不再
+        // 从英语队列里冒出来。
+        match db.purge_lang_mismatch(false) {
+            Ok(rep) => {
+                if rep.moved > 0 {
+                    log::warn!("启动语种清理：纠正 {} 条语种错标的词条", rep.moved);
+                }
+            }
+            Err(e) => log::warn!("启动语种清理失败（不影响运行）：{e}"),
+        }
+
         let state = Arc::new(Self {
             db,
             config: RwLock::new(config),
@@ -157,6 +181,8 @@ impl AppState {
             proxy: RwLock::new(proxy),
             session: RwLock::new(Session::default()),
             review: RwLock::new(Session::default()),
+            mini: RwLock::new(Session::default()),
+            sidebar: RwLock::new(Session::default()),
             data_dir,
             data_dir_source,
         });
@@ -190,7 +216,8 @@ impl AppState {
         self.config.read().clone()
     }
 
-    /// 按 `kind` 选择会话槽位：缺省 / `"study"` → 背诵槽；`"review"` → 复习槽。
+    /// 按 `kind` 选择会话槽位：`"review"` → 复习槽、`"mini"` → 迷你窗槽、
+    /// `"sidebar"` → 侧边栏槽，其余（缺省 / `"study"`）→ 背诵槽。
     ///
     /// 把「选哪个槽」收敛成一个函数，是因为有 6 个命令都要做这个判断；
     /// 各写一遍 `if kind == "review"` 迟早有人写漏一处，那一处就会继续
@@ -199,10 +226,11 @@ impl AppState {
     /// 无法识别的取值一律当 `"study"`：宁可退回旧行为，也不要因为前端多传了
     /// 一个没约定的值就让命令失败。
     pub fn session_slot(&self, kind: Option<&str>) -> &RwLock<Session> {
-        if kind == Some("review") {
-            &self.review
-        } else {
-            &self.session
+        match kind {
+            Some("review") => &self.review,
+            Some("mini") => &self.mini,
+            Some("sidebar") => &self.sidebar,
+            _ => &self.session,
         }
     }
 

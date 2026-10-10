@@ -169,6 +169,134 @@ const Maint = (() => {
   })();
 
   /* ============================================================
+     一·五、词条质量：语种构成 + AI 自检
+
+     两个互相独立的问题，放在同一个面板里是因为它们回答的是同一句话：
+     「我背的这些词，到底干不干净？」
+
+       · 语种构成回答「有没有别的语言混进来」；
+       · AI 自检回答「留下来的这些，释义对不对」。
+     ============================================================ */
+
+  const Quality = (() => {
+    const LANG_LABEL = {
+      en: '英语', zh: '中文', ja: '日语', ko: '韩语', fr: '法语', de: '德语',
+      es: '西班牙语', ru: '俄语', it: '意大利语', pt: '葡萄牙语', ar: '阿拉伯语',
+      hi: '印地语', el: '希腊语', th: '泰语', he: '希伯来语',
+    };
+
+    function langName(code) {
+      return LANG_LABEL[code] || code;
+    }
+
+    async function refreshStats() {
+      const box = $('lang-stats');
+      if (!box) return;
+      try {
+        const rows = await API.langStats();
+        if (!rows || !rows.length) {
+          box.innerHTML = '<span class="muted">词库还是空的。</span>';
+          return;
+        }
+        const total = rows.reduce((s, r) => s + (r[1] || 0), 0);
+        box.innerHTML = rows.map(([code, n]) => {
+          const pct = total ? Math.round((n / total) * 1000) / 10 : 0;
+          return `<div class="db-trow"><span class="db-tname">${U().esc(langName(code))}
+            <span class="muted">（${U().esc(code)}）</span></span>
+            <span class="db-tnum">${n} · ${pct}%</span></div>`;
+        }).join('');
+      } catch (e) {
+        box.innerHTML = `<span class="muted">读取失败：${U().esc(e.message)}</span>`;
+      }
+    }
+
+    async function purge() {
+      const out = $('db-result');
+      await run($('btn-lang-purge'), '清理中…', async () => {
+        try {
+          const r = await API.dbMaintain('purge-lang-mismatch');
+          if (out) {
+            out.classList.remove('hidden');
+            out.innerHTML = `<div class="db-res ok"><b>${U().esc(r.message)}</b></div>`;
+          }
+          await refreshStats();
+        } catch (e) {
+          if (out) {
+            out.classList.remove('hidden');
+            out.innerHTML = `<div class="db-res bad"><b>${U().esc(e.message)}</b></div>`;
+          }
+        }
+      });
+    }
+
+    /** 渲染自检日志：最近 50 条，含判定、问题项与说明。 */
+    async function renderLog() {
+      const box = $('audit-log');
+      if (!box) return;
+      try {
+        const rows = await API.aiAuditLog({ limit: 50 });
+        if (!rows || !rows.length) {
+          box.innerHTML = '<span class="muted">还没有自检记录。</span>';
+          return;
+        }
+        box.innerHTML = rows.map(r => {
+          const issues = (() => {
+            try { return JSON.parse(r.issues_json || '[]'); } catch (e) { return []; }
+          })();
+          const cls = r.verdict === 'ok' ? 'ok' : (r.verdict === 'fixed' ? 'warn' : 'bad');
+          const vt = r.verdict === 'ok' ? '通过' : (r.verdict === 'fixed' ? '已修正' : '已剔除');
+          return `<div class="audit-row ${cls}">
+            <span class="ar-word">${U().esc(r.word)}</span>
+            <span class="ar-tag">${vt}</span>
+            <span class="ar-detail">${U().esc(r.detail || (issues.length ? issues.join('/') : ''))}</span>
+          </div>`;
+        }).join('');
+      } catch (e) {
+        box.innerHTML = `<span class="muted">读取自检日志失败：${U().esc(e.message)}</span>`;
+      }
+    }
+
+    async function auditBatch() {
+      const btn = $('btn-audit-batch');
+      const prog = $('audit-progress');
+      const limit = parseInt(($('set-audit-limit') || {}).value || '50', 10) || 50;
+      // 进度是后端广播事件：主窗口与迷你窗都收得到，这里按 batchId 过滤，
+      // 免得别的窗口发起的自检把自己的进度条也刷了。
+      const un = API.onAiAuditProgress((p) => {
+        if (!prog || !p) return;
+        prog.textContent = `自检中 ${p.done || 0}/${p.total || 0} · ${U().esc(p.word || '')}：${U().esc(p.verdict || '')}`;
+      });
+      await run(btn, '自检中…', async () => {
+        try {
+          const rep = await API.aiAuditBatch(null, limit);
+          if (prog) {
+            prog.textContent = `本批完成：扫 ${rep.scanned} 条 · 通过 ${rep.ok} · 修正 ${rep.fixed} · 剔除 ${rep.rejected} · 失败 ${rep.failed}`;
+          }
+          await renderLog();
+          U().toast(`自检完成：通过 ${rep.ok} / 修正 ${rep.fixed} / 剔除 ${rep.rejected}`, 'ok');
+        } catch (e) {
+          if (prog) prog.textContent = '';
+          U().toast(e && e.message ? e.message : '自检失败', 'err');
+        } finally {
+          if (typeof un === 'function') un();
+        }
+      });
+    }
+
+    function bind() {
+      $('btn-lang-stats')?.addEventListener('click', () => { void refreshStats(); });
+      $('btn-lang-purge')?.addEventListener('click', () => { void purge(); });
+      $('btn-audit-batch')?.addEventListener('click', () => { void auditBatch(); });
+      $('btn-audit-stop')?.addEventListener('click', async () => {
+        try { await API.aiAuditStop(); U().toast('已请求停止，当前这个词跑完就停', 'ok'); }
+        catch (e) { U().toast(e.message, 'err'); }
+      });
+    }
+
+    return { bind, refreshStats, renderLog };
+  })();
+
+  /* ============================================================
      二、数据与模型的存放位置
      ============================================================
 
@@ -981,6 +1109,7 @@ const Maint = (() => {
     if (bound) return;
     bound = true;
     Db.bind();
+    Quality.bind();
     Storage.bind();
     Llm.bind();
     Chip.bind();

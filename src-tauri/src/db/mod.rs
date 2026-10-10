@@ -100,6 +100,71 @@ pub struct ExplainRow {
     pub updated_at: i64,
 }
 
+/// 批量写入语种闸门的结果。
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct BulkWrite {
+    /// 真正写进 `words` 的条数
+    pub written: usize,
+    /// 被闸门拦下的（词、语言、人话理由）—— 界面要能逐条解释「为什么没进去」
+    pub rejected: Vec<RejectedWord>,
+}
+
+/// 被语种闸门拦下的一个词。
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct RejectedWord {
+    pub word: String,
+    pub lang: String,
+    pub reason: String,
+}
+
+/// 语种清理报告。
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct PurgeReport {
+    pub scanned: usize,
+    /// 字形与语言不自洽的条数
+    pub mismatched: usize,
+    /// 实际搬走（改写语言）的条数；dry-run 时为 0
+    pub moved: usize,
+    /// 示例（`word@lang→want`），最多留 20 条给用户看
+    pub samples: Vec<String>,
+}
+
+/// 一条 AI 自检记录（对应 `ai_audit_log`）。
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct AuditRow {
+    pub batch_id: String,
+    pub word: String,
+    pub lang: String,
+    pub round: i32,
+    pub verdict: String,
+    pub issues_json: String,
+    pub detail: String,
+    pub before_json: String,
+    pub after_json: String,
+    pub model: String,
+    pub elapsed_ms: i64,
+    pub at: i64,
+}
+
+impl AuditRow {
+    fn from_row(r: &rusqlite::Row) -> rusqlite::Result<Self> {
+        Ok(Self {
+            batch_id: r.get(0)?,
+            word: r.get(1)?,
+            lang: r.get(2)?,
+            round: r.get(3)?,
+            verdict: r.get(4)?,
+            issues_json: r.get(5)?,
+            detail: r.get(6)?,
+            before_json: r.get(7)?,
+            after_json: r.get(8)?,
+            model: r.get(9)?,
+            elapsed_ms: r.get(10)?,
+            at: r.get(11)?,
+        })
+    }
+}
+
 impl Db {
     /// 打开（或创建）数据库。
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
@@ -327,8 +392,58 @@ impl Db {
 
             CREATE INDEX IF NOT EXISTS idx_explain_word ON explain_store(lang, word);
             CREATE INDEX IF NOT EXISTS idx_explain_saved ON explain_store(saved);
+
+            -- ============ AI 词条自检日志（可追溯） ============
+            -- 每个词条纳入背词表时都要过一遍模型自检，结论必须留痕：
+            -- 用户要能回答「这个词为什么被剔了 / 被改成什么样了」。
+            --
+            -- 为什么不用现成的 import_log：它只记**批次**汇总
+            -- （total/imported/skipped/failed），没有词级明细，答不出
+            -- 「哪个词、哪项不合格、改前改后各是什么」。
+            CREATE TABLE IF NOT EXISTS ai_audit_log (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                batch_id    TEXT NOT NULL DEFAULT '',   -- 一批自检的唯一标识
+                word        TEXT NOT NULL,
+                lang        TEXT NOT NULL DEFAULT 'en',
+                round       INTEGER NOT NULL DEFAULT 1, -- 第几轮（修正后重检 +1）
+                verdict     TEXT NOT NULL,              -- ok / fixed / rejected
+                issues_json TEXT NOT NULL DEFAULT '',   -- ["spelling","pos","definition","example"]
+                detail      TEXT NOT NULL DEFAULT '',   -- 人话说明
+                before_json TEXT NOT NULL DEFAULT '',   -- 校验前的 entry_json
+                after_json  TEXT NOT NULL DEFAULT '',   -- 修正后的 entry_json
+                model       TEXT NOT NULL DEFAULT '',   -- 用的哪个模型（可追溯）
+                elapsed_ms  INTEGER NOT NULL DEFAULT 0,
+                at          INTEGER NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_audit_batch ON ai_audit_log(batch_id);
+            CREATE INDEX IF NOT EXISTS idx_audit_word  ON ai_audit_log(lang, word);
+            CREATE INDEX IF NOT EXISTS idx_audit_at    ON ai_audit_log(at DESC);
             "#,
         )?;
+
+        // 增量列：老库建表时还没有自检标记，用 ALTER 补上。
+        // SQLite 的 ALTER 没有 IF NOT EXISTS，所以先查 pragma 再决定要不要补。
+        for (col, ddl) in [
+            (
+                "audit_state",
+                "ALTER TABLE words ADD COLUMN audit_state TEXT NOT NULL DEFAULT ''",
+            ),
+            (
+                "audited_at",
+                "ALTER TABLE words ADD COLUMN audited_at INTEGER NOT NULL DEFAULT 0",
+            ),
+        ] {
+            let has: i64 = conn
+                .prepare("SELECT COUNT(*) FROM pragma_table_info('words') WHERE name=?1")?
+                .query_row(params![col], |r| r.get(0))
+                .unwrap_or(0);
+            if has == 0 {
+                if let Err(e) = conn.execute_batch(ddl) {
+                    log::warn!("补列 words.{col} 失败（不影响运行）：{e}");
+                }
+            }
+        }
         Ok(())
     }
 
@@ -544,6 +659,312 @@ impl Db {
         }
         tx.commit()?;
         Ok(n)
+    }
+
+    // ---------- 语种闸门 ----------
+
+    /// 这个词条的字形与它声明的语言是否自洽。判定规则见 [`crate::lang`]。
+    pub fn lang_gate_ok(entry: &WordEntry) -> bool {
+        crate::lang::lang_compatible(&entry.word, &entry.lang)
+    }
+
+    /// 带语种闸门地写一条词条；被拦下时**不写库**并返回 `false`。
+    ///
+    /// 为什么不直接在 [`Self::upsert_word`] 里拦：语言迁移
+    /// （`migrate_words_lang`）和示例词库这类**刻意为之**的写入也走它，
+    /// 闸门只能加在「用户/外部数据进来的那半边」。
+    pub fn upsert_word_gated(&self, entry: &WordEntry, now: i64) -> Result<bool> {
+        if !Self::lang_gate_ok(entry) {
+            log::warn!(
+                "语种闸门拦下：{}",
+                crate::lang::mismatch_reason(&entry.word, &entry.lang)
+            );
+            return Ok(false);
+        }
+        self.upsert_word(entry, now)?;
+        Ok(true)
+    }
+
+    /// 批量版闸门：只写通过的，返回「写进去了几条 + 被拦下的清单」。
+    ///
+    /// 计数必须准确 —— 导入结果页直接把这个数字显示给用户看，
+    /// 被拦下的词条若仍计进 imported，用户就会以为「过滤没生效」。
+    pub fn bulk_upsert_words_gated(
+        &self,
+        entries: &[WordEntry],
+        now: i64,
+    ) -> Result<BulkWrite> {
+        let rejected: Vec<RejectedWord> = entries
+            .iter()
+            .filter(|e| !Self::lang_gate_ok(e))
+            .map(|e| RejectedWord {
+                word: e.word.clone(),
+                lang: e.lang.clone(),
+                reason: crate::lang::mismatch_reason(&e.word, &e.lang),
+            })
+            .collect();
+
+        if !rejected.is_empty() {
+            log::warn!(
+                "语种闸门拦下 {} 条（示例：{}）",
+                rejected.len(),
+                rejected
+                    .iter()
+                    .take(5)
+                    .map(|r| format!("{}@{}", r.word, r.lang))
+                    .collect::<Vec<_>>()
+                    .join("、")
+            );
+        }
+
+        let kept: Vec<&WordEntry> = entries.iter().filter(|e| Self::lang_gate_ok(e)).collect();
+        if kept.is_empty() {
+            return Ok(BulkWrite {
+                written: 0,
+                rejected,
+            });
+        }
+        let mut conn = self.conn.lock();
+        let tx = conn.transaction()?;
+        let mut n = 0;
+        {
+            let mut stmt = tx.prepare(
+                "INSERT INTO words(word, lang, entry_json, added_at) VALUES(?1,?2,?3,?4)
+                 ON CONFLICT(word, lang) DO UPDATE SET entry_json=excluded.entry_json",
+            )?;
+            for e in &kept {
+                let json = serde_json::to_string(e)?;
+                stmt.execute(params![e.word, e.lang, json, now])?;
+                n += 1;
+            }
+        }
+        tx.commit()?;
+        Ok(BulkWrite {
+            written: n,
+            rejected,
+        })
+    }
+
+    // ---------- 语种闸门 END ----------
+
+    /// 按语言统计词条数：让「词库里到底混了多少别的语言」肉眼可见。
+    pub fn lang_stats(&self) -> Result<Vec<(String, i64)>> {
+        let conn = self.conn.lock();
+        let mut stmt = conn.prepare(
+            "SELECT lang, COUNT(*) FROM words GROUP BY lang ORDER BY COUNT(*) DESC",
+        )?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
+    /// 清一遍「字形与语言不自洽」的存量脏数据。
+    ///
+    /// 处理方式是**搬家而不是删除**：把 `('en','嗚呼')` 搬成 `('ja','嗚呼')`，
+    /// 学习状态、词库归属同步迁移；目标语言下已有同名行时才删旧行。
+    /// 用户的词一条都不会消失，只是回到它真正该在的语言下。
+    pub fn purge_lang_mismatch(&self, dry_run: bool) -> Result<PurgeReport> {
+        let mut conn = self.conn.lock();
+        let tx = conn.transaction()?;
+
+        let rows: Vec<(String, String, String, i64)> = {
+            let mut stmt = tx.prepare("SELECT word, lang, entry_json, added_at FROM words")?;
+            let it = stmt.query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, i64>(3)?,
+                ))
+            })?;
+            let mut v = Vec::new();
+            for r in it {
+                v.push(r?);
+            }
+            v
+        };
+
+        let mut rep = PurgeReport::default();
+        for (word, lang, json, added_at) in rows {
+            rep.scanned += 1;
+            if crate::lang::lang_compatible(&word, &lang) {
+                continue;
+            }
+            let want = crate::lang::resolve_lang(&word, Some(&lang), &lang);
+            rep.samples.push(format!("{word}@{lang}→{want}"));
+            if dry_run {
+                rep.mismatched += 1;
+                continue;
+            }
+            // 1) 词条搬到正确语言下（JSON 里的 lang 一起改，否则又造出新的不一致）
+            let fixed_json = rewrite_entry_json_lang(&json, &want);
+            tx.execute(
+                "INSERT OR IGNORE INTO words(word,lang,entry_json,added_at) VALUES(?1,?2,?3,?4)",
+                params![word, want, fixed_json, added_at],
+            )?;
+            // 2) 学习状态同步搬；目标行不存在就保留旧的（绝不把进度删没了）
+            tx.execute(
+                r#"INSERT OR IGNORE INTO study_state
+                     (word,lang,ease_factor,interval_days,repetitions,due_at,last_review_at,
+                      correct_count,wrong_count,is_leech,mastery,is_mastered)
+                   SELECT word,?2,ease_factor,interval_days,repetitions,due_at,last_review_at,
+                          correct_count,wrong_count,is_leech,mastery,is_mastered
+                   FROM study_state WHERE word=?1 AND lang=?3"#,
+                params![word, want, lang],
+            )?;
+            // 3) 词库归属同步改；目标已存在时 IGNORE 掉这条
+            tx.execute(
+                "UPDATE OR IGNORE wordbook_words SET lang=?3 WHERE word=?1 AND lang=?2",
+                params![word, lang, want],
+            )?;
+            // 4) 删旧行（数据已在 want 下落了一份）
+            tx.execute(
+                "DELETE FROM words WHERE word=?1 AND lang=?2",
+                params![word, lang],
+            )?;
+            let has_target: i64 = tx.query_row(
+                "SELECT COUNT(*) FROM study_state WHERE word=?1 AND lang=?2",
+                params![word, want],
+                |r| r.get(0),
+            )?;
+            if has_target > 0 {
+                tx.execute(
+                    "DELETE FROM study_state WHERE word=?1 AND lang=?2",
+                    params![word, lang],
+                )?;
+            }
+            rep.mismatched += 1;
+            rep.moved += 1;
+        }
+
+        tx.commit()?;
+        if rep.mismatched > 0 {
+            log::warn!(
+                "语种清理：扫 {} 条，不自洽 {} 条{}（示例：{}）",
+                rep.scanned,
+                rep.mismatched,
+                if dry_run { "（dry-run，未改）" } else { "" },
+                rep.samples.iter().take(5).cloned().collect::<Vec<_>>().join("、")
+            );
+        }
+        Ok(rep)
+    }
+
+    // ---------- AI 词条自检日志 ----------
+
+    /// 记一条自检结论，并把同一句话也送进运行日志（诊断面板能看见）。
+    pub fn log_audit(&self, row: &AuditRow) -> Result<()> {
+        {
+            let conn = self.conn.lock();
+            conn.execute(
+                r#"INSERT INTO ai_audit_log
+                     (batch_id, word, lang, round, verdict, issues_json, detail,
+                      before_json, after_json, model, elapsed_ms, at)
+                   VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)"#,
+                params![
+                    row.batch_id,
+                    row.word,
+                    row.lang,
+                    row.round,
+                    row.verdict,
+                    row.issues_json,
+                    row.detail,
+                    row.before_json,
+                    row.after_json,
+                    row.model,
+                    row.elapsed_ms,
+                    row.at
+                ],
+            )?;
+        }
+        log::info!(
+            "AI 自检 {}/{}：{}（{}）",
+            row.word,
+            row.lang,
+            row.verdict,
+            row.detail
+        );
+        Ok(())
+    }
+
+    /// 查自检日志：可按批次或词过滤，最新的在前。
+    pub fn audit_log(
+        &self,
+        batch_id: Option<&str>,
+        word: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<AuditRow>> {
+        let conn = self.conn.lock();
+        let mut out = Vec::new();
+        let lim = if limit <= 0 { 200 } else { limit.min(2000) };
+        if let Some(b) = batch_id.filter(|s| !s.trim().is_empty()) {
+            let mut stmt = conn.prepare(
+                r#"SELECT batch_id,word,lang,round,verdict,issues_json,detail,
+                          before_json,after_json,model,elapsed_ms,at
+                   FROM ai_audit_log WHERE batch_id=?1 ORDER BY id DESC LIMIT ?2"#,
+            )?;
+            let rows = stmt.query_map(params![b, lim], AuditRow::from_row)?;
+            for r in rows {
+                out.push(r?);
+            }
+            return Ok(out);
+        }
+        if let Some(w) = word.filter(|s| !s.trim().is_empty()) {
+            let mut stmt = conn.prepare(
+                r#"SELECT batch_id,word,lang,round,verdict,issues_json,detail,
+                          before_json,after_json,model,elapsed_ms,at
+                   FROM ai_audit_log WHERE word=?1 ORDER BY id DESC LIMIT ?2"#,
+            )?;
+            let rows = stmt.query_map(params![w, lim], AuditRow::from_row)?;
+            for r in rows {
+                out.push(r?);
+            }
+            return Ok(out);
+        }
+        let mut stmt = conn.prepare(
+            r#"SELECT batch_id,word,lang,round,verdict,issues_json,detail,
+                      before_json,after_json,model,elapsed_ms,at
+               FROM ai_audit_log ORDER BY id DESC LIMIT ?1"#,
+        )?;
+        let rows = stmt.query_map(params![lim], AuditRow::from_row)?;
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
+    /// 写回自检结论标记（''/ok/fixed/rejected），并记下时间。
+    pub fn set_audit_state(&self, word: &str, lang: &str, state: &str, now: i64) -> Result<()> {
+        let conn = self.conn.lock();
+        conn.execute(
+            "UPDATE words SET audit_state=?3, audited_at=?4 WHERE word=?1 AND lang=?2",
+            params![word, lang, state, now],
+        )?;
+        Ok(())
+    }
+
+    /// 挑出还没自检（或自检未通过）的词，供批量自检用。
+    pub fn pick_words_to_audit(&self, lang: &str, limit: usize) -> Result<Vec<(String, String)>> {
+        let conn = self.conn.lock();
+        let lim = if limit == 0 { 50 } else { limit.min(500) } as i64;
+        let mut stmt = conn.prepare(
+            r#"SELECT word, lang FROM words
+               WHERE lang=?1
+                 AND COALESCE(audit_state,'') NOT IN ('ok','fixed')
+               ORDER BY COALESCE(audited_at,0) ASC, added_at DESC
+               LIMIT ?2"#,
+        )?;
+        let rows = stmt.query_map(params![lang, lim], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+        })?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
     }
 
     pub fn get_word(&self, word: &str, lang: &str) -> Result<Option<WordEntry>> {
@@ -927,8 +1348,12 @@ impl Db {
     /// 随机抽取词库中的若干词（用于生成干扰项、随机测试）。
     pub fn random_words(&self, lang: &str, limit: i64) -> Result<Vec<WordEntry>> {
         let conn = self.conn.lock();
+        // ★ 被 AI 自检判死（`audit_state='rejected'`）的词不该再当干扰项：
+        //   一条释义完全不对的词拿去当错误选项，等于用错误教用户。
         let mut stmt = conn.prepare(
-            "SELECT word, entry_json FROM words WHERE lang=?1 ORDER BY RANDOM() LIMIT ?2",
+            r#"SELECT word, entry_json FROM words
+               WHERE lang=?1 AND COALESCE(audit_state,'') <> 'rejected'
+               ORDER BY RANDOM() LIMIT ?2"#,
         )?;
         let rows = stmt.query_map(params![lang, limit], |r| {
             Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
@@ -1053,6 +1478,11 @@ impl Db {
                       correct_count,wrong_count,is_leech,mastery,is_mastered
                FROM study_state
                WHERE lang=?1 AND is_mastered=0 AND due_at<=?2
+                 -- 被 AI 自检判死的词条不再进复习队列（标记剔除而非真删）
+                 AND NOT EXISTS (
+                       SELECT 1 FROM words w
+                       WHERE w.word = study_state.word AND w.lang = study_state.lang
+                         AND w.audit_state = 'rejected')
                ORDER BY is_leech DESC, due_at ASC
                LIMIT ?3"#,
         )?;
@@ -2030,6 +2460,7 @@ impl Db {
                JOIN words w ON w.word = bw.word AND w.lang = bw.lang
                LEFT JOIN study_state s ON s.word = bw.word AND s.lang = bw.lang
                WHERE bw.book_id = ?1 AND bw.lang = ?2 AND s.word IS NULL
+                 AND COALESCE(w.audit_state,'') <> 'rejected'
                ORDER BY bw.ord
                LIMIT ?3"#,
         )?;

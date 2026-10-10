@@ -60,6 +60,41 @@
   </div>
 </div>
 
+<!-- ============ 迷你悬浮窗模式布局 ============
+     参照 ToastFish / 摸鱼背词的桌面小窗：常驻右下角、置顶、无边框，
+     一屏只做一件事 —— 显示一个词，等用户说「认识 / 不认识」。
+     与主窗口共享同一个 SQLite（同一个进程 + 同一个 AppState），
+     所以进度、词库、SRS 完全共用，不需要任何同步逻辑。 -->
+<div id="mini-shell" class="mini-shell hidden">
+  <div class="mn-drag" data-tauri-drag-region>
+    <span class="mn-title">背词</span>
+    <div class="mn-actions">
+      <button class="icon-btn xs" id="mn-pin" title="窗口置顶">&#128204;</button>
+      <button class="icon-btn xs" id="mn-size" title="切换尺寸">&#9634;</button>
+      <button class="icon-btn xs" id="mn-alpha" title="切换透明度">&#9788;</button>
+      <button class="icon-btn xs" id="mn-main" title="打开主界面">&#9635;</button>
+      <button class="icon-btn xs" id="mn-close" title="隐藏">&#10005;</button>
+    </div>
+  </div>
+
+  <div class="mn-body">
+    <div class="mn-word-row">
+      <span class="mn-word" id="mn-word">—</span>
+      <span class="mn-phon" id="mn-phon"></span>
+    </div>
+    <div class="mn-def" id="mn-def">正在取词…</div>
+    <div class="mn-meta" id="mn-meta"></div>
+  </div>
+
+  <div class="mn-foot">
+    <span class="mn-progress" id="mn-progress"></span>
+    <span class="mn-btns">
+      <button class="primary-btn xs" id="mn-know">认识</button>
+      <button class="ghost-btn xs" id="mn-unknown">不认识</button>
+    </span>
+  </div>
+</div>
+
 <!-- ============ 主界面布局 ============ -->
 <div id="main-shell" class="app-shell">
   <!-- 左侧导航 -->
@@ -574,7 +609,7 @@
       <header class="page-head">
         <div>
           <h1>知识图谱</h1>
-          <p class="sub">把词与词的关系画成一张图：点节点以它为中心展开，双击打开详情卡</p>
+          <p class="sub">把词与词的关系画成一张图：悬停看释义，单击下方看介绍，双击按它发散</p>
         </div>
         <div class="head-actions">
           <input id="graph-search" class="inline-input" type="text"
@@ -590,6 +625,8 @@
         <div class="graph-canvas" id="graph-canvas">
           <svg id="graph-svg" xmlns="http://www.w3.org/2000/svg"></svg>
           <div class="graph-tip hidden" id="graph-tip"></div>
+          <!-- 单击节点后在这个面板里显示这个词（不碰布局，避免整图重排晃眼） -->
+          <div class="graph-info hidden" id="graph-info"></div>
           <div class="graph-zoom">
             <button class="icon-btn" id="graph-zoom-in" title="放大">&#43;</button>
             <button class="icon-btn" id="graph-zoom-out" title="缩小">&#8722;</button>
@@ -618,7 +655,8 @@
             <div class="graph-summary" id="graph-summary"></div>
             <p class="muted" style="margin-top:10px">
               <b>实线</b>＝词库里写明的关系；<b>虚线</b>＝模型推测的关系，仅供参考。<br />
-              <b>实心点</b>＝词库里有完整词条（双击看详情）；<b>空心点</b>＝只出现在关系里（双击去查词）。
+              <b>实心点</b>＝词库里有完整词条；<b>空心点</b>＝只出现在关系里（词库外）。<br />
+              悬停看释义 · 单击下方看介绍 · 双击按这个词发散。
             </p>
           </div>
 
@@ -1189,6 +1227,37 @@
           <div id="db-result" class="db-result hidden"></div>
         </div>
 
+        <!-- 词条质量：语种构成 + AI 自检（需求：背词表只留目标语种、释义要准） -->
+        <div class="panel span-2">
+          <div class="panel-head-row">
+            <h3 class="panel-title">词条质量</h3>
+            <div class="btn-row">
+              <button class="ghost-btn sm" id="btn-lang-stats">语种统计</button>
+              <button class="ghost-btn sm" id="btn-lang-purge"
+                      title="把语种标错的存量词条搬回它真正该在的语言下（不删词）">清理语种错标</button>
+              <button class="primary-btn sm" id="btn-audit-batch">AI 自检一批</button>
+              <button class="ghost-btn sm" id="btn-audit-stop">停止</button>
+            </div>
+          </div>
+          <p class="muted">
+            <b>语种闸门</b>：词条入库前按书写系统判定 —— 含假名判日语、含谚文判韩语、
+            纯汉字判中文，只有拉丁字母的词才归入英语词表。第三方词表、粘贴导入、
+            手动加词全部过这道闸门，混进来的日语会被拦下并计进报告。<br />
+            <b>AI 自检</b>：每个词条纳入背词表时由本地大模型校一遍拼写、词性、
+            中文释义与例句；有问题就修正并<b>复检一轮</b>，仍不合格才标记剔除
+            （不真删，只是不再进出题队列）。每次校验都留日志，可在下面查。
+          </p>
+          <div class="option-row" style="margin-top:8px">
+            <label class="field-inline">
+              <span>自检条数</span>
+              <input type="number" id="set-audit-limit" min="5" max="500" step="5" value="50" />
+            </label>
+          </div>
+          <div id="lang-stats" class="db-info" style="margin-top:8px"></div>
+          <div id="audit-progress" class="muted" style="margin-top:8px"></div>
+          <div id="audit-log" class="audit-log"></div>
+        </div>
+
         <!-- 数据与模型的存放位置（需求：装到哪数据就落哪，默认不写 C 盘） -->
         <div class="panel span-2">
           <div class="panel-head-row">
@@ -1460,6 +1529,7 @@
 <script src="js/update.js"></script>
 <script src="js/settings.js"></script>
 <script src="js/sidebar.js"></script>
+<script src="js/mini.js"></script>
 <script src="js/app.js"></script>
 </body>
 </html>

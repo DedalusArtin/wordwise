@@ -242,8 +242,10 @@ const Sidebar = (() => {
     box.innerHTML = U().loadingHtml('准备题目…');
 
     try {
-      await API.startSession('en_to_zh', 1, false);
-      const card = await API.currentQuestion();
+      // ★ kind 必须带：侧边栏一打开就会自动出第一题（app.js），
+      //   不带 kind 会落回主窗口的背诵槽，把主窗口正在背的那一轮整体覆写。
+      await API.startSession('en_to_zh', 1, false, null, null, 'sidebar');
+      const card = await API.currentQuestion(null, 'sidebar');
       if (!card) {
         box.innerHTML = '<div class="muted" style="padding:16px">词库为空，请先导入单词</div>';
         return;
@@ -303,7 +305,7 @@ const Sidebar = (() => {
         }
 
         try {
-          await API.submitAnswer(card.entry.word, correct ? 'good' : 'wrong', 0);
+          await API.submitAnswer(card.entry.word, correct ? 'good' : 'wrong', 0, null, 'sidebar');
         } catch (e) { /* 忽略 */ }
 
         if (!correct) {
