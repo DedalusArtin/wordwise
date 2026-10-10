@@ -3726,6 +3726,102 @@ const cases = [
     return 'kind 齐全（mini/sidebar）';
   }],
 
+  ['迷你窗：发音按钮能取到词（容器必须挂 data-entry-word）', () => {
+    const mini = fs.readFileSync(path.join(ROOT, 'src/js/mini.js'), 'utf8');
+    const html = fs.readFileSync(path.join(ROOT, 'src/index.html'), 'utf8');
+    // ★ 事件委托取词的三级回退是「按钮自身 → 最近的 [data-entry-word] →
+    //   最近的 [data-speak-text]」。小窗曾经只把按钮 HTML 塞进容器、**从没
+    //   往容器写 data-entry-word**，委托取到空词直接 return ——
+    //   表现就是「小窗的喇叭点了毫无反应」（详情卡当初踩过同一个坑）。
+    const i = mini.indexOf('function renderPhon');
+    if (i < 0) throw new Error('缺少音标/发音渲染函数');
+    const body = mini.slice(i, i + 1400);
+    if (!/dataset\.entryWord\s*=/.test(body)) {
+      throw new Error('音标容器没有挂 data-entry-word —— 委托取不到词，喇叭点了没反应');
+    }
+    if (!/dataset\.speakLang\s*=/.test(body)) throw new Error('没有挂 data-speak-lang');
+    // 按钮自身也带一份（委托的第一优先来源）
+    if (!/b\.dataset\.speakWord\s*=/.test(body)) throw new Error('按钮自身没有兜底挂 data-speak-word');
+    if (!html.includes('id="mn-phon"')) throw new Error('小窗骨架缺少音标容器');
+    return '容器 + 按钮双保险挂词';
+  }],
+
+  ['迷你窗：词条要有例句与词组（不能只给一条释义）', () => {
+    const mini = fs.readFileSync(path.join(ROOT, 'src/js/mini.js'), 'utf8');
+    const html = fs.readFileSync(path.join(ROOT, 'src/index.html'), 'utf8');
+    // 释义要列多条义项，而不是只显示后端给的那一条答案串
+    if (!/function renderDefs/.test(mini)) throw new Error('缺少释义渲染');
+    if (!/splitSensesByScript\(senses\)/.test(mini)) throw new Error('释义没有按语言分组挑母语义项');
+    if (!/slice\(0, 3\)/.test(mini)) throw new Error('释义没有列多条义项（只显示一条太单薄）');
+    // 例句
+    if (!/function renderExamples/.test(mini)) throw new Error('缺少例句渲染');
+    if (!/collectExamples\(entry\)/.test(mini)) throw new Error('例句没有走统一的收集函数');
+    if (!/mn-ex-zh/.test(mini)) throw new Error('例句没有中英对照');
+    // 词组 / 变形
+    if (!/function renderTags/.test(mini)) throw new Error('缺少词组/变形渲染');
+    if (!/entry\.inflections/.test(mini) || !/entry\.related/.test(mini)) {
+      throw new Error('词组/变形没有取 inflections + related');
+    }
+    // 词条单薄时要能就地补全
+    if (!/function enrichCur/.test(mini)) throw new Error('缺少「补全词条」入口');
+    if (!/API\.enrichWord/.test(mini)) throw new Error('补全没有走已有的增强链路');
+    // 骨架里要有对应的容器
+    for (const id of ['mn-ex', 'mn-tags', 'mn-enrich']) {
+      if (!html.includes(`id="${id}"`)) throw new Error('小窗骨架缺少 ' + id);
+    }
+    return '多义项 + 例句 + 词组/变形 + 就地补全';
+  }],
+
+  ['迷你窗：真渲染一遍 —— 例句/词组/发音词都落到 DOM 上', async () => {
+    const api = sandbox.WordWiseAPI.API;
+    const orig = {
+      start: api.startSession, q: api.currentQuestion,
+      w: api.getWord, st: api.wordState,
+    };
+    // 出题卡片刻意给一条「单薄」的占位词条（真实场景：队列里的 entry 常这样）
+    api.startSession = async () => ({ total: 20, index: 0 });
+    api.currentQuestion = async () => ({
+      prompt: 'carpet', answer: 'n. 地毯', mode: 'en_to_zh', options: [],
+      entry: { word: 'carpet', lang: 'en', senses: [], phonetic: {}, related: [], inflections: [] },
+    });
+    // 本地库里那条更完整 —— 小窗应当把它换上并渲染出例句/变形/相关词
+    api.getWord = async () => ({
+      word: 'carpet', lang: 'en',
+      phonetic: { us: '/ˈkɑːrpɪt/' },
+      senses: [
+        { pos: 'n.', definition: '地毯；地毯状覆盖物',
+          examples: [{ text: 'a red carpet', translation: '红地毯' }] },
+        { pos: 'v.', definition: '给…铺地毯' },
+      ],
+      inflections: [{ label: '复数', form: 'carpets' }],
+      related: ['rug', 'mat'],
+    });
+    api.wordState = async () => null;
+    try {
+      await sandbox.Mini.next();
+      // refreshEntry 是异步补的（不挡出题），等它一拍
+      await new Promise((r) => setTimeout(r, 30));
+
+      const phon = elById('mn-phon');
+      if (phon.dataset.entryWord !== 'carpet') {
+        throw new Error('音标容器没挂上词 —— 委托取不到词，喇叭点了没反应');
+      }
+      const def = elById('mn-def').innerHTML;
+      if (!def.includes('地毯')) throw new Error('释义没渲染出来');
+      if (!def.includes('铺地毯')) throw new Error('只显示了第一条义项（多条义项没列全）');
+      const ex = elById('mn-ex').innerHTML;
+      if (!ex.includes('a red carpet')) throw new Error('例句没渲染');
+      if (!ex.includes('红地毯')) throw new Error('例句译文没渲染（缺中英对照）');
+      const tags = elById('mn-tags').innerHTML;
+      if (!tags.includes('carpets')) throw new Error('变形没渲染');
+      if (!tags.includes('rug')) throw new Error('相关词/词组没渲染');
+      return '释义多条 + 例句对照 + 变形/相关词';
+    } finally {
+      api.startSession = orig.start; api.currentQuestion = orig.q;
+      api.getWord = orig.w; api.wordState = orig.st;
+    }
+  }],
+
   ['迷你窗：尺寸/透明度/置顶可调，进度与间隔上屏', () => {
     const mini = fs.readFileSync(path.join(ROOT, 'src/js/mini.js'), 'utf8');
     const win = fs.readFileSync(path.join(ROOT, 'src-tauri/src/windows.rs'), 'utf8');

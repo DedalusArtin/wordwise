@@ -69,6 +69,7 @@
   <div class="mn-drag" data-tauri-drag-region>
     <span class="mn-title">背词</span>
     <div class="mn-actions">
+      <button class="icon-btn xs" id="mn-enrich" title="补全这个词条（例句 / 变形 / 相关词）">补全</button>
       <button class="icon-btn xs" id="mn-pin" title="窗口置顶">&#128204;</button>
       <button class="icon-btn xs" id="mn-size" title="切换尺寸">&#9634;</button>
       <button class="icon-btn xs" id="mn-alpha" title="切换透明度">&#9788;</button>
@@ -83,6 +84,10 @@
       <span class="mn-phon" id="mn-phon"></span>
     </div>
     <div class="mn-def" id="mn-def">正在取词…</div>
+    <!-- 例句：小窗里只放 1~2 条，中英对照 -->
+    <div class="mn-ex" id="mn-ex"></div>
+    <!-- 词组 / 变形 / 相关词：有什么显示什么 -->
+    <div class="mn-tags" id="mn-tags"></div>
     <div class="mn-meta" id="mn-meta"></div>
   </div>
 

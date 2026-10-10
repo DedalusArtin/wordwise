@@ -106,33 +106,121 @@ const Mini = (() => {
       shownAt = Date.now();
       render(c);
       refreshMeta(c.entry.word, c.entry.lang);
+      // 出题卡片带的词条常常是「占位 / 单薄」的（只有词名和一条释义）——
+      // 小窗信息本来就少，这里再按词查一次本地库，把更完整的词条换上
+      // （含例句、变形、相关词）。纯本地读，不联网，代价可以忽略。
+      void refreshEntry(c.entry.word, c.entry.lang);
     } catch (e) {
       card = null;
       if (defEl) defEl.textContent = `取词失败：${e && e.message ? e.message : e}`;
     }
   }
 
+  let curWord = '';
+
   function render(c) {
     const entry = (c && c.entry) || null;
     const word = (entry && entry.word) || '';
+    curWord = word;
     if ($('mn-word')) $('mn-word').textContent = word || '—';
 
-    // 发音按钮：与主窗口同一套（本地 Piper → edge-tts → 系统语音三级回退）
-    const phon = $('mn-phon');
-    if (phon) {
-      phon.innerHTML = entry ? U().speakBtn(entry, 'us', '发音') : '';
-    }
+    renderPhon(entry, word);
+    renderDefs(entry, c);
+    renderExamples(entry, word);
+    renderTags(entry);
+  }
 
-    // 释义：优先用后端给好的答案串（含词性），拿不到再从义项拼
-    let def = (c && c.answer) || '';
-    if (!def && entry && entry.senses && entry.senses.length) {
-      def = entry.senses
-        .slice(0, 3)
-        .map((s) => (s.pos ? `${s.pos} ${s.definition}` : s.definition))
-        .join('；');
+  /**
+   * 音标行 + 发音按钮。
+   *
+   * ★ 必须把**词 / 语言 / 音频**写到容器上（`data-entry-word` 等）。
+   *   发音按钮的事件委托是「按钮 → 最近的 [data-entry-word] 容器 → 最近的
+   *   [data-speak-text] 容器」三级回退取词；容器上什么都没写的话，
+   *   委托取到空词直接 return —— 表现就是**小窗的喇叭点了毫无反应**
+   *   （详情卡当初踩的是同一个坑）。按钮自己也可带 data-speak-word，
+   *   这里两条路都留上，任一条都能取到词。
+   */
+  function renderPhon(entry, word) {
+    const phon = $('mn-phon');
+    if (!phon) return;
+    if (!entry) {
+      phon.innerHTML = '';
+      return;
     }
-    const defEl = $('mn-def');
-    if (defEl) defEl.textContent = def || '（这个词还没有释义）';
+    // 音标 + 发音按钮走统一实现（语言标注、斜杠规则、IPA 字体只有一份）
+    const html = U().phoneticHtml(entry, { speak: true });
+    phon.innerHTML = html || U().speakBtn(entry, 'us', '发音');
+    phon.dataset.entryWord = word || '';
+    phon.dataset.speakLang = entry.lang || 'en';
+    phon.dataset.speakAudio = (entry.phonetic && entry.phonetic.audio) || '';
+    // 兜底：把词直接挂到每个按钮上（委托的第一优先来源就是它）
+    phon.querySelectorAll('.speak-btn').forEach((b) => {
+      b.dataset.speakWord = word || '';
+      if (!b.dataset.speakLang) b.dataset.speakLang = entry.lang || 'en';
+    });
+  }
+
+  /** 释义：列**多条义项**（最多 3 条），母语（中文）释义优先。 */
+  function renderDefs(entry, c) {
+    const el = $('mn-def');
+    if (!el) return;
+    const senses = ((entry && entry.senses) || []).filter((s) => (s.definition || '').trim());
+    let list = [];
+    if (senses.length) {
+      // 背英语词时中文释义最有用：有中文义项就只列中文那组，
+      // 否则退回原文义项（日语/法语词库就靠这条）
+      const [local, native] = U().splitSensesByScript(senses);
+      list = (local.length ? local : native).slice(0, 3);
+    } else if (c && c.answer) {
+      list = [{ pos: '', definition: c.answer }];
+    }
+    if (!list.length) {
+      el.innerHTML = '<span class="muted">这个词还没有释义 —— 点右上角「补全」让 AI 生成完整词条。</span>';
+      return;
+    }
+    const jump = senses.length > 3
+      ? `<span class="mn-more muted">…共 ${senses.length} 个义项</span>` : '';
+    el.innerHTML = list.map((s) => `<div class="mn-sense">${
+      s.pos ? `<i class="mn-pos">${U().esc(s.pos)}</i>` : ''
+    }<span class="mn-def-text">${U().esc(s.definition)}</span></div>`).join('') + jump;
+  }
+
+  /** 例句：最多 2 条，中英对照，每句可单独朗读。 */
+  function renderExamples(entry, word) {
+    const el = $('mn-ex');
+    if (!el) return;
+    const exs = entry ? U().collectExamples(entry).filter((x) => (x.text || '').trim()).slice(0, 2) : [];
+    if (!exs.length) {
+      el.innerHTML = '';
+      return;
+    }
+    el.innerHTML = exs.map((ex) => `
+      <div class="mn-ex-item">
+        <div class="mn-ex-head">
+          <span class="mn-ex-en">${U().esc(ex.text)}</span>
+          <button class="speak-btn" type="button" title="朗读例句"
+                  data-speak-word="${U().esc(ex.text)}"
+                  data-speak-lang="${U().esc((entry && entry.lang) || 'en')}"></button>
+        </div>
+        ${ex.translation ? `<div class="mn-ex-zh">${U().esc(ex.translation)}</div>` : ''}
+      </div>`).join('');
+    el.dataset.speakWord = word || '';
+  }
+
+  /** 词组 / 变形：有数据才显示（变形取 label+form，相关词取前 6 个）。 */
+  function renderTags(entry) {
+    const el = $('mn-tags');
+    if (!el || !entry) return;
+    const chips = [];
+    for (const i of (entry.inflections || []).slice(0, 4)) {
+      if (i && i.form) chips.push(`<span class="mn-tag"><i>${U().esc(i.label || '变形')}</i>${U().esc(i.form)}</span>`);
+    }
+    for (const r of (entry.related || []).slice(0, 6)) {
+      if (r) chips.push(`<span class="mn-tag mn-tag-rel">${U().esc(r)}</span>`);
+    }
+    el.innerHTML = chips.length
+      ? `<div class="mn-tags-title muted">词组 / 变形</div><div class="mn-tags-row">${chips.join('')}</div>`
+      : '';
   }
 
   /** 复习间隔 / 熟练度：异步补，不挡出题。 */
@@ -151,6 +239,51 @@ const Mini = (() => {
         : 0;
       el.textContent = `熟练度 ${st.state ? st.state.mastery : 0}% · 正确率 ${acc}% · 下次复习 ${st.due_text || '—'}`;
     } catch (e) { /* 状态取不到就算了，不干扰背词 */ }
+  }
+
+  /**
+   * 用本地库里更完整的词条替换当前展示（例句/变形/相关词都靠它）。
+   *
+   * 只在「新的更全」时才换 —— 出题卡片里的 entry 可能带着会话相关的字段，
+   * 不能被一条更瘦的库记录覆盖回去。
+   */
+  async function refreshEntry(word, lang) {
+    if (!word || !card || !card.entry || card.entry.word !== word) return;
+    if (typeof API.getWord !== 'function') return;
+    try {
+      const full = await API.getWord(word, lang || null);
+      // 期间可能已经换词了，或者新的反而更瘦 → 都不动
+      if (!full || !card || (card.entry || {}).word !== word) return;
+      const before = (card.entry.senses || []).length;
+      const after = (full.senses || []).length;
+      if (after > before) {
+        card.entry = full;
+        render(card);
+      }
+    } catch (e) { /* 补不上就照现状显示 */ }
+  }
+
+  /** 让 AI/联网把这条词条补全（例句、变形、相关词），补完自动重渲染。 */
+  async function enrichCur() {
+    const word = curWord;
+    if (!word) return;
+    const btn = $('mn-enrich');
+    if (btn) { btn.disabled = true; btn.textContent = '补全中…'; }
+    try {
+      const r = await API.enrichWord(word, (card && card.entry && card.entry.lang) || null);
+      const ok = !!(r && (r.enriched === undefined || r.enriched));
+      if (ok) {
+        U().toast(`已补全「${word}」的词条`, 'ok');
+      } else {
+        U().toast('没补出新内容（可先在设置页部署本地大模型）', 'err');
+      }
+      await refreshEntry(word, (card && card.entry && card.entry.lang) || null);
+      render(card || {});
+    } catch (e) {
+      U().toast((e && e.message) || '补全失败', 'err');
+    } finally {
+      if (btn) { btn.disabled = false; btn.textContent = '补全'; }
+    }
   }
 
   async function refreshProgress() {
@@ -232,6 +365,15 @@ const Mini = (() => {
     $('mn-size')?.addEventListener('click', () => { void cycleSize(); });
     $('mn-alpha')?.addEventListener('click', cycleAlpha);
     $('mn-pin')?.addEventListener('click', () => { void togglePin(); });
+    $('mn-enrich')?.addEventListener('click', () => { void enrichCur(); });
+
+    // 后台增强完成（设置页/其它入口触发的也一样）→ 当前词的词条变厚了就换上来
+    try {
+      API.onEnriched?.((p) => {
+        const w = p && (p.word || p.word_);
+        if (w && w === curWord) void refreshEntry(w, (card && card.entry && card.entry.lang) || null);
+      });
+    } catch (e) { /* 没这个事件也不影响 */ }
 
     // 键盘：空格/回车 = 认识，Backspace = 不认识，Esc = 隐藏。
     // 小窗没有输入框，所以不需要 isTypingTarget 那种守卫。
