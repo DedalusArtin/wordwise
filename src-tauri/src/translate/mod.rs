@@ -126,7 +126,7 @@ pub fn youdao_supports(from: &str, to: &str) -> Option<String> {
 ///
 /// 中文名给界面下拉用，自称在提示词里对模型说更有效
 /// （见 [`crate::llm::explain_lang_name`]）。
-pub const LANGS: [(&str, &str, &str); 10] = [
+pub const LANGS: [(&str, &str, &str); 11] = [
     ("zh", "中文", "简体中文"),
     ("en", "英语", "English"),
     ("ja", "日语", "日本語"),
@@ -137,6 +137,7 @@ pub const LANGS: [(&str, &str, &str); 10] = [
     ("ru", "俄语", "Русский"),
     ("pt", "葡萄牙语", "Português"),
     ("it", "意大利语", "Italiano"),
+    ("el", "希腊语", "Ελληνικά"),
 ];
 
 /// 语言码 → 中文名。

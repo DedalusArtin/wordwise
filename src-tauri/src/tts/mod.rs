@@ -318,6 +318,28 @@ static VOICE_DEFS: &[VoiceSpec] = &[
         note: "",
         urls: Vec::new(),
     },
+    // ─────────────── 希腊语 ───────────────
+    //
+    // 为什么单挑这一条进来：`el_GR-joy-medium` 是本清单里**唯一**新增的非拉丁
+    // 语种，因为它是实测**能在随包引擎上跑通**的非拉丁语音（见下方 VOICES 的
+    // 收录标准）。判据是它的 `phoneme_id_map` 里**没有一个多码点音素**
+    // （`aɪ` / `aʊ` 这类），而韩语 / 希伯来 / 泰语都含 5 个 —— 那正是
+    // piper 1.2.0 报 `"aɪ" is not a single codepoint` 的原因。
+    VoiceSpec {
+        id: "el_GR-joy-medium",
+        label: "Joy · 希腊语女声",
+        lang: "el",
+        locale: "el_gr",
+        accent: "",
+        // 官方元数据没有性别字段；Joy 是常见女名，但**不猜**，留空。
+        gender: "",
+        quality: "medium",
+        bytes: 63_516_050,
+        hf_dir: "el/el_GR/joy/medium",
+        preset: false,
+        note: "",
+        urls: Vec::new(),
+    },
     // ─────────────── 意大利语 ───────────────
     VoiceSpec {
         id: "it_IT-paola-medium",
@@ -392,11 +414,21 @@ static VOICE_DEFS: &[VoiceSpec] = &[
 ///   * `ja_JP-hi_fi_captain-medium`（日语，唯一的日语语音，MODEL_CARD 里也
 ///     明写 Requires piper 1.7.0 or higher）
 ///   * `ko_KR-kss-medium`（韩语，唯一的韩语语音）
+///   * `th_TH-tsync2-medium`（泰语）、`he_IL-saspeech-medium`（希伯来语）
 ///   * `it_IT-serena-medium`、`zh_CN-chaowen-medium`、`zh_CN-xiao_ya-medium`
 /// 所以日语 / 韩语这一轮**没有可交付的语音**，宁可空着也不放一条
 /// 「下得下来、读不出声」的进来。详见 `docs` 里的语音包说明与构建报告。
 ///
-/// ★ 既有的 5 条 id **一个都没改名、没删除**：用户机器上可能已经下过，
+/// ★ 引擎版本是**硬约束，不是猜测**：`rhasspy/piper` 已归档（最后发布
+///   2023.11.14-2，就是 1.2.0 那一代），上游不会再有更新的 exe。后继项目
+///   `OHF-Voice/piper1-gpl` 仍在维护，但只发 Python wheel、没有独立 exe ——
+///   换引擎等于要把 Python 运行时一起打进去，不是一次小改。所以在这个前提下，
+///   「清单里只放 1.2.0 跑得动的语音」是唯一不会骗用户的做法。
+///
+/// ★ `el_GR-joy-medium`（希腊语）是据此**新增**的唯一非拉丁语种：实测它的
+///   音素表里多码点音素数为 **0**，端到端合成通过（退出码 0，正常出 wav）。
+///
+/// ★ 既有的 id **一个都没改名、没删除**：用户机器上可能已经下过，
 ///   配置（`TtsConfig.voice_local`）里也可能存着旧 id，动了就等于把人家
 ///   已经装好的语音变成未知项。
 pub static VOICES: Lazy<Vec<VoiceSpec>> = Lazy::new(|| {
@@ -982,8 +1014,31 @@ pub fn synth_blocking(exe: &Path, model: &Path, text: &str, rate: f32) -> Result
     if !out.status.success() {
         // 临时文件留不留都无所谓，失败路径优先把原因说清楚
         let _ = std::fs::remove_file(&tmp);
-        let err = String::from_utf8_lossy(&out.stderr);
-        return Err(anyhow!("语音合成失败：{}", err.trim().chars().take(300).collect::<String>()));
+        let raw = String::from_utf8_lossy(&out.stderr);
+        let err = raw.trim();
+        let code = out.status.code();
+        // ★ 别把「引擎一个字都没吐」当成「有原因但没显示」。
+        //
+        //   实测（本机 piper 1.2.0）：喂一个 `phoneme_type: japanese` 的语音包，
+        //   进程 **退出码 2 且 stderr 是空的** —— 它在音素化派发阶段就静默失败，
+        //   连一句日志都没有。原来这里直接拼 `err.trim()`，于是错误信息成了
+        //   「语音合成失败：」后面一片空白，前端只能显示一条没有内容的红条，
+        //   用户看到的还是「点了没反应」。
+        //
+        //   这种「静默退出」几乎只有一个成因：语音包要求的音素格式比随包引擎新
+        //   （多码点音素 / openJTalk 音素表）。既然错误里没有任何线索，就由我们
+        //   把可能性讲清楚，并给出可执行的下一步。
+        let msg = if err.is_empty() {
+            format!(
+                "语音引擎无输出即退出（退出码 {}）。{}",
+                code.map(|c| c.to_string()).unwrap_or_else(|| "未知".into()),
+                "多半是这个语音包要求的音素格式比随包引擎（piper 1.2.0）新，\
+                 例如日语/韩语语音。请改用系统语音，或换一个本应用清单里标注可用的语音包"
+            )
+        } else {
+            err.chars().take(300).collect::<String>()
+        };
+        return Err(anyhow!("语音合成失败：{msg}"));
     }
 
     let bytes = std::fs::read(&tmp).context("读取语音引擎的输出失败")?;
@@ -1309,6 +1364,7 @@ mod tests {
             ("ru_RU-irina-medium", "ru"),
             ("it_IT-paola-medium", "it"),
             ("pt_BR-faber-medium", "pt"),
+            ("el_GR-joy-medium", "el"),
             ("en_US-lessac-medium", "en"),
             ("en_US-joe-medium", "en"),
             ("en_GB-northern_english_male-medium", "en"),
@@ -1317,6 +1373,52 @@ mod tests {
             let s = spec(id).unwrap_or_else(|| panic!("缺语音 {id}"));
             assert_eq!(s.lang, *lang, "{id} 的语言标错了");
         }
+    }
+
+    /// ★ 清单里**不许**出现随包引擎（piper 1.2.0）跑不动的语音。
+    ///
+    /// 背景：日语 / 韩语语音在官方仓库里存在、也下得动，但它们的
+    /// `phoneme_id_map` 含多码点音素（`aɪ` / `aʊ` …），1.2.0 会直接报
+    /// `"aɪ" is not a single codepoint` 并**静默退出**（实测退出码 2、
+    /// stderr 为空）。放进清单的后果是「用户下完 76 MB，点喇叭却没声音」，
+    /// 比什么都不提供还糟。
+    ///
+    /// 这条测试用**已知黑名单**把住门：将来有人想「顺手加个日语」，会先被这里拦下，
+    /// 而不是等用户下完才发现。
+    #[test]
+    fn catalogue_excludes_engine_incompatible_voices() {
+        // 实测在 piper 1.2.0 上跑不通的语音（多码点音素 / openJTalk 音素表）
+        const INCOMPATIBLE: &[&str] = &[
+            "ja_JP-hi_fi_captain-medium", // phoneme_type: japanese（openJTalk）
+            "ko_KR-kss-medium",           // 多码点音素 aɪ/aʊ/ɔɪ/eɪ/oʊ
+            "th_TH-tsync2-medium",        // phoneme_type: thai
+            "he_IL-saspeech-medium",      // phoneme_type: hebrew
+            "it_IT-serena-medium",
+            "zh_CN-chaowen-medium",
+            "zh_CN-xiao_ya-medium",
+        ];
+        for bad in INCOMPATIBLE {
+            assert!(
+                spec(bad).is_none(),
+                "{bad} 要求的音素格式比随包引擎新，放进来会让用户「下得下来、读不出声」"
+            );
+        }
+    }
+
+    /// 非拉丁语系里，只允许放**实测可用**的那些进清单。
+    ///
+    /// 这条是上一条的正面补充：不只是「黑名单不许进」，而是「白名单要有人守」。
+    /// 希腊语 `el_GR-joy-medium` 是目前唯一通过实测的非拉丁新增语音
+    /// （音素表里多码点音素数为 0，端到端合成退出码 0）。
+    #[test]
+    fn greek_is_the_only_non_latin_addition_and_it_is_listed() {
+        let s = spec("el_GR-joy-medium").expect("希腊语语音应该在清单里");
+        assert_eq!(s.lang, "el");
+        assert_eq!(s.locale, "el_gr");
+        // 体积必须是真实的（用来显示下载进度、下载后校验）
+        assert_eq!(s.bytes, 63_516_050);
+        // 非「附包预置」——希腊语按需下载，不随安装包分发
+        assert!(!s.preset);
     }
 
     /// 每条语音都要有**多个**镜像，且每个镜像的地址形状正确。
@@ -1731,6 +1833,43 @@ mod tests {
         assert!(e.is_err());
         let msg = format!("{}", e.unwrap_err());
         assert!(msg.contains("引擎"), "缺引擎要给出可读提示，而不是裸 IO 错误：{msg}");
+    }
+
+    /// ★ 「引擎一个字都不吐就退出」时，错误信息不能是空的。
+    ///
+    /// 这是实机踩到的坑：piper 1.2.0 喂一个 `phoneme_type: japanese` 的语音包，
+    /// 进程**退出码 2、stderr 为空**。原来的代码把 stderr 直接拼进错误里，
+    /// 于是前端收到的是一句 `语音合成失败：`（冒号后面什么都没有），
+    /// 用户看到的仍然是「点了没反应」—— 修了等于没修。
+    ///
+    /// 这里用一个「假装是 piper、什么都不说就退出 2」的可执行文件复现该场景，
+    /// 断言错误里**必须**出现可执行的下一步（提到系统语音或换语音包）。
+    #[cfg(windows)]
+    #[test]
+    fn silent_engine_exit_produces_actionable_message() {
+        use std::path::PathBuf;
+        // 造一个安静退出 2 的批处理当假引擎；piper 的调用方式是 `exe --model …`，
+        // 批处理会把多余参数忽略掉，`exit /b 2` 正好复现「退出码 2、无输出」。
+        let dir = std::env::temp_dir().join(format!("ww-tts-silent-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let fake: PathBuf = dir.join("fake-piper.cmd");
+        std::fs::write(&fake, "@echo off\r\nexit /b 2\r\n").unwrap();
+        // 模型文件只要「存在」即可，这条测试走不到真正读模型那一步
+        let model = dir.join("fake.onnx");
+        std::fs::write(&model, b"not a real model").unwrap();
+
+        let e = synth_blocking(&fake, &model, "hello", 1.0);
+        let msg = format!("{}", e.expect_err("假引擎退出 2，必须报错而不是当成成功"));
+        // 不能是「冒号后面空白」的裸提示
+        assert!(
+            msg.chars().count() > "语音合成失败：".chars().count() + 5,
+            "静默失败的错误信息几乎是空的，等于没告诉用户任何事：{msg:?}"
+        );
+        assert!(
+            msg.contains("系统语音") || msg.contains("语音包"),
+            "静默失败要给出可执行的下一步（换系统语音 / 换语音包）：{msg}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
