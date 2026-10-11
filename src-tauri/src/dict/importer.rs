@@ -334,7 +334,11 @@ fn build_entry(
     ordinal: usize,
 ) -> WordEntry {
     let mut e = WordEntry::new(word);
-    e.lang = lang.to_string();
+    // ★ 不能照抄调用方给的语言：词表声明的语言与词本身的字形可能打架，
+    //   典型是「日语模式下导入英语词表」—— 整本词表会被写成 `ja`，
+    //   朗读按 `ja` 找语音包找不到，喇叭一声不出（实机 5,057 词中招）。
+    //   字形能判死的就按字形来，判不出的（英/法/德之间）才尊重声明。
+    e.lang = crate::lang::resolve_lang(word, Some(lang), lang);
     // ★ 入库前清洗（P4 音标污染）：词表里的音标列也可能混入领域标签/数字
     let ph = crate::models::clean_phonetic_value(phonetic, lang);
     if !ph.is_empty() {

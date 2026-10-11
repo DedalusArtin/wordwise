@@ -165,14 +165,26 @@ pub fn detect_lang(word: &str) -> Option<&'static str> {
 /// - **假名 ↔ 只有 ja**：日语词绝不可能属于英语词表，这是本闸门要拦的头号目标；
 /// - **谚文 ↔ ko**、**西里尔 ↔ ru**、**希腊 ↔ el**、泰/阿拉伯/希伯来同理；
 /// - **汉字 ↔ zh 或 ja**：汉字词在这两个词库里都成立，但在 `en` 词表里一定是噪声；
-/// - **拉丁字母一律放行**：包括写进非拉丁语系词库的情况。日语词库里有
-///   「April」「アイスクリーム 的罗马字」这类外来语条目，罗马字注音也常是
-///   拉丁字母，判严了会误杀真实数据。英/法/德之间字形上分不出来，硬判只会
-///   制造新的错判。
+/// - **拉丁字母 ↔ 只能配拉丁语系**（en / fr / de / es …）。配中日韩俄阿拉伯
+///   这类**非拉丁语系**就是矛盾，判不通过。
+///
+/// ★ 最后这条是 2026-10 实机事故换来的：拉丁字母原本「一律放行」，于是
+///   「在日语模式下导入一批英语词」会把 `abandon` / `Monday` / `accord`
+///   整批标成 `ja` —— 一个真实例子里 9,908 个词里有 5,057 个这么错了
+///   （考研核心词汇整本被当成日语）。后果远不止标签难看：
+///   朗读按 `ja` 去找日语语音包 → 本地没有、系统也没有 → WebView 拿到一个
+///   匹配不上任何声音的 `lang` 就**一声不出**，表现是「点了喇叭完全没反应」；
+///   查词、AI 讲解、释义语言同样全线跟着错。而这道闸门因为「一律放行」
+///   根本看不见它们，启动清理也就无从下手。
+///
+///   代价要说清楚：日语词库里若真有罗马字注音条目（「アイスクリーム」的
+///   `aisukuriimu`）会被判成 `en`。这是两害相权 ——
+///   **让 5,057 个英语词念不出声，比让几个罗马字条目归错语言严重得多**，
+///   而且前者是静默失败（用户只会以为软件坏了），后者看得见、可手工改。
 ///
 /// 换句话说：这道闸门保证的是「**书写系统**层面的干净」——日语不会再混进
-/// 英语词表；至于英语表里混进一个法语词，那是 [`crate::commands`] 里 AI 自检
-/// 那一层的职责。
+/// 英语词表，英语也不会再被当成日语；至于英语表里混进一个法语词，那是
+/// [`crate::commands`] 里 AI 自检那一层的职责。
 pub fn lang_compatible(word: &str, lang: &str) -> bool {
     let lang = lang.trim().to_ascii_lowercase();
     match script_of(word) {
@@ -184,7 +196,9 @@ pub fn lang_compatible(word: &str, lang: &str) -> bool {
         Script::Thai => lang == "th",
         Script::Arabic => lang == "ar",
         Script::Hebrew => lang == "he",
-        Script::Latin | Script::Other => true,
+        // 拉丁字母：只与非拉丁语系矛盾。英/法/德之间字形上分不出来，
+        // 这里不越界去判，交给调用方意图。
+        Script::Latin | Script::Other => !is_non_latin_lang(&lang),
     }
 }
 
@@ -214,8 +228,20 @@ pub fn resolve_lang(word: &str, requested: Option<&str>, fallback: &str) -> Stri
             }
             "zh"
         }
-        // 拉丁词：尊重调用方，拿不到才用兜底（一般是 target_lang）
-        Script::Latin | Script::Other => req.unwrap_or(fallback),
+        // 拉丁词：尊重调用方，拿不到才用兜底（一般是 target_lang）。
+        //
+        // ★ 但有一条硬约束压在「尊重调用方」之上：拉丁字母的词**不可能**是
+        //   中日韩俄这类非拉丁语系的词。调用方说它是 `ja`（典型现场是界面
+        //   正停在日语模式下导入英语词表），这里必须判成 `en` 而不是照抄 ——
+        //   否则 `lang_compatible` 把它判为「不自洽」、`resolve_lang` 又把
+        //   它决议回 `ja`，两个函数互相抵消，启动清理永远修不动任何一行
+        //   （这正是那 5,057 个词一直错下去的机制）。
+        //   法语 / 德语等拉丁语言之间无法靠字形区分，仍然尊重调用方。
+        Script::Latin | Script::Other => match req {
+            Some(r) if !is_non_latin_lang(r) => r,
+            _ if !is_non_latin_lang(fallback) => fallback,
+            _ => "en",
+        },
     }
     .to_string()
 }
@@ -270,9 +296,46 @@ mod tests {
         // 反过来：日语词表里这些词都合法
         assert!(lang_compatible("たべる", "ja"));
         assert!(lang_compatible("勉強", "ja"));
-        // 日语词库里的拉丁外来语不该被误杀
-        assert!(lang_compatible("April", "ja"));
+        // 拉丁外来语：见下面 `拉丁字母不再被当成日语` —— 这条在 2026-10
+        // 被**故意推翻**，代价与理由写在 `lang_compatible` 的文档里。
         assert!(lang_compatible("コーヒー", "ja"));
+    }
+
+    /// 2026-10 实机事故的反例：考研核心词汇整本（5,057 个英语词）被标成 `ja`，
+    /// 而旧规则里「拉丁字母一律放行」让闸门完全看不见它们 —— 启动清理因此一条
+    /// 都修不了，朗读按 `ja` 找语音包找不到，喇叭一声不出。
+    #[test]
+    fn 拉丁字母不再被当成日语() {
+        for w in ["April", "Monday", "abandon", "accord", "Thanksgiving"] {
+            assert!(
+                !lang_compatible(w, "ja"),
+                "{w} 是拉丁字母，不该与 ja 相容（否则启动清理修不动它）"
+            );
+        }
+        // 同语种的其他非拉丁语言同理
+        assert!(!lang_compatible("accord", "zh"));
+        assert!(!lang_compatible("accord", "ko"));
+        assert!(!lang_compatible("accord", "ru"));
+        // 拉丁语系之间仍然相容，不越界去判英/法/德
+        for l in ["en", "fr", "de", "es", "it", "pt"] {
+            assert!(lang_compatible("accord", l), "accord 与 {l} 应相容");
+        }
+        // 真日语词不受影响
+        assert!(lang_compatible("たべる", "ja"));
+        assert!(lang_compatible("勉強", "ja"));
+    }
+
+    /// 闸门与决议必须同向：闸门说「不自洽」时，决议**不能**把它决议回原来的
+    /// 语言 —— 两个函数互相抵消会让清理永远空转（那 5,057 条就是这么烂在那里的）。
+    #[test]
+    fn 决议与闸门同向不会互相抵消() {
+        assert_eq!(resolve_lang("accord", Some("ja"), "ja"), "en");
+        assert_eq!(resolve_lang("Monday", Some("ja"), "ja"), "en");
+        // 拉丁语系：仍尊重调用方
+        assert_eq!(resolve_lang("accord", Some("fr"), "en"), "fr");
+        assert_eq!(resolve_lang("accord", None, "de"), "de");
+        // 调用方与兜底都是非拉丁语系时才落到 en
+        assert_eq!(resolve_lang("accord", Some("zh"), "zh"), "en");
     }
 
     #[test]

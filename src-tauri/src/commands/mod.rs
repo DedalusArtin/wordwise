@@ -1408,10 +1408,19 @@ pub async fn cmd_import_words(
             report.skipped += 1;
             continue;
         }
-        // ★ 语种闸门：用户从别处粘贴一大段文本时，日语/韩语词会跟着进来。
-        //   以前只会按形态过滤（`is_plausible_word` 对假名一律放行），
-        //   现在按书写系统拦下，并如实记进报告里让用户看见过滤生效了。
-        if !crate::lang::lang_compatible(w, &lang) {
+        // ★ 语种处理：这里**逐词决议**而不是整批共用一个 `lang`。
+        //
+        //   为什么不能简单地「不合 `lang` 就过滤掉」：批量导入的 `lang` 来自
+        //   界面当前的目标语言，而用户完全可能在「日语模式」下粘贴一批英语词。
+        //   按旧规则（拉丁字母与任何语言都相容）它们会被整批写进 `ja` ——
+        //   实机上一本 5,057 词的考研词表就这么全成了日语，朗读时按 `ja`
+        //   找语音包找不到，喇叭一声不出。而把闸门收紧之后若只是「过滤」，
+        //   这一批词又会**一个都导入不进来**，同样不能用。
+        //
+        //   正确做法是让字形说话：拉丁字母判 `en`，假名判 `ja`，各归各位。
+        //   只有决议之后仍然自相矛盾（比如决议出 `ja` 却要进 `en` 批）才拦。
+        let want = crate::lang::resolve_lang(w, Some(&lang), &lang);
+        if !crate::lang::lang_compatible(w, &want) {
             report.filtered += 1;
             if report.filtered_samples.len() < 20 {
                 report
@@ -1421,13 +1430,13 @@ pub async fn cmd_import_words(
             continue;
         }
         let key = w.to_lowercase();
-        if state.db.get_word(&key, &lang).map_err(err)?.is_some() {
+        if state.db.get_word(&key, &want).map_err(err)?.is_some() {
             report.skipped += 1;
             continue;
         }
         let entry = WordEntry {
             word: key.clone(),
-            lang: lang.clone(),
+            lang: want.clone(),
             ..Default::default()
         };
         if !state.db.upsert_word_gated(&entry, now).map_err(err)? {
@@ -1436,7 +1445,7 @@ pub async fn cmd_import_words(
         }
         state
             .db
-            .upsert_state(&StudyState::new(&key, &lang, now))
+            .upsert_state(&StudyState::new(&key, &want, now))
             .map_err(err)?;
         report.added += 1;
         kept.push(key);
