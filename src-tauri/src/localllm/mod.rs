@@ -34,6 +34,7 @@
 
 use anyhow::{anyhow, Context, Result};
 use parking_lot::Mutex;
+use std::collections::HashMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -462,6 +463,234 @@ struct ServerHandle {
 
 static SERVER: Mutex<Option<ServerHandle>> = Mutex::new(None);
 
+/// 系统里所有同名托管进程的 pid（含**不是本进程启动的**）。
+///
+/// ★ 为什么要走到系统层面去数：`SERVER` 只是**本进程内**的一张表。
+///   应用崩溃、被任务管理器结束、或开发时热重启，这张表就随进程一起没了，
+///   而上一轮起出来的 `llama-server` 还在跑、还占着显存 ——
+///   它是孤儿，谁都管不着。实机上一次调试就攒了 4 个，
+///   每个都在显存里躺着 ≥1.5 GB，把 12 GB 的卡占到 83%。
+///
+/// 所以「清理」不能只清自己那一份，必须以进程表为准扫一遍。
+fn managed_pids() -> Vec<u32> {
+    let exe = server_exe_name();
+    let mut out = Vec::new();
+    #[cfg(windows)]
+    {
+        // ★ 用 tasklist 而不是 WMIC：WMIC 在 Win11 上已被移除（deprecated），
+        //   而 tasklist 从 XP 到 Win11 都在，且不需要额外权限。
+        //   CSV 无表头格式：`"映像名称","PID","会话名","会话#","内存使用"`
+        let out_raw = Command::new("tasklist")
+            .args(["/FI", &format!("IMAGENAME eq {exe}"), "/FO", "CSV", "/NH"])
+            .output();
+        if let Ok(o) = out_raw {
+            let text = String::from_utf8_lossy(&o.stdout);
+            for line in text.lines() {
+                let line = line.trim();
+                // 没有匹配时 tasklist 会输出一句中文提示而不是 CSV，跳过
+                if !line.starts_with('"') {
+                    continue;
+                }
+                // 字段 2 是 PID（字段 1 是映像名，可能带逗号，所以按引号切）
+                let parts: Vec<&str> = line.split("\",\"").collect();
+                if parts.len() < 2 {
+                    continue;
+                }
+                if let Ok(pid) = parts[1].trim_matches('"').parse::<u32>() {
+                    out.push(pid);
+                }
+            }
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        // Unix 下 pgrep 比 ps 解析更稳；拿不到就退化成「只有自己那一份」
+        if let Ok(o) = Command::new("pgrep").args(["-f", &exe]).output() {
+            for line in String::from_utf8_lossy(&o.stdout).lines() {
+                if let Ok(pid) = line.trim().parse::<u32>() {
+                    out.push(pid);
+                }
+            }
+        }
+    }
+    out
+}
+
+/// 抓一次系统进程表，返回 `pid -> ppid` 的映射。
+///
+/// ★ 只抓**一次**。早先的写法是「每个候选 pid 起一个 PowerShell 去问父进程在不在」，
+/// 一个进程冷启 300–600 ms，N 个进程就是 N 次串行等待，启动路径上白白卡住一两秒，
+/// 而且把「查权限」这种事重复做了 N 遍（PowerShell 的 CIM/WMI 在受限上下文里可能被拒）。
+/// 改成一次性全表扫描后，Rust 侧做集合运算即可，成本与进程数无关。
+///
+/// 返回 `None` 表示**表没抓到**（命令失败/解析为空）。调用方必须把 `None` 当成
+/// 「判不了」，走保守分支（不杀），绝不能当成「没有孤儿」或「全是孤儿」。
+fn process_table() -> Option<HashMap<u32, u32>> {
+    #[cfg(windows)]
+    {
+        // PowerShell 一次性吐出 "pid,ppid" 逐行。
+        // 不用 Get-CimInstance 单查（N 次调用）；也不依赖 wmic（Win11 已移除）。
+        let out = Command::new("powershell")
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                "Get-CimInstance Win32_Process | ForEach-Object { \"$($_.ProcessId),$($_.ParentProcessId)\" }",
+            ])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .output();
+        let o = match out {
+            Ok(o) if o.status.success() => o,
+            _ => return None,
+        };
+        let text = String::from_utf8_lossy(&o.stdout);
+        let mut map = HashMap::new();
+        for line in text.lines() {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            let mut it = line.split(',');
+            if let (Some(a), Some(b)) = (it.next(), it.next()) {
+                if let (Ok(pid), Ok(ppid)) = (a.trim().parse::<u32>(), b.trim().parse::<u32>()) {
+                    map.insert(pid, ppid);
+                }
+            }
+        }
+        if map.is_empty() {
+            None // 抓到了命令但一行都没解析出来 → 视为失败，别当成「系统没有进程」
+        } else {
+            Some(map)
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        // Unix：`ps -e -o pid=,ppid=` 一次拿全表。
+        let out = Command::new("ps").args(["-e", "-o", "pid=,ppid="]).output();
+        let o = match out {
+            Ok(o) if o.status.success() => o,
+            _ => return None,
+        };
+        let text = String::from_utf8_lossy(&o.stdout);
+        let mut map = HashMap::new();
+        for line in text.lines() {
+            let mut it = line.split_whitespace();
+            if let (Some(a), Some(b)) = (it.next(), it.next()) {
+                if let (Ok(pid), Ok(ppid)) = (a.parse::<u32>(), b.parse::<u32>()) {
+                    map.insert(pid, ppid);
+                }
+            }
+        }
+        if map.is_empty() {
+            None
+        } else {
+            Some(map)
+        }
+    }
+}
+
+/// 给定进程表，判定哪些 pid 是孤儿。
+///
+/// 与 [`orphan_pids`] 分离出来，是为了让它成为**纯函数**：不碰系统、不 spawn，
+/// 可以直接喂人造进程表做断言，把「判据」本身钉死。
+///
+/// 判据（三条全中才算孤儿）：
+///   1. `pid` 要在表里（已经退出的进程不占资源，不用我们动手）；
+///   2. `ppid` 不能是 0 或自身（内核/根进程，判不了 → 按有主处理）；
+///   3. `ppid` 不能出现在表里（父进程还在 → 有主 → 别碰）。
+fn orphans_from_table(table: &HashMap<u32, u32>, pids: &[u32]) -> Vec<u32> {
+    let mut out = Vec::new();
+    for &pid in pids {
+        let Some(&ppid) = table.get(&pid) else {
+            continue; // 1. 已退出
+        };
+        if ppid == 0 || ppid == pid {
+            continue; // 2. 判不了
+        }
+        if table.contains_key(&ppid) {
+            continue; // 3. 有主
+        }
+        out.push(pid);
+    }
+    out
+}
+
+/// 判断一批 pid 里哪些是**孤儿**（父进程已经不在了）。
+///
+/// ★ 「父进程还在不在」是「该不该杀」的**唯一判据**，比「是不是我们起的」更准：
+///   - 父进程还在 → 它有主，可能是**另一个正在运行的 WordWise 实例**
+///     （用户开了两份，或开发时开着调试实例），杀它就是砸别人的饭碗；
+///   - 父进程没了 → 它是孤儿，原主人已经走了，谁都不会再来认领它，
+///     显存却一直被占着。这种才该收。
+///
+/// 表抓不到时返回空集：调用方据此跳过本轮，不做任何击杀。
+fn orphan_pids(pids: &[u32]) -> Vec<u32> {
+    let table = match process_table() {
+        Some(t) => t,
+        None => {
+            log::warn!("拿不到系统进程表，本轮跳过孤儿回收（宁可少收，不可误杀）");
+            return Vec::new();
+        }
+    };
+    orphans_from_table(&table, pids)
+}
+
+/// 结束一个 pid；返回是否真的发过信号。
+fn kill_pid(pid: u32) -> bool {
+    #[cfg(windows)]
+    {
+        // /T 连同子进程一起（llama-server 在某些配置下会再拉一个 worker）
+        return Command::new("taskkill")
+            .args(["/PID", &pid.to_string(), "/F", "/T"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+    }
+    #[cfg(not(windows))]
+    {
+        return Command::new("kill")
+            .args(["-9", &pid.to_string()])
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+    }
+}
+
+/// 扫掉系统里**所有**托管进程（含孤儿），返回清掉的个数。
+///
+/// 这是 `stop_server` 的「彻底版」：不信任内存记录，直接以进程表为准。
+/// 启动前与退出时都该跑它。
+///
+/// ★ 只收**孤儿**，不碰有主的进程。
+///
+///   一个 llama-server 可能是：
+///   - 孤儿（父进程已退出）→ 没人管了，显存白占，**收**；
+///   - 有主（父进程还活着）→ 那是**另一个正在运行的 WordWise 实例**
+///     在用它，杀了就是砸别人的饭碗，**不动**。
+///
+///   这个判据让「多开应用」和「崩溃残留」两种情况都能被正确处理，
+///   而不用去猜「是不是我们起的」。
+pub fn sweep_orphans() -> usize {
+    let me = std::process::id();
+    let candidates: Vec<u32> = managed_pids().into_iter().filter(|&p| p != me).collect();
+    if candidates.is_empty() {
+        return 0;
+    }
+    // 一次全表扫描定孤儿；表抓不到就一个都不杀。
+    let orphans = orphan_pids(&candidates);
+    let mut killed = 0usize;
+    for pid in orphans {
+        if kill_pid(pid) {
+            killed += 1;
+            log::info!("回收孤儿托管进程 llama-server (pid {pid})");
+        }
+    }
+    killed
+}
+
 /// 托管服务占用的端口段（含下界、不含上界）。
 ///
 /// 与 [`pick_port`] 的范围必须一致：判断「这个 base_url 是不是我们自己写进去的」
@@ -554,7 +783,20 @@ pub fn start_server(
     threads: usize,
     context: usize,
 ) -> Result<u16> {
+    // ★ 先彻底清场，再起新的。
+    //
+    //   只调 `stop_server()` 是不够的 —— 它只杀本进程 `SERVER` 里记着的那一个。
+    //   上一轮应用退出/崩溃留下的孤儿它根本不知道，于是每重启一次就多一个
+    //   常驻显存的 llama-server（实机 4 小时攒了 4 个、吃掉 6.4 GB 显存）。
+    //   这里以**系统进程表**为准扫一遍，起新进程之前保证旧的一个不剩。
     stop_server();
+    let swept = sweep_orphans();
+    if swept > 0 {
+        // 进程退出、显存释放不是瞬时的：给驱动一点时间回收，
+        // 否则可能出现「旧的还没释放、新的又要分配」而失败。
+        std::thread::sleep(std::time::Duration::from_millis(600));
+        log::info!("启动前清掉 {swept} 个残留的托管进程");
+    }
 
     let exe = engine.join(server_exe_name());
     if !exe.is_file() {
@@ -611,6 +853,9 @@ pub fn start_server(
 }
 
 /// 停止托管的服务（幂等）。
+///
+/// 只处理**本进程记着的那一份**。想连孤儿一起清，用 [`sweep_orphans`]——
+/// 或直接调 [`shutdown`]，它就是「两份都做」。
 pub fn stop_server() {
     let mut guard = SERVER.lock();
     if let Some(mut h) = guard.take() {
@@ -641,8 +886,16 @@ pub fn server_state() -> (bool, u16, String) {
 }
 
 /// 进程退出时清理：不能让 llama-server 变成孤儿进程常驻内存。
+///
+/// 两份都要做：先收自己那一份（正常路径），再扫一遍孤儿（崩溃/强杀后的残留）。
+/// 只靠前者的那版代码在实机上留了 4 个进程吃满显存 —— 退出路径并不可靠，
+/// 所以这里**不以内存记录为准**，而是以系统进程表为准。
 pub fn shutdown() {
     stop_server();
+    let n = sweep_orphans();
+    if n > 0 {
+        log::info!("退出时回收了 {n} 个托管进程");
+    }
 }
 
 #[cfg(test)]
@@ -807,5 +1060,69 @@ mod tests {
 
         // 取过一次就没了，避免「停止」被点两次时重复还原
         assert!(take_prev_llm().is_none());
+    }
+
+    /// 造一张人造进程表：pid -> ppid。
+    fn table(rows: &[(u32, u32)]) -> HashMap<u32, u32> {
+        rows.iter().copied().collect()
+    }
+
+    /// ★ 核心回归：有主的 llama-server 绝不能被收。
+    ///
+    /// 场景：用户同时开了两个 WordWise（或开发时开着调试实例），
+    /// 另一个实例托管的 llama-server 父进程还活着。上一版「按名字全杀」
+    /// 会把它的服务端一并杀掉，等于砸别人的饭碗。
+    #[test]
+    fn 有主的托管进程不会被回收() {
+        let t = table(&[(1000, 500), (500, 1)]);
+        // 1000 是 llama-server，父 500（另一个 wordwise）还活着 → 不收
+        let got = orphans_from_table(&t, &[1000]);
+        assert!(got.is_empty(), "父进程还活着就不能杀，实际收掉了 {got:?}");
+    }
+
+    /// 父进程已经退出 → 孤儿，该收。
+    ///
+    /// 场景：上一轮 WordWise 崩溃/被强杀，它起的 llama-server 没人管了，
+    /// 但显存一直占着（实机 4 个进程吃掉 6.4 GB）。
+    #[test]
+    fn 父进程消失的托管进程会被回收() {
+        // 1000 在表里，父 500 不在表里（已退出）
+        let t = table(&[(1000, 500), (777, 1)]);
+        let got = orphans_from_table(&t, &[1000]);
+        assert_eq!(got, vec![1000]);
+    }
+
+    /// 已经退出的进程不用我们动手（它压根不占资源了）。
+    #[test]
+    fn 已退出的进程不进回收名单() {
+        let t = table(&[(500, 1)]);
+        // 1000 不在表里 → 早就没了
+        let got = orphans_from_table(&t, &[1000]);
+        assert!(got.is_empty());
+    }
+
+    /// 父 pid 为 0 或指向自身 → 判不了，按有主处理（宁可少收，不可误杀）。
+    #[test]
+    fn 判不了父进程时一律不杀() {
+        let t = table(&[(1000, 0), (2000, 2000)]);
+        assert!(orphans_from_table(&t, &[1000]).is_empty(), "ppid=0 不该杀");
+        assert!(
+            orphans_from_table(&t, &[2000]).is_empty(),
+            "ppid 指向自身不该杀"
+        );
+    }
+
+    /// 混合场景：一批候选里只挑出真孤儿，其余不动。
+    #[test]
+    fn 一批候选里只挑真孤儿() {
+        let t = table(&[
+            (100, 9),  // 孤儿（9 不在表里）
+            (200, 50), // 有主（50 在表里）
+            (50, 1),   // 另一个 wordwise
+            (300, 100), // 父 100 是孤儿但不是我们这轮的候选，它自己还没退出 → 有主
+        ]);
+        let mut got = orphans_from_table(&t, &[100, 200, 300]);
+        got.sort_unstable();
+        assert_eq!(got, vec![100], "只有 100 是孤儿：300 的父 100 仍在表里");
     }
 }

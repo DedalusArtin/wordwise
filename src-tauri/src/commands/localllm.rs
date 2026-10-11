@@ -389,6 +389,21 @@ fn heal_stale_base_url(state: &AppState) {
 /// 任何一步失败都只记日志、不打扰用户 —— 自动启动是「锦上添花」，
 /// 失败了用户手动点一下就行，弹个错误框反而莫名其妙。
 pub fn spawn_autostart(state: Arc<AppState>) {
+    // ★ 无论开没开自动启动，先把上一轮留下的孤儿收掉。
+    //
+    //   为什么扫的是**进程表**而不是 `server_state()`：后者读的是本进程
+    //   内存里的那张表，应用崩溃/被强杀之后就没了，而它起的 llama-server
+    //   还在跑 —— 实机上一轮调试攒了 4 个，占掉 6.4 GB 显存。
+    //   启动时清一次，用户不用管、也不用重启电脑。
+    //
+    //   放在线程里做：tasklist 是个子进程，几十毫秒，不该卡住窗口显示。
+    std::thread::spawn(|| {
+        let n = localllm::sweep_orphans();
+        if n > 0 {
+            log::info!("启动时回收了 {n} 个上一轮残留的托管进程");
+        }
+    });
+
     if !state.cfg().auto_start_local_llm {
         // 没开自动启动：至少把可能残留的死地址修回来
         heal_stale_base_url(&state);
