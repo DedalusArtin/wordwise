@@ -146,6 +146,19 @@ pub struct AuditRow {
     pub at: i64,
 }
 
+/// 查询历史里的一行：`query` 已去重，`at` 是最近一次查询的时间，`times` 是累计次数。
+///
+/// ★ 为什么是 struct 而不是 String：列表要显示「最近查询 × N 次」这种信息，
+///   只给一串字符串，前端就得自己再查一次 count，或者干脆不显示次数。
+///   顺带也把「某个词刚查过却排在最后」的排序 bug 挡在 SQL 里（见
+///   [`Db::recent_search_rows`]）。
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SearchLogRow {
+    pub query: String,
+    pub at: i64,
+    pub times: i64,
+}
+
 impl AuditRow {
     fn from_row(r: &rusqlite::Row) -> rusqlite::Result<Self> {
         Ok(Self {
@@ -2154,16 +2167,57 @@ impl Db {
     }
 
     pub fn recent_searches(&self, limit: i64) -> Result<Vec<String>> {
+        Ok(self
+            .recent_search_rows(limit)?
+            .into_iter()
+            .map(|r| r.query)
+            .collect())
+    }
+
+    /// 查询历史（同一个词去重，保留最近一次时间与查询次数）。
+    ///
+    /// ★ 这里修掉一个会让「历史看起来像丢了」的 bug。
+    ///   老实现是 `SELECT DISTINCT query FROM search_log ORDER BY at DESC`：
+    ///   `DISTINCT` 之后每个词只剩一行，而 `at` 不在 SELECT 列表里，
+    ///   SQLite 只会从这个词的**任意一行**里任取一个值参与排序（实测拿到的是
+    ///   rowid 最小的那条，也就是这个词**最早**被查的时间）。后果很难察觉：
+    ///   「半年前查过、刚刚又查了一遍」的词会沉到列表最底部，用户以为历史没记。
+    ///   显式 `GROUP BY query` + `MAX(at)` 才是「按最近查询时间排序」的正确写法。
+    pub fn recent_search_rows(&self, limit: i64) -> Result<Vec<SearchLogRow>> {
         let conn = self.conn.lock();
         let mut stmt = conn.prepare(
-            "SELECT DISTINCT query FROM search_log ORDER BY at DESC LIMIT ?1",
+            "SELECT query, MAX(at) AS last_at, COUNT(*) AS times
+             FROM search_log
+             GROUP BY query
+             ORDER BY last_at DESC
+             LIMIT ?1",
         )?;
-        let rows = stmt.query_map(params![limit], |r| r.get::<_, String>(0))?;
+        let rows = stmt.query_map(params![limit], |r| {
+            Ok(SearchLogRow {
+                query: r.get::<_, String>(0)?,
+                at: r.get::<_, i64>(1)?,
+                times: r.get::<_, i64>(2)?,
+            })
+        })?;
         let mut out = Vec::new();
         for r in rows {
             out.push(r?);
         }
         Ok(out)
+    }
+
+    /// 从历史里删掉某一个词（右键单条删除用）。
+    pub fn delete_search_history(&self, query: &str) -> Result<usize> {
+        let conn = self.conn.lock();
+        let n = conn.execute("DELETE FROM search_log WHERE query=?1", params![query])?;
+        Ok(n)
+    }
+
+    /// 清空整份查询历史。
+    pub fn clear_search_history(&self) -> Result<usize> {
+        let conn = self.conn.lock();
+        let n = conn.execute("DELETE FROM search_log", [])?;
+        Ok(n)
     }
 
     /// 导出全部学习数据为 JSON（备份 / 跨设备迁移）。

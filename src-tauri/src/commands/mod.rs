@@ -632,6 +632,13 @@ pub async fn cmd_lookup(
     word: String,
     lang: Option<String>,
     force_refresh: Option<bool>,
+    // 是否记进查询历史。默认 true（`unwrap_or(true)`）。
+    //
+    // ★ 为什么需要这个开关：点「saw 是 see 的过去式 —— 载入 see 的词条」时，
+    //   用户**并没有查 see**，他只是想看看 see 的例句。如果这次也记进历史，
+    //   历史里就会冒出一条用户没主动查过的词，把「最近查过」变得不可信。
+    //   同理，前端任何内部触发的查询都该传 false。
+    record_history: Option<bool>,
 ) -> Result<dict::LookupResult, String> {
     let cfg = state.cfg();
     let word = word.trim().to_string();
@@ -746,7 +753,9 @@ pub async fn cmd_lookup(
     let mut result = result;
     result.lang_note = lang_note;
 
-    state.db.log_search(&result.word, timeutil::now_ts()).ok();
+    if record_history.unwrap_or(true) {
+        state.db.log_search(&result.word, timeutil::now_ts()).ok();
+    }
     Ok(result)
 }
 
@@ -1057,10 +1066,275 @@ pub fn cmd_search_words(
         .map_err(err)
 }
 
-/// 最近搜索记录。
+/// 查询历史：同一个词去重成一行，带最近查询时间与累计次数。
+///
+/// `limit` 不传默认 50。`SearchLogRow` 而不是 `Vec<String>`：界面要显示
+/// 「3 分钟前」「查过 5 次」，拿不到 `at` 与 `times` 就做不出来。
 #[tauri::command(async)]
-pub fn cmd_recent_searches(state: State<'_, Arc<AppState>>) -> Result<Vec<String>, String> {
-    state.db.recent_searches(20).map_err(err)
+pub fn cmd_recent_searches(
+    state: State<'_, Arc<AppState>>,
+    limit: Option<i64>,
+) -> Result<Vec<crate::db::SearchLogRow>, String> {
+    let n = limit.unwrap_or(50).clamp(1, 200);
+    state.db.recent_search_rows(n).map_err(err)
+}
+
+/// 删掉查询历史里的某一个词（界面上每条右侧的 ×）。
+#[tauri::command(async)]
+pub fn cmd_delete_search_history(
+    state: State<'_, Arc<AppState>>,
+    query: String,
+) -> Result<bool, String> {
+    let q = query.trim().to_string();
+    if q.is_empty() {
+        return Ok(false);
+    }
+    state.db.delete_search_history(&q).map(|n| n > 0).map_err(err)
+}
+
+/// 清空查询历史（列表底部的「清空全部」）。
+#[tauri::command(async)]
+pub fn cmd_clear_search_history(state: State<'_, Arc<AppState>>) -> Result<usize, String> {
+    state.db.clear_search_history().map_err(err)
+}
+
+// ============================================================
+// 变形查询（morph_en）
+// ============================================================
+
+/// `cmd_forms_of` 的返回：这个查询词是不是某个词的变形，以及该原形的全套变形。
+///
+/// 前端拿到它做两件事：
+///   1. 原形 ≠ 查询词时，在词条上方挂一条「saw 是 see 的过去式 ——
+///      载入 see 的词条」，点一下就把 see 的例句/音标填进来；
+///   2. 把 `forms` 并进变形栏（词库没补过库时也不露白）。
+///
+/// 字段刻意用 `Option`/空数组表示「没有」，不用 `null`/`Err` ——
+/// 「这不是一个变形词」是**正常结果**，不是错误。用 Err 表达会让
+/// 前端把正常路径写进 catch 里，那是错的。
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct FormsOfResult {
+    /// 查询词本身（回显，便于前端配对）
+    pub query: String,
+    /// 命中的原形；没命中时与原词相同
+    pub base: String,
+    /// 形态标签（「过去式」「复数」…）；原形即查询词时为空
+    pub kind: String,
+    /// 主词性归一后的类型：verb / noun / adj / adv / other
+    pub pos: String,
+    /// 由原形生成（或从词库补齐）的全套变形
+    pub forms: Vec<crate::morph_en::Form>,
+    /// 原形在词库里的完整词条（有就返回，供前端直接载入，省一次 IPC）
+    pub entry: Option<crate::models::WordEntry>,
+}
+
+/// 查一个词：它是不是变形？原形是谁？原形有哪些变形？
+///
+/// # 判定顺序（这个顺序是有讲究的）
+///
+/// 1. **先查词库**：`saw` 在词库里如果是一条独立词条（名词「锯子」），
+///    那它就是**自己的原形** —— 用户主动查 saw 时，他多半就是想看锯子，
+///    不该被硬拽到 see。这一步保证「词库里真有这条」时永远优先。
+/// 2. **再查不规则表**：词库里没有 `saw` 或有但没变形数据时，
+///    去 [`crate::morph_en::bases_of`] 找它可能是谁的变形。
+///    命中多个（`left` → leave/lend）时优先取**词库里真的存在**的那个；
+///    都不存在就取第一个，至少能把形态标出来。
+/// 3. **最后看词性定变形类别**：原形的词性决定该补哪些变形
+///    （动词补 -s/-ing/过去式/过去分词，名词补复数）。
+///
+/// 第 1 步是这次修复里最容易漏掉的一点：只按不规则表反查会让
+/// 「saw = 锯子」这类词条被 see 遮掉，用户等于查不到自己想要的词。
+#[tauri::command(async)]
+pub fn cmd_forms_of(
+    state: State<'_, Arc<AppState>>,
+    word: String,
+    lang: Option<String>,
+) -> Result<FormsOfResult, String> {
+    let q = word.trim().to_lowercase();
+    let lang = lang.unwrap_or_else(|| "en".to_string());
+    if q.is_empty() {
+        return Ok(FormsOfResult {
+            query: q,
+            base: String::new(),
+            kind: String::new(),
+            pos: "other".into(),
+            forms: vec![],
+            entry: None,
+        });
+    }
+
+    // 非英语不做英语形态学推断（日语/中文的变形规则完全不同，
+    // 硬套只会产生垃圾候选 —— 这正是 `cee` 那类 bug 的温床）
+    if !lang.to_lowercase().starts_with("en") {
+        return Ok(FormsOfResult {
+            query: q.clone(),
+            base: q,
+            kind: String::new(),
+            pos: "other".into(),
+            forms: vec![],
+            entry: None,
+        });
+    }
+
+    // 1) 词库里这个词本身在不在？在 → 它就是原形，把它的数据直接带上
+    let own = state.db.get_word(&q, &lang).unwrap_or(None);
+    if let Some(e) = own.as_ref() {
+        // 词条自己已经有一条明确「我是 X 的变形」的释义时，仍然要标出原形
+        // （数据源可能只给了词条、没给变形表）
+        if let Some(base) = infer_base_from_defs(e) {
+            if base != q {
+                return Ok(assemble_from(&state, &q, &base, &lang, own));
+            }
+        }
+    }
+
+    // 2) 不规则表反查
+    let candidates = crate::morph_en::bases_of(&q);
+    if candidates.is_empty() {
+        // 不是变形词。仍返回它自己的变形集（动词 saw 也要能看到 saws/sawing）
+        return Ok(assemble_from(&state, &q, &q, &lang, own));
+    }
+
+    // 优先取「词库里真的存在」的那个原形；`left → leave` 与 `left → lend`
+    // 都命中时，词库里有哪个就选哪个。都不在就取第一个（至少标出形态）。
+    let mut chosen: Option<(String, String, Option<crate::models::WordEntry>)> = None;
+    for (b, l) in &candidates {
+        if let Ok(Some(e)) = state.db.get_word(b, &lang) {
+            chosen = Some((b.clone(), l.clone(), Some(e)));
+            break;
+        }
+    }
+    let (base, kind, base_entry) = chosen.unwrap_or_else(|| {
+        let (b, l) = candidates[0].clone();
+        (b, l, None)
+    });
+
+    let mut res = assemble_from(&state, &q, &base, &lang, base_entry);
+    res.kind = kind;
+    Ok(res)
+}
+
+/// 组装返回：原形词条 + 词性 + 全套变形。
+///
+/// `own` 是**原形自己**的词条（有则复用，避免重复查库）。
+fn assemble_from(
+    state: &State<'_, Arc<AppState>>,
+    query: &str,
+    base: &str,
+    lang: &str,
+    base_entry: Option<crate::models::WordEntry>,
+) -> FormsOfResult {
+    let base_entry = match base_entry {
+        Some(e) => Some(e),
+        // 原形不在词库里也照样返回：变形是本地能算的，不该因为
+        // 「这个词没进词库」就让变形栏空掉
+        None => state.db.get_word(base, lang).unwrap_or(None),
+    };
+
+    let kind_pos = base_entry
+        .as_ref()
+        .map(|e| crate::morph_en::Pos::parse(&primary_pos_raw(e)))
+        .unwrap_or(crate::morph_en::Pos::Other);
+
+    // 词库里已有的变形（可能带着正确的三单/过去式）先收进来，
+    // 本地规则只补它没覆盖的 —— 数据源的拼写永远优先于我们的规则
+    let mut forms: Vec<crate::morph_en::Form> = Vec::new();
+    if let Some(e) = base_entry.as_ref() {
+        for i in &e.inflections {
+            let f = i.form.trim();
+            if f.is_empty() || f.eq_ignore_ascii_case(base) {
+                continue;
+            }
+            let m = crate::morph_en::normalize_label(&i.label);
+            if !kind_pos.allows(&m) {
+                continue;
+            }
+            if forms.iter().any(|x| x.label == m) {
+                continue;
+            }
+            forms.push(crate::morph_en::Form { label: m, form: f.to_string() });
+        }
+    }
+    for f in crate::morph_en::forms_for(base, kind_pos) {
+        if forms.iter().any(|x| x.label == f.label || x.form.eq_ignore_ascii_case(&f.form)) {
+            continue;
+        }
+        forms.push(f);
+    }
+
+    let pos = match kind_pos {
+        crate::morph_en::Pos::Verb => "verb",
+        crate::morph_en::Pos::Noun => "noun",
+        crate::morph_en::Pos::Adj => "adj",
+        crate::morph_en::Pos::Adv => "adv",
+        crate::morph_en::Pos::Other => "other",
+    }
+    .to_string();
+
+    FormsOfResult {
+        query: query.to_string(),
+        base: base.to_string(),
+        // 查询词 = 原形时没有"形态"可言，调用方据此判断要不要显示「原形条」
+        kind: if query == base { String::new() } else { String::new() },
+        pos,
+        forms,
+        entry: base_entry,
+    }
+}
+
+/// 词条的主词性原文（第一个非空 pos）。
+fn primary_pos_raw(e: &crate::models::WordEntry) -> String {
+    e.senses
+        .iter()
+        .map(|s| s.pos.trim())
+        .find(|p| !p.is_empty())
+        .unwrap_or("")
+        .to_string()
+}
+
+/// 从词条的释义文本里推断「我是 X 的变形」—— 与前端 `detectBaseForm` 同一套逻辑。
+///
+/// ★ 必须有「共享词首」这条约束。查 see 时某本词典用 "cee"（字母 C 的读法）
+///   解释 see，`of cee` 里的 cee 被旧实现当成了原形，界面上就挂出
+///   「原形 cee」。同音词/同形异义词词首不同，这条约束能全挡掉；
+///   真变形（coincided/coincide）必然共享词首。
+///   两边实现要保持一致 —— 前端改规则时这里也要跟着改。
+fn infer_base_from_defs(e: &crate::models::WordEntry) -> Option<String> {
+    let word = e.word.to_lowercase();
+    let defs = e
+        .senses
+        .iter()
+        .map(|s| s.definition.as_str())
+        .collect::<Vec<_>>()
+        .join(" ");
+    if defs.is_empty() {
+        return None;
+    }
+    let lower = defs.to_lowercase();
+    const EN: [&str; 10] = [
+        "past participle of ",
+        "past tense of ",
+        "simple past of ",
+        "present participle of ",
+        "third person singular of ",
+        "alternative spelling of ",
+        "misspelling of ",
+        "form of ",
+        "variant of ",
+        "plural of ",
+    ];
+    for p in EN {
+        let Some(i) = lower.find(p) else { continue };
+        let rest = &lower[i + p.len()..];
+        let w: String = rest
+            .chars()
+            .take_while(|c| c.is_ascii_alphabetic() || *c == '\'' || *c == '-')
+            .collect();
+        if w.len() >= 2 && crate::morph_en::looks_like_form_of(&w, &word) {
+            return Some(w);
+        }
+    }
+    None
 }
 
 // ============================================================

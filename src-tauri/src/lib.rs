@@ -21,6 +21,8 @@ pub mod commands;
 pub mod db;
 pub mod dict;
 pub mod enrich;
+/// AI 讲解「六栏」的确定性解析与分栏合并 —— 见模块头注释里的用户需求。
+pub mod explain_fields;
 pub mod graph;
 /// 语种判定与入库闸门（唯一一份书写系统判定实现，其余模块都调它）
 pub mod lang;
@@ -29,6 +31,13 @@ pub mod logging;
 pub mod localllm;
 pub mod models;
 pub mod morph;
+/// 英语形态学：不规则变形表 + 「词性 → 该有哪些变形」规则。
+///
+/// 与 [`morph`] 的分工：`morph` 推的是**派生词**（happy → happiness，
+/// 靠词库确认存在性）；这里推的是**同一个词的变形**（see → saw/seen/sees/seeing，
+/// 答案是确定的，不需要确认）。两者都会产生候选字符串，但语义完全不同，
+/// 混在一个模块里会让「要不要查库确认」这个判断变得含糊。
+pub mod morph_en;
 pub mod net;
 pub mod search;
 pub mod seed;

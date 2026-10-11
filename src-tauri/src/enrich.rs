@@ -382,6 +382,9 @@ mod tests {
             inflections: vec![],
             related: vec![],
             mnemonic: mn.into(),
+            exam_points: vec![],
+            collocations: vec![],
+            confusables: vec![],
             source: String::new(),
             extra: Default::default(),
         };

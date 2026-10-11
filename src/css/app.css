@@ -1435,6 +1435,31 @@ h4.md-h, h5.md-h { font-size: 13.5px; font-weight: 600; color: var(--text); }
 .speak-btn:hover { background: var(--blue); color: #fff; transform: scale(1.08); }
 .speak-btn:active { transform: scale(.94); }
 .we-phon .speak-btn { width: 20px; height: 20px; font-size: 10.5px; margin-left: 4px; }
+
+/* ---------- 原形条（查的是变形词时的提示） ----------
+
+   场景：查 `saw`，词条上方出现「「saw」是 see 的过去式　[载入 see 的词条]」。
+   视觉上要**压得住**：它是解释当前这个词的身份的，不是另一块内容 ——
+   所以用左侧蓝色竖条 + 浅蓝底，和变形栏的「原形锚点行」同一个视觉语言
+   （见 .infl-item.infl-base），用户一眼就知道这两处说的是同一件事。 */
+.lk-forms-note {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin: 0 0 12px;
+  padding: 9px 12px;
+  border-radius: 8px;
+  background: var(--blue-soft);
+  border-left: 3px solid var(--blue);
+  font-size: 12.5px;
+  color: var(--text);
+}
+.lk-forms-note .lfn-text b { color: var(--blue); font-weight: 600; }
+.lk-forms-note .lfn-load {
+  margin-left: auto;      /* 按钮始终贴右，文字长短不一时不跳动 */
+  flex-shrink: 0;
+}
 .phon-item { display: inline-flex; align-items: center; gap: 2px; margin-right: 12px; }
 
 /* 可点击的变形 / 例句中的词 */

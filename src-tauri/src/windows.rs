@@ -88,6 +88,10 @@ fn build_invoke_handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync +
         commands::cmd_word_family,
         commands::cmd_search_words,
         commands::cmd_recent_searches,
+        commands::cmd_delete_search_history,
+        commands::cmd_clear_search_history,
+        // 变形查询：saw → 原形 see + 全套变形（本地，不联网）
+        commands::cmd_forms_of,
         // AI 讲解存档（讲解也是一种词库资料，可搜索、可并入词库）
         commands::explain::cmd_save_explain,
         commands::explain::cmd_get_explain,

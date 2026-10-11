@@ -34,6 +34,60 @@ pub struct Example {
     pub translation: String,
 }
 
+/// 常见搭配（## 常见搭配 栏目的结构化落点）。
+///
+/// 为什么单独建结构而不是塞进 `related`：`related` 是「相关词/同义词/反义词」，
+/// 只有一个词形；搭配是「词组 + 用法说明」，少一半就不是搭配了。混在 `related`
+/// 里会让详情卡只剩孤零零一个词，说明丢失。
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct Collocation {
+    /// 搭配词组本身，如 `make a decision`
+    #[serde(default)]
+    pub phrase: String,
+    /// 用法说明 / 中文释义
+    #[serde(default)]
+    pub note: String,
+}
+
+impl Collocation {
+    /// 这条搭配有没有实质内容（词组与说明至少有一个非空）。
+    pub fn is_usable(&self) -> bool {
+        !self.phrase.trim().is_empty() || !self.note.trim().is_empty()
+    }
+    /// 去重键：优先按词组，词组空则退化到说明，避免同一条反复追加。
+    pub fn dedup_key(&self) -> String {
+        let p = self.phrase.trim().to_lowercase();
+        if !p.is_empty() {
+            return p;
+        }
+        self.note.trim().to_lowercase()
+    }
+}
+
+/// 易混辨析（## 易混辨析 栏目的结构化落点）。
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct Confusable {
+    /// 易混的那个词
+    #[serde(default)]
+    pub word: String,
+    /// 与本词的区别说明
+    #[serde(default)]
+    pub note: String,
+}
+
+impl Confusable {
+    pub fn is_usable(&self) -> bool {
+        !self.word.trim().is_empty() || !self.note.trim().is_empty()
+    }
+    pub fn dedup_key(&self) -> String {
+        let w = self.word.trim().to_lowercase();
+        if !w.is_empty() {
+            return w;
+        }
+        self.note.trim().to_lowercase()
+    }
+}
+
 /// 单词变形（时态、复数、比较级等）。
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Inflection {
@@ -82,6 +136,20 @@ pub struct WordEntry {
     /// 词根词缀 / 记忆法
     #[serde(default)]
     pub mnemonic: String,
+    /// 考点标注：四六级 / 考研 / 雅思 / 托福 / GRE…
+    ///
+    /// 来源是「本地词库归属」（该词属于哪本考试词库）+ 模型判断，见
+    /// [`crate::db::Db::word_book_refs`]。之所以单独成字段而不是塞进
+    /// `mnemonic`：考点要能**自动发现**，词库里明明有这个词，就不该让模型
+    /// 去猜它属于哪场考试（需求：本地有大量词库可以提供这些数据）。
+    #[serde(default)]
+    pub exam_points: Vec<String>,
+    /// 常见搭配（词组 + 用法说明）。
+    #[serde(default)]
+    pub collocations: Vec<Collocation>,
+    /// 易混辨析（易混词 + 区别说明）。
+    #[serde(default)]
+    pub confusables: Vec<Confusable>,
     /// 数据来源标识，如 "free-dictionary" / "custom:youdao" / "llm"
     #[serde(default)]
     pub source: String,
@@ -275,6 +343,18 @@ impl WordEntry {
         }
         if self.mnemonic.is_empty() {
             self.mnemonic = other.mnemonic;
+        }
+        // 讲解六栏里新加的三个：多源合并且战线是「只填空」，与上面保持一致。
+        // 注意这里**不是**追加 —— 「AI 讲解并入」那条路径走的是
+        // [`crate::enrich::merge_explain_fields`]，那里的规则是追加。
+        if self.exam_points.is_empty() {
+            self.exam_points = other.exam_points;
+        }
+        if self.collocations.is_empty() {
+            self.collocations = other.collocations;
+        }
+        if self.confusables.is_empty() {
+            self.confusables = other.confusables;
         }
         if !other.source.is_empty() {
             if self.source.is_empty() {

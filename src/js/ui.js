@@ -368,6 +368,97 @@ function examplesBlockHtml(entry) {
 }
 
 /**
+ * 词性归一 → 变形栏用的粗粒度词性。
+ *
+ * 变形栏只关心「该有哪些变形」，这件事只跟四类词性有关：
+ * 动词（-s/-ing/过去式/过去分词）、名词（复数）、形容词/副词（比较级/最高级）。
+ * 其余一律 `other`。
+ *
+ * ★ 这个函数存在的唯一理由是修掉「名词显示现在时」。
+ *   旧实现里首行标签写死成 `isEn ? '原形（现在时）' : '原形'` —— 只看语言，
+ *   于是 `helicopter`（n.）、`dumb`（adj.）都顶着「原形（现在时）」。
+ *   名词没有「现在时」这回事。
+ *
+ * 解析顺序与 Rust 侧 `morph_en::Pos::parse` 保持一致（两边都能独立工作，
+ * 前端不必等后端 IPC 就能把标签画对）。
+ *
+ * @param {string} pos 原始词性串，如 `v.` / `adj.` / `adv.` / `名·サ変`
+ * @returns {'verb'|'noun'|'adj'|'adv'|'other'}
+ */
+function posKind(pos) {
+  const raw = String(pos || '').trim();
+  const l = raw.toLowerCase();
+  if (!l) return 'other';
+  // 按非字母切分成 token 再前缀匹配。
+  // ★ 不能直接 includes('v')：`adv.` 里含 v，副词会被认成动词。
+  for (const t of l.split(/[^a-z]+/)) {
+    if (!t) continue;
+    if (t === 'adj' || t === 'adjective') return 'adj';
+    if (t === 'adv' || t === 'adverb') return 'adv';
+    if (t === 'v' || t === 'vi' || t === 'vt' || t === 'verb') return 'verb';
+    if (t === 'n' || t === 'noun') return 'noun';
+  }
+  // 中文 / 日文词性（日语词条写「名·サ変」「動Ⅰ」）
+  if (raw.includes('動') || raw.includes('动')) return 'verb';
+  if (raw.includes('名')) return 'noun';
+  if (raw.includes('形')) return 'adj';
+  if (raw.includes('副')) return 'adv';
+  return 'other';
+}
+
+/**
+ * 词条的主词性：取第一个能识别的。
+ *
+ * 多词性词（`n./v.`）按先出现的算。不完美，但把「名词显示现在时」
+ * 这类错误挡死了 —— 这正是用户报的那类问题。想更准需要数据里带
+ * 「每个释义各自有什么变形」，那是数据格式层面的事。
+ */
+function primaryPosKind(entry) {
+  const senses = (entry && entry.senses) || [];
+  for (const s of senses) {
+    const k = posKind(s && s.pos);
+    if (k !== 'other') return { kind: k, raw: String((s && s.pos) || '').trim() };
+  }
+  // 全认不出时退回第一个非空 pos 原文，好让徽标还能显示点什么
+  const first = senses.map((s) => String((s && s.pos) || '').trim()).find(Boolean);
+  return { kind: 'other', raw: first || '' };
+}
+
+/** 首行（原形行）标签：随词性变，不再一律「现在时」。 */
+function baseLabelFor(kind, isEn) {
+  if (!isEn) return '原形';           // 非英语不套英语时态框架
+  if (kind === 'verb') return '原形（现在时）';
+  if (kind === 'noun') return '原形（单数）';
+  if (kind === 'adj' || kind === 'adv') return '原形（原级）';
+  // 判断不出词性就别编 —— 宁可只说「原形」，也不给名词安上「现在时」
+  return '原形';
+}
+
+/**
+ * 这条变形在该词性下是否值得展示。
+ *
+ * ★ 关键作用：挡住「动词显示复数」。
+ *   查 see 时数据里有 `{"第三人称单数","sees"}` 与 `{"复数","sees"}` 两条，
+ *   动词只该保留前者。旧实现把标签归一后无差别全画，于是用户看到
+ *   「复数 sees　第三人称单数 sees」—— 同一个词出现两次、第一次还是错的。
+ *
+ *   词性为 other 时全部放行（宁多勿漏，判断不了就别筛）。
+ */
+function formAllowedFor(kind, meta) {
+  if (kind === 'other') return true;
+  const isPlural = meta.label === '复数' || meta.label === '单数';
+  const isVerbForm =
+    meta.label === '过去式' || meta.label === '过去分词' ||
+    meta.label === '现在分词' || meta.label === '动名词' ||
+    meta.label === '祈使形' || meta.label === '第三人称单数';
+  const isDegree = meta.label === '比较级' || meta.label === '最高级';
+  if (kind === 'verb') return !isPlural && (isVerbForm || isDegree);
+  if (kind === 'noun') return isPlural;
+  if (kind === 'adj' || kind === 'adv') return isDegree || isPlural;
+  return true;
+}
+
+/**
  * 词典释义把**查询词**标注为另一个词的屈折/派生形式时，提取原形。
  *
  * 场景（用户反馈「如果是变形的话标记原型和现在的时态」）：查 `coincided`
@@ -376,10 +467,20 @@ function examplesBlockHtml(entry) {
  *   - 英文：past tense of X / past participle of X / plural of X / form of X…
  *   - 中文：coincide 的过去式 / …的复数形式（中文语序里原形在**前**）
  * 提不到返回 ''（不是变形，按普通词渲染）。
+ *
+ * ★ 这里出过一个必须记住的 bug：查 `see`，词头旁挂出了「原形 cee」。
+ *   原因是只截英文释义里的 `X of ` 片段，而某本词典拿 "cee" 当 see 的
+ *   同音异形词来解释（`see` = the letter C），于是 `of cee` 里的 cee
+ *   被当成了原形。修法不是补一条特例，而是加**结构约束**：
+ *   原形必须与查询词共享词首（见 `sharesHead`）—— `cee` 与 `see`
+ *   首字母不同，直接出局。同音词、同形异义词都不满足这个约束，
+ *   而真正的变形（coincided/coincide、studies/study）必然满足。
  */
 function detectBaseForm(entry) {
+  const word = String((entry && entry.word) || '');
   const defs = (entry.senses || []).map((s) => s.definition || '').join(' ');
   if (!defs) return '';
+
   // 英文：在小写副本上定位并截取（ASCII 小写不改变长度，index 对齐安全）
   const lower = defs.toLowerCase();
   const EN = [
@@ -388,16 +489,85 @@ function detectBaseForm(entry) {
     'alternative spelling of ', 'misspelling of ',
     'form of ', 'variant of ', 'plural of ',
   ];
+  // 有 word 时用「共享词首」把脏原形挡掉（cee/see 就是这么被挡的，
+  // 见上面注释）。**没有 word 时就退化成只做长度检查** ——
+  // 调用方可能只拿到 senses（比如测试、或从存档里重建的半截数据），
+  // 这时候没有参照物可比，硬要求共享词首会让一个都提不出来。
+  const pick = (fn) => {
+    const w = fn();
+    if (!w || w.length < 2) return '';
+    return word ? (sharesHead(w, word) ? w : '') : w;
+  };
+
   for (const p of EN) {
     const i = lower.indexOf(p);
     if (i < 0) continue;
-    const w = (lower.slice(i + p.length).match(/^[a-z][a-z'-]*/) || [''])[0];
-    if (w.length >= 2) return w;
+    const got = pick(() => (lower.slice(i + p.length).match(/^[a-z][a-z'-]*/) || [''])[0]);
+    if (got) return got;
   }
   // 中文：原形在前，「X 的过去式 / 的复数形式 …」
   const zh = defs.match(/([A-Za-z][A-Za-z'-]*)['」)]?\s*的(过去式|过去分词|现在分词|复数形式|第三人称单数|复数)/);
-  if (zh && zh[1].length >= 2) return zh[1];
+  if (zh) {
+    const got = pick(() => zh[1]);
+    if (got) return got;
+  }
   return '';
+}
+
+/**
+ * 两个词是否像「同一词的变形关系」。
+ *
+ * ★ 这里踩过一个设计坑，记下来：最初我用「共享前 2 个字符」当判据，
+ *   想用它挡掉 `cee`（字母 C 的读法，被某本词典拿来解释 see）。
+ *   但这条规则是**错的** —— 不规则变形恰好是词首全变的：
+ *     see → saw / seen 　go → went 　be → was 　buy → bought
+ *   共享词首的只是规则变形（study→studies、coincide→coincided），
+ *   而不规则变形才是查词页最需要提示的那批。所以：
+ *
+ * 判据改成**双向检查**，两条满足其一即可：
+ *   ① 规则变形：共享前 1 个字符（study/studies、see/sees 都满足）——
+ *      `cee`/`see` 恰好**也不**满足这条（c ≠ s），挡得住；
+ *   ② 不规则变形：`form` 是 `base` 的已知不规则形态（查本地表，见
+ *      `IRREGULAR_EN` 与 `IRREGULAR_PLURAL_EN`）—— see/saw 靠这条过。
+ *
+ * 这样 `cee` 两条都不满足（首字母不同、也不在任何表里），被挡住；
+ * `saw`/`seen`/`went` 靠 ② 过；`studies` 靠 ① 过。
+ */
+function sharesHead(a, b) {
+  const x = String(a || '').toLowerCase();
+  const y = String(b || '').toLowerCase();
+  if (!x || !y || x === y) return false;
+  if (!/^[a-z'-]+$/.test(x) || !/^[a-z'-]+$/.test(y)) return false;
+  if (Math.abs(x.length - y.length) > 8) return false;
+
+  // ① 规则变形：首字母相同就够（cee 的首字母 c ≠ see 的 s，直接被挡）
+  if (x[0] !== y[0]) {
+    // ② 首字母不同 → 唯一可能是**不规则**变形，查表确认
+    return isKnownIrregularPair(x, y);
+  }
+  return true;
+}
+
+/**
+ * `form` 是否是 `base` 的已知不规则形态（任取一个方向）。
+ *
+ * `saw` → `see`：查 IRREGULAR_EN 发现 see:[saw, seen] 含 saw → true。
+ * `went` → `go`、`children` → `child` 同理。
+ * `cee` → `see`：任何表里都没有这个对应 → false。
+ */
+function isKnownIrregularPair(form, base) {
+  const irr = IRREGULAR_EN[base];
+  if (irr && (irr[0] === form || irr[1] === form)) return true;
+  // 反方向：给的 form 其实是原形，base 是它的变形（少见但对称处理）
+  const irr2 = IRREGULAR_EN[form];
+  if (irr2 && (irr2[0] === base || irr2[1] === base)) return true;
+  if (IRREGULAR_PLURAL_EN[base] === form) return true;
+  if (IRREGULAR_PLURAL_EN[form] === base) return true;
+  // 三单的不规则特例（be→is、have→has、do→does、go→goes）
+  if (base === 'be' && (form === 'is' || form === 'are')) return true;
+  if (base === 'have' && form === 'has') return true;
+  if (base === 'do' && form === 'does') return true;
+  return false;
 }
 
 /** 查询词本身是屈折形式时，它是什么形态（coincided → 过去式/过去分词）。 */
@@ -447,35 +617,166 @@ function inflMeta(label) {
   return { label: raw || '形式', pos: '' };
 }
 
+/* ---------------- 本地变形补齐（与 Rust morph_en 同源的最小实现） ----------------
+
+   ★ 为什么前端也要有一份：变形是**确定**的形态学问题，但后端补齐要么得
+     等一次 IPC、要么得等词条重新入库。查 see 这种基础词时用户期望是
+     「立刻就能看到 saw/seen」，不该等任何异步。所以这里放一份最小实现，
+     只覆盖规则拼写；**不规则变形查表**（见 IRREGULAR_EN）也放这里，
+     表短、纯数据、没有维护成本。
+
+   两边（Rust morph_en / 这里）不是重复劳动：Rust 侧负责**写库**时
+   把 inflections 存全（离线也有数据），前端负责**渲染**时兜底补全
+   （数据缺了也不露白）。只要保证同一套规则，结果是一致的。 */
+
+/** 不规则动词：`原形: [过去式, 过去分词]`。只收真正不规则的。 */
+const IRREGULAR_EN = {
+  be: ['was', 'been'], begin: ['began', 'begun'], bite: ['bit', 'bitten'],
+  blow: ['blew', 'blown'], break: ['broke', 'broken'], bring: ['brought', 'brought'],
+  build: ['built', 'built'], buy: ['bought', 'bought'], catch: ['caught', 'caught'],
+  choose: ['chose', 'chosen'], come: ['came', 'come'], cost: ['cost', 'cost'],
+  cut: ['cut', 'cut'], do: ['did', 'done'], draw: ['drew', 'drawn'],
+  drink: ['drank', 'drunk'], drive: ['drove', 'driven'], eat: ['ate', 'eaten'],
+  fall: ['fell', 'fallen'], feel: ['felt', 'felt'], fight: ['fought', 'fought'],
+  find: ['found', 'found'], fly: ['flew', 'flown'], forget: ['forgot', 'forgotten'],
+  forgive: ['forgave', 'forgiven'], freeze: ['froze', 'frozen'], get: ['got', 'gotten'],
+  give: ['gave', 'given'], go: ['went', 'gone'], grow: ['grew', 'grown'],
+  have: ['had', 'had'], hear: ['heard', 'heard'], hide: ['hid', 'hidden'],
+  hit: ['hit', 'hit'], hold: ['held', 'held'], hurt: ['hurt', 'hurt'],
+  keep: ['kept', 'kept'], know: ['knew', 'known'], lead: ['led', 'led'],
+  leave: ['left', 'left'], lend: ['lent', 'lent'], let: ['let', 'let'],
+  lose: ['lost', 'lost'], make: ['made', 'made'], mean: ['meant', 'meant'],
+  meet: ['met', 'met'], pay: ['paid', 'paid'], put: ['put', 'put'],
+  read: ['read', 'read'], ride: ['rode', 'ridden'], ring: ['rang', 'rung'],
+  rise: ['rose', 'risen'], run: ['ran', 'run'], say: ['said', 'said'],
+  see: ['saw', 'seen'], sell: ['sold', 'sold'], send: ['sent', 'sent'],
+  set: ['set', 'set'], shake: ['shook', 'shaken'], shine: ['shone', 'shone'],
+  shoot: ['shot', 'shot'], show: ['showed', 'shown'], sing: ['sang', 'sung'],
+  sit: ['sat', 'sat'], sleep: ['slept', 'slept'], speak: ['spoke', 'spoken'],
+  spend: ['spent', 'spent'], stand: ['stood', 'stood'], steal: ['stole', 'stolen'],
+  stick: ['stuck', 'stuck'], swim: ['swam', 'swum'], take: ['took', 'taken'],
+  teach: ['taught', 'taught'], tell: ['told', 'told'], think: ['thought', 'thought'],
+  throw: ['threw', 'thrown'], understand: ['understood', 'understood'],
+  wake: ['woke', 'woken'], wear: ['wore', 'worn'], win: ['won', 'won'],
+  write: ['wrote', 'written'],
+};
+
+/** 不规则复数：`单数: 复数`。 */
+const IRREGULAR_PLURAL_EN = {
+  child: 'children', foot: 'feet', goose: 'geese', man: 'men', mouse: 'mice',
+  ox: 'oxen', tooth: 'teeth', woman: 'women', person: 'people',
+  analysis: 'analyses', basis: 'bases', crisis: 'crises', datum: 'data',
+  leaf: 'leaves', life: 'lives', knife: 'knives', wife: 'wives', wolf: 'wolves',
+  thief: 'thieves', shelf: 'shelves', phenomenon: 'phenomena',
+};
+
+const isVowelCh = (c) => 'aeiou'.includes(c);
+
+function thirdPersonEn(w) {
+  if (w === 'be') return 'is';
+  if (w === 'have') return 'has';
+  if (w === 'do') return 'does';
+  if (w === 'go') return 'goes';
+  if (/(s|x|z|ch|sh|o)$/.test(w)) return w + 'es';
+  if (/[^aeiou]y$/.test(w)) return w.slice(0, -1) + 'ies';
+  return w + 's';
+}
+
+function presentParticipleEn(w) {
+  if (/ie$/.test(w)) return w.slice(0, -2) + 'ying';
+  if (/ee$/.test(w) || /oe$/.test(w) || /ye$/.test(w)) return w + 'ing';
+  if (/e$/.test(w)) return w.slice(0, -1) + 'ing';
+  if (shouldDoubleEn(w)) return w + w.slice(-1) + 'ing';
+  return w + 'ing';
+}
+
+function regularPastEn(w) {
+  if (/[^aeiou]y$/.test(w)) return w.slice(0, -1) + 'ied';
+  if (/e$/.test(w)) return w + 'd';
+  if (shouldDoubleEn(w)) return w + w.slice(-1) + 'ed';
+  return w + 'ed';
+}
+
+function pluralEn(w) {
+  if (IRREGULAR_PLURAL_EN[w]) return IRREGULAR_PLURAL_EN[w];
+  if (/(s|x|z|ch|sh)$/.test(w)) return w + 'es';
+  if (/[^aeiou]y$/.test(w)) return w.slice(0, -1) + 'ies';
+  return w + 's';
+}
+
+/** 单音节「辅音+元音+辅音」结尾才双写（stop→stopping，visit→visited）。 */
+function shouldDoubleEn(w) {
+  if (w.length < 3 || w.length > 5) return false;
+  const [a, b, c] = [w[w.length - 3], w[w.length - 2], w[w.length - 1]];
+  if (isVowelCh(c) || 'wxy'.includes(c)) return false;
+  if (!isVowelCh(b) || isVowelCh(a)) return false;
+  if (w.length >= 4 && isVowelCh(w[w.length - 4])) return false;
+  return true;
+}
+
+/**
+ * 由原形 + 词性在本地补出全套变形（不联网、不等 IPC）。
+ * @returns {Array<{label:string, form:string}>}
+ */
+function localForms(word, kind) {
+  const w = String(word || '').trim().toLowerCase();
+  if (w.length < 2 || !/^[a-z'-]+$/.test(w)) return [];
+  const out = [];
+  const push = (label, form) => {
+    if (!form || form === w) return;
+    if (out.some((x) => x.label === label)) return;
+    out.push({ label, form });
+  };
+  if (kind === 'verb') {
+    push('第三人称单数', thirdPersonEn(w));
+    push('现在分词', presentParticipleEn(w));
+    const irr = IRREGULAR_EN[w];
+    if (irr) {
+      push('过去式', irr[0]);
+      push('过去分词', irr[1]);
+    } else {
+      const p = regularPastEn(w);
+      push('过去式', p);
+      push('过去分词', p);
+    }
+  } else if (kind === 'noun') {
+    push('复数', pluralEn(w));
+  }
+  return out;
+}
+
 /**
  * 词形变化网格（查词页与详情卡共用）。
  *
  * 结构（用户要求「标记原型和现在的时态」）：
- *   ① 恒定第一行 **原形（现在时）** —— 变形表的锚点，后面每条都相对它读；
- *   ② 查询词本身就是屈折形式时（coincided / grievaunces），
+ *   ① 第一行 **原形** —— 标签随词性变：动词「原形（现在时）」、
+ *      名词「原形（单数）」、形容词/副词「原形（原级）」、判不出就「原形」；
+ *   ② 查询词本身就是屈折形式时（saw / coincided / grievaunces），
  *      第二行标出**它是什么形态**（过去式/过去分词、复数…）；
  *   ③ 数据源给的其余变形（中英 label 归一 + 词性徽标），
- *      与 ①② 重复的 form 跳过；
- *   ④ 数据变形一条都没有时补一句 AI 引导（原形行本身永远有内容，
- *      所以变形栏对**每个词**都不再是空的 —— 栏目集合因此完全一致）。
+ *      与 ①② 重复的 form 跳过，**并按词性过滤**
+ *      （动词不显示「复数」，名词不显示「-ing」…）；
+ *   ④ 过滤后一条不剩时，用本地规则补一份（`localForms`）——
+ *      查 see 一定能看到 saw/seen/sees/seeing，不依赖后端是否补过库。
  *
- * 非英语词没有「现在时」概念，第一行 label 退回「原形」。
+ * ★ 第 ④ 条是「see 的过去式这个就没有」的修复点：旧实现完全依赖
+ *   入库数据，词库里没有就只能显示空栏。变形的答案是确定的，
+ *   本地能算就不该让用户看空。
  */
 function inflectionGridHtml(entry) {
   const inflections = (entry && entry.inflections) || [];
   const word = String((entry && entry.word) || '');
   const isEn = String((entry && entry.lang) || 'en').toLowerCase().startsWith('en');
+  const { kind, raw: posRaw } = primaryPosKind(entry);
 
   // ① 原形锚点：词典说「这是 X 的过去式」→ 原形是 X；否则原形就是词本身
   const base = detectBaseForm(entry) || word;
   const isInflected = !!base && base.toLowerCase() !== word.toLowerCase();
-  const firstPos = ((entry && entry.senses) || [])
-    .map((s) => String(s.pos || '').trim()).find(Boolean) || '';
+  const badge = posRaw ? `<i class="infl-pos">${esc(posRaw)}</i>` : '';
   const items = [];
   if (base) {
-    const badge = firstPos ? `<i class="infl-pos">${esc(firstPos)}</i>` : '';
     items.push(`<div class="infl-item infl-base">
-      <span class="infl-label">${badge}${isEn ? '原形（现在时）' : '原形'}</span>
+      <span class="infl-label">${badge}${esc(baseLabelFor(kind, isEn))}</span>
       <span class="infl-form clickable" data-word="${esc(base)}" title="点击查询 ${esc(base)}">${esc(base)}</span>
     </div>`);
   }
@@ -483,33 +784,70 @@ function inflectionGridHtml(entry) {
   // ② 查询词是变形形式 → 标明它的时态/形态
   if (isInflected) {
     const fl = detectFormLabel(entry);
-    const badge = fl.pos ? `<i class="infl-pos">${fl.pos}</i>` : '';
+    const b2 = fl.pos ? `<i class="infl-pos">${fl.pos}</i>` : '';
     items.push(`<div class="infl-item">
-      <span class="infl-label">${badge}${esc(fl.label)}</span>
+      <span class="infl-label">${b2}${esc(fl.label)}</span>
       <span class="infl-form clickable" data-word="${esc(word)}" title="点击查询 ${esc(word)}">${esc(word)}</span>
     </div>`);
   }
 
-  // ③ 数据里的其余变形（去重：与原形/本词相同的跳过）
-  const seen = new Set([base.toLowerCase(), word.toLowerCase()]);
+  // ③ 数据里的其余变形（去重 + 按词性过滤）
+  //
+  // ★ 这里有两个集合，别合并：
+  //   - `seenForm`：**已经画出来**的 form，用来防重复渲染；
+  //   - `allForms`：数据里**出现过的所有** form，不管有没有被词性过滤掉。
+  //
+  //   为什么需要第二个：查 see 时数据里是 `{"复数","sees"}` +
+  //   `{"第三人称单数","sees"}`。动词词性下「复数」那条被过滤掉、
+  //   「第三人称单数」那条画出来。如果第 ④ 步的本地补齐只查 `seenForm`，
+  //   它会认为 sees 还没画过、再补一条 —— 于是界面出现三次 sees
+  //   （复数被滤、三单画出、本地又补）。用户看到的就是重复项。
+  //   用 `allForms` 挡住，才能保证「数据里提过的 form，本地绝不再补」。
+  const seenForm = new Set([base.toLowerCase(), word.toLowerCase()]);
+  const allForms = new Set([base.toLowerCase(), word.toLowerCase()]);
   let extra = 0;
   for (const i of inflections) {
     const form = String(i.form || '').trim();
-    if (!form || seen.has(form.toLowerCase())) continue;
-    seen.add(form.toLowerCase());
+    if (!form) continue;
+    const key = form.toLowerCase();
+    allForms.add(key);
+    if (seenForm.has(key)) continue;
     const m = inflMeta(i.label);
-    const badge = m.pos ? `<i class="infl-pos">${m.pos}</i>` : '';
+    // 动词不显示「复数 sees」这种错标签；被过滤掉的不进 seenForm，
+    // 好让后面同 form 但标签正确的记录（第三人称单数）还能进来
+    if (isEn && !formAllowedFor(kind, m)) continue;
+    seenForm.add(key);
+    const b3 = m.pos ? `<i class="infl-pos">${m.pos}</i>` : '';
     items.push(`<div class="infl-item">
-      <span class="infl-label">${badge}${esc(m.label)}</span>
+      <span class="infl-label">${b3}${esc(m.label)}</span>
       <span class="infl-form clickable" data-word="${esc(form)}" title="点击查询 ${esc(form)}">${esc(form)}</span>
     </div>`);
     extra += 1;
   }
 
+  // ④ 数据不足 → 本地规则补齐（只在英语上做，别的语言变形规则完全不同）
+  if (isEn && !isInflected && (extra < 2 || kind === 'verb')) {
+    for (const f of localForms(base, kind)) {
+      const key = f.form.toLowerCase();
+      // 用 allForms 而不是 seenForm：数据里提过的 form 一律不再补
+      if (allForms.has(key)) continue;
+      allForms.add(key);
+      seenForm.add(key);
+      const m = inflMeta(f.label);
+      const b4 = m.pos ? `<i class="infl-pos">${m.pos}</i>` : '';
+      items.push(`<div class="infl-item">
+        <span class="infl-label">${b4}${esc(m.label)}</span>
+        <span class="infl-form clickable" data-word="${esc(f.form)}" title="点击查询 ${esc(f.form)}">${esc(f.form)}</span>
+      </div>`);
+      extra += 1;
+    }
+  }
+
   if (!items.length) {
     return '<div class="blk-empty muted">暂无变形数据 —— 「AI 讲解」会一并生成。</div>';
   }
-  const hint = extra
+  // 不规则的词已经补齐了，就别再提「其余变形暂无数据」
+  const hint = extra >= 1
     ? ''
     : '<div class="infl-more muted">其余变形暂无数据 ——「AI 讲解」可生成。</div>';
   return `<div class="infl-grid">${items.join('')}</div>${hint}`;
@@ -1291,6 +1629,9 @@ window.WW = window.WW || {};
 Object.assign(window.WW, {
   esc, toast, loadingHtml, renderEntry, entryBlocks, examplesBlockHtml, inflMeta,
   detectBaseForm, detectFormLabel, collectExamples, sourceLabel, langLabel,
+  // 变形栏的形态学工具（供查词页做原形条判断、供调试模式复用）
+  posKind, primaryPosKind, baseLabelFor, formAllowedFor, sharesHead, localForms,
+  IRREGULAR_EN, inflectionGridHtml,
   splitRelated, phoneticHtml, renderPairs, senseGroup, splitSensesByScript, hasHan,
   renderMarkdown, renderPlainText, fmtDay, timeAgo, masteryClass, renderBarChart, switchDetailTab, debounce,
   attachListSearch, speakBtn, isTypingTarget, icon, ICON_PATHS, bindWordChips, WORD_CHIP_SEL,

@@ -1866,6 +1866,121 @@ const cases = [
     }
     return '';
   }],
+
+  /* ==========================================================================
+     变形栏：三个真实故障的回归（用户截图：see / saw / dumb）
+     ========================================================================== */
+  ['变形：名词/形容词不许显示「原形（现在时）」（只有动词才有现在时）', () => {
+    // 用户现场：helicopter（n.）与 dumb（adj.）都顶着「原形（现在时）」
+    const noun = WW.renderEntry({ word: 'helicopter', lang: 'en', senses: [{ pos: 'n.', definition: '直升机' }] });
+    if (noun.includes('原形（现在时）')) {
+      throw new Error('名词显示了「原形（现在时）」：' + noun.slice(noun.indexOf('infl-base'), noun.indexOf('infl-base') + 220));
+    }
+    if (!noun.includes('原形（单数）')) throw new Error('名词的原形行应该是「原形（单数）」');
+    const adj = WW.renderEntry({ word: 'dumb', lang: 'en', senses: [{ pos: 'adj.', definition: '哑的' }] });
+    if (adj.includes('原形（现在时）')) throw new Error('形容词显示了「原形（现在时）」');
+    if (!adj.includes('原形（原级）')) throw new Error('形容词的原形行应该是「原形（原级）」');
+    // 动词保留「现在时」——这是唯一该有现在时的词性
+    const verb = WW.renderEntry({ word: 'see', lang: 'en', senses: [{ pos: 'v.', definition: '看见' }] });
+    if (!verb.includes('原形（现在时）')) throw new Error('动词的原形行本该是「原形（现在时）」');
+    // 非英语一律「原形」，不套英语时态框架
+    const ja = WW.renderEntry({ word: '勉強', lang: 'ja', senses: [{ pos: '名·サ変', definition: '学习' }] });
+    if (ja.includes('现在时') || ja.includes('单数') || ja.includes('原级')) {
+      throw new Error('非英语词被套上了英语的时态标签');
+    }
+    return '';
+  }],
+
+  ['变形：动词的 -s/-ing/过去式/过去分词必须齐全（see 要有 saw/seen）', () => {
+    // 用户原话：「这个是 see 的过去式这个就没有」「三单过去分词什么的都没有考虑吗」
+    const h = WW.renderEntry({ word: 'see', lang: 'en', senses: [{ pos: 'v.', definition: '看见' }], inflections: [] });
+    for (const want of ['saw', 'seen', 'sees', 'seeing']) {
+      if (!h.includes(`>${want}<`)) throw new Error(`see 的变形栏缺 ${want}：` + h.slice(h.indexOf('infl-grid'), h.indexOf('infl-grid') + 400));
+    }
+    for (const label of ['第三人称单数', '现在分词', '过去式', '过去分词']) {
+      if (!h.includes(label)) throw new Error(`see 的变形栏缺「${label}」标签`);
+    }
+    // 规则动词也要能补齐（不依赖词库）
+    const play = WW.renderEntry({ word: 'play', lang: 'en', senses: [{ pos: 'v.', definition: '玩' }], inflections: [] });
+    if (!play.includes('>played<')) throw new Error('规则动词的过去式没补出来');
+    if (!play.includes('>plays<')) throw new Error('规则动词的三单没补出来');
+    return '';
+  }],
+
+  ['变形：动词不许显示「复数」，名词不许显示「-ing」（标签必须对得上词性）', () => {
+    // 用户现场：查 see 时变形栏写着「复数 sees　第三人称单数 sees」——
+    // 同一个词出现两次，第一次的标签还是错的（sees 不是 see 的复数）
+    const h = WW.renderEntry({
+      word: 'see', lang: 'en', senses: [{ pos: 'v.', definition: '看见' }],
+      inflections: [{ label: '复数', form: 'sees' }, { label: '第三人称单数', form: 'sees' }],
+    });
+    const grid = h.slice(h.indexOf('infl-grid'), h.indexOf('infl-grid') + 900);
+    if (grid.includes('复数')) throw new Error('动词的变形栏出现了「复数」标签：' + grid);
+    if (!grid.includes('第三人称单数')) throw new Error('动词的三单标签丢了');
+    // ★ 每个变形只该有**一条记录**。计数要看 `infl-item` 块数，
+    //   不能数 "sees" 字面量 —— 它在一个块里会出现三次
+    //   （data-word / title / 显示文本），数它必然误判。
+    const blocks = grid.split('class="infl-item"').length - 1;
+    const seesBlocks = grid.split('class="infl-item"').filter(b => b.includes('>sees<')).length;
+    if (seesBlocks !== 1) {
+      throw new Error(`sees 有 ${seesBlocks} 条记录，应该只有 1 条（复数那条被过滤后不该留坑）`);
+    }
+    // 动词该有的四项都在（原形行不算）
+    if (blocks < 4) throw new Error(`动词的变形记录只有 ${blocks} 条，应该是 4 条（三单/现在分词/过去式/过去分词）`);
+    return '';
+  }],
+
+  ['变形：原形必须与查询词共享词首（挡掉 cee 这种音近脏词）', () => {
+    // 用户现场：查 see，词头旁挂出「原形 cee」（cee 是字母 C 的读法，
+    // 某本词典拿它当 see 的同音词解释，`of cee` 里的 cee 被当成了原形）
+    const bad = WW.renderEntry({
+      word: 'see', lang: 'en',
+      senses: [{ pos: 'v.', definition: 'the letter C, a homophone of see' }, { pos: 'n.', definition: 'form of cee' }],
+      inflections: [],
+    });
+    if (bad.includes('原形 cee')) throw new Error('又把 cee 当成 see 的原形了');
+    // 真变形必须照常工作
+    if (WW.detectBaseForm({ word: 'saw', senses: [{ definition: 'past tense of see' }] }) !== 'see') {
+      throw new Error('sharesHead 把真变形（saw→see）也挡掉了');
+    }
+    if (WW.detectBaseForm({ word: 'studies', senses: [{ definition: 'plural of study' }] }) !== 'study') {
+      throw new Error('studies→study 被挡掉了');
+    }
+    return '';
+  }],
+
+  ['变形：saw 的词条要认出自己是 see 的过去式（本地表，不等后端）', () => {
+    // 用户原话：「还有这个是see的过去式这个就没有」——查 saw 时变形栏是空的
+    const h = WW.renderEntry({ word: 'saw', lang: 'en', senses: [{ pos: 'n.', definition: '锯子；锯' }], inflections: [] });
+    if (!h.includes('infl-base')) throw new Error('saw 的变形栏连原形锚点都没有');
+    // 前端本地表要能算出一套（不依赖后端 IPC）
+    const forms = WW.localForms('see', 'verb');
+    const byLabel = {};
+    forms.forEach(f => { byLabel[f.label] = f.form; });
+    if (byLabel['过去式'] !== 'saw') throw new Error('本地表没算出 see 的过去式=saw');
+    if (byLabel['过去分词'] !== 'seen') throw new Error('本地表没算出 see 的过去分词=seen');
+    if (byLabel['第三人称单数'] !== 'sees') throw new Error('本地表没算出 see 的三单=sees');
+    if (byLabel['现在分词'] !== 'seeing') throw new Error('本地表没算出 see 的现在分词=seeing');
+    // 不规则复数
+    if (WW.localForms('child', 'noun')[0].form !== 'children') throw new Error('本地表没算出 child 的复数=children');
+    // 双写规则
+    if (WW.localForms('stop', 'verb').find(f => f.label === '现在分词').form !== 'stopping') {
+      throw new Error('双写规则没生效（stop→stopping）');
+    }
+    return '';
+  }],
+
+  ['变形：词性解析要把 adv. 认成副词而不是动词（adv. 里含 v）', () => {
+    if (WW.posKind('adv.') !== 'adv') throw new Error("posKind('adv.') 认错了，被 'v' 带跑了");
+    if (WW.posKind('adj.') !== 'adj') throw new Error("posKind('adj.') 认错了");
+    if (WW.posKind('vt.') !== 'verb') throw new Error("posKind('vt.') 认错了");
+    if (WW.posKind('n.') !== 'noun') throw new Error("posKind('n.') 认错了");
+    if (WW.posKind('动Ⅰ') !== 'verb') throw new Error('日语动词词性没认出来');
+    if (WW.posKind('名·サ変') !== 'noun') throw new Error('日语名词词性没认出来');
+    if (WW.posKind('') !== 'other') throw new Error('空词性应该是 other');
+    return '';
+  }],
+
   ['讲解回写：enriched 刷新必须停在用户当前标签（点了AI要看得见变化）', () => {
     const src = fs.readFileSync(path.join(ROOT, 'src/js/lookup.js'), 'utf8');
     // 有两个 onEnriched（详情卡回源 / 查词页刷新）——要断言的是**查词页**

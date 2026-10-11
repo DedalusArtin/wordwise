@@ -572,13 +572,22 @@ pub async fn entry_from_explain(
   ],
   "inflections": [{{"label": "变形类型如 过去式/复数/比较级", "form": "变形后的词"}}],
   "related": ["相关词或同义词"],
-  "mnemonic": "一句话词根词缀或记忆技巧"
+  "mnemonic": "一句话词根词缀或记忆技巧",
+  "exam_points": ["考点/考试名，如 四级/六级/考研/雅思/托福/GRE"],
+  "collocations": [{{"phrase": "搭配词组", "note": "用法或中文说明"}}],
+  "confusables": [{{"word": "易混词", "note": "与本词的区别"}}]
 }}
 要求：
 1. **只搬运讲解正文里已经出现的信息**，不要自己发挥、不要补充讲解里没有的义项。
 2. senses 至少 1 项；若讲解里确实没有可用的释义，就基于该词给出最基础的一条。
 3. definition 必须是简体中文，简洁准确（不超过 30 字）。
 4. 讲解里没有的字段一律留空字符串或空数组，**不要编造**。
+5. ★ **每一个 senses 项都要努力带上 examples**：按「核心含义」里这条释义去匹配
+   讲解「例句」栏目中的原句，**例句要跟着释义走**，不要把两条例句全堆在第一条义项上
+   （堆在一起会导致第二条义项在界面上显示「没有例句」）。某条释义确实找不到对应例句时
+   就给空数组，也不要挪用别的义项的例句。
+6. exam_points 只填讲解里**明确标注了考点**的考试名（如四级/考研）；正文没提就给空数组。
+   这一项宁缺毋滥 —— 漏了会由本地词库归属兜底补上，编错了用户会背错范围。
 
 === 讲解正文开始 ===
 {markdown}
@@ -708,6 +717,77 @@ fn entry_from_json(v: &Value, fallback_word: &str, lang: &str) -> WordEntry {
             }
         }
         e.related.truncate(15);
+    }
+
+    // ---- 讲解六栏里新增的三栏 ----
+    // 解析一律「宽松优先」：本地小模型常常把本该是对象的地方吐成字符串，
+    // 严格取值会让这一栏整片丢失，而宽容处理至少能保住一半信息。
+    if let Some(arr) = v.get("exam_points").and_then(|x| x.as_array()) {
+        for p in arr {
+            let s = match p {
+                Value::String(s) => s.clone(),
+                Value::Object(o) => o
+                    .get("name")
+                    .or_else(|| o.get("exam"))
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                _ => String::new(),
+            };
+            let s = s.trim().to_string();
+            if !s.is_empty() && !e.exam_points.contains(&s) {
+                e.exam_points.push(s);
+            }
+        }
+        e.exam_points.truncate(8);
+    }
+
+    if let Some(arr) = v.get("collocations").and_then(|x| x.as_array()) {
+        for c in arr {
+            let (phrase, note) = match c {
+                Value::String(s) => (s.clone(), String::new()),
+                Value::Object(o) => (
+                    o.get("phrase")
+                        .and_then(|x| x.as_str())
+                        .unwrap_or("")
+                        .to_string(),
+                    o.get("note")
+                        .and_then(|x| x.as_str())
+                        .unwrap_or("")
+                        .to_string(),
+                ),
+                _ => (String::new(), String::new()),
+            };
+            let col = crate::models::Collocation { phrase, note };
+            if col.is_usable() {
+                e.collocations.push(col);
+            }
+        }
+        e.collocations.truncate(15);
+    }
+
+    if let Some(arr) = v.get("confusables").and_then(|x| x.as_array()) {
+        for c in arr {
+            let (word, note) = match c {
+                Value::String(s) => (s.clone(), String::new()),
+                Value::Object(o) => (
+                    o.get("word")
+                        .and_then(|x| x.as_str())
+                        .unwrap_or("")
+                        .to_string(),
+                    o.get("note")
+                        .and_then(|x| x.as_str())
+                        .unwrap_or("")
+                        .to_string(),
+                ),
+                _ => (String::new(), String::new()),
+            };
+            let conf = crate::models::Confusable { word, note };
+            if conf.is_usable() {
+                e.confusables.push(conf);
+            }
+        }
+        e.confusables.truncate(8);
     }
 
     e.mnemonic = v

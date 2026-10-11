@@ -1026,6 +1026,12 @@ const Lookup = (() => {
     if (input) input.value = word;
     document.getElementById('lk-suggest').innerHTML = '';
 
+    // ★ `fromNav` 与 `silentHistory` 是两件事，别混：
+    //   - fromNav：这是**导航**产生的查询（点 chip / 回退栈），它自己会压栈，
+    //     所以不要再压一次；
+    //   - silentHistory：这是**用户没主动查**的词（如点「载入 see 的词条」），
+    //     不该写进查询历史 —— 否则用户查 saw，历史里却出现 see。
+    //   两件事都要在写历史那一步判断，见下面 logSearch 的调用点。
     if (!opts.fromNav) nav.push({ kind: 'word', text: word });
 
     // 从一开始就不像词条的整句：直接走翻译，别让用户白等一轮必然失败的词典查询
@@ -1058,7 +1064,9 @@ const Lookup = (() => {
     let res;
     try {
       res = await withTimeout(
-        API.lookup(word, null, forceRefresh),
+        // 第四个参数：是否记进查询历史。`silentHistory` 的查询不记
+        // （见 query 的 opts 注释 —— 用户查 saw 时不该让 see 进历史）
+        API.lookup(word, null, forceRefresh, opts.silentHistory !== true),
         budgetMs,
         `查询超时：后端 ${Math.round(budgetMs / 1000)} 秒未返回结果`
       );
@@ -1104,6 +1112,10 @@ const Lookup = (() => {
     }
 
     loadDictLinks(res.word, res.lang);
+
+    // 原形条：查 saw 时提示「这是 see 的过去式」。本地查表，瞬间返回，
+    // 且**失败静默** —— 这只是锦上添花，不该影响主结果。
+    loadFormsNote(res);
 
     // 词条单薄（没音标/没释义）→ 现场触发 AI 补全；完成后事件回调强刷卡片
     maybeEnrich(res);
@@ -1195,6 +1207,108 @@ const Lookup = (() => {
 
   /** 双向词条的拉取序号：新查询会作废上一次还没回来的请求。 */
   let pairsSeq = 0;
+
+  /** 原形条的拉取序号：新查询作废上一次（与 pairsSeq 同一个理由）。 */
+  let formsSeq = 0;
+
+  /**
+   * 原形条：查的是变形词时，在词条上方挂一条提示，一点就载入原形的完整词条。
+   *
+   * 用户场景（原话）：「这个是 see 的过去式这个就没有」「三单过去分词什么的
+   * 都没有考虑吗」。查 `saw` 时旧界面只给一条 `explain-store` 的薄词条，
+   * 既没说它是谁、也拿不到 see 的例句 —— 用户等于白查。
+   *
+   * 现在：
+   *   1. 本地查不规则表（`cmd_forms_of`，不联网），确认 `saw` 是 `see` 的过去式；
+   *   2. 词条上方出现一条「saw 是 see 的过去式」；
+   *   3. 点「载入 see 的词条」→ **就地替换**当前词条（不跳转），
+   *      例句/音标/变形一次到位，返回键还能回到 saw。
+   *
+   * 为什么是「就地载入」而不是「跳转去查」：
+   *   跳转会清空当前上下文（用户刚看的 saw 释义没了），而且让「查询历史」
+   *   多出一条其实不是用户主动查的记录。就地替换既保住了上下文，
+   *   又让「我只是想看看 see 怎么用」这个真实意图一步到位。
+   *
+   * 全程静默失败：这不是主链路，查不到就不显示，绝不弹错。
+   */
+  async function loadFormsNote(res) {
+    const box = document.getElementById('lk-forms-note');
+    if (!box || !res || !res.word) return;
+    box.classList.add('hidden');
+    box.innerHTML = '';
+
+    const lang = res.lang || 'en';
+    // 只有英语有这套形态学；别的语言查表也是空
+    if (!String(lang).toLowerCase().startsWith('en')) return;
+
+    const seq = ++formsSeq;
+    let info;
+    try {
+      info = await API.formsOf(res.word, lang);
+    } catch (_) {
+      return; // 静默：本地查表失败不是用户需要知道的事
+    }
+    if (seq !== formsSeq) return; // 已经查了别的词，这次结果作废
+    if (!info || !info.base || info.kind === undefined) return;
+
+    // 查询词就是原形 → 不是变形词，没有提示可给
+    if (!info.base || info.base.toLowerCase() === String(res.word).toLowerCase()) {
+      // 但如果主词条变形栏数据很薄，而这里算出了形态，就顺手补进词条里
+      // （让「see 的过去式没有」在**查 see 时**也能被修好）
+      if (info.forms && info.forms.length) mergeFormsIntoEntry(res.entry, info);
+      return;
+    }
+
+    const base = info.base;
+    const kind = info.kind || '变形';
+    box.innerHTML = `
+      <span class="lfn-text">「${U().esc(res.word)}」是 <b>${U().esc(base)}</b> 的${U().esc(kind)}</span>
+      <button class="ghost-btn xs lfn-load" data-word="${U().esc(base)}">载入 ${U().esc(base)} 的词条</button>`;
+    box.classList.remove('hidden');
+
+    box.querySelector('.lfn-load').addEventListener('click', () => {
+      // 就地换成原形的查询结果：复用查询入口，但带两个标记
+      //   - fromNav：它自己会压栈，别再压一次（返回键能回到 saw）
+      //   - silentHistory：用户查的是 saw 不是 see，别污染「最近查过」
+      //   - keepScroll：保持滚动位置，别把用户甩到页顶
+      query(base, false, { fromNav: true, silentHistory: true, keepScroll: true });
+    });
+  }
+
+  /**
+   * 把后端算出的变形并进当前词条对象（就地修改），然后重渲染变形栏。
+   *
+   * 为什么要这一步：`see` 这种基础词的词库里可能只有 `复数 sees` 一条
+   * （错的），缺 `过去式 saw` / `过去分词 seen`。后端 `cmd_forms_of`
+   * 已经把全套算出来了，前端拿过来合并即可 —— 不必等词库重新入库。
+   */
+  function mergeFormsIntoEntry(entry, info) {
+    if (!entry || !info || !info.forms || !info.forms.length) return;
+    const U0 = U();
+    const have = new Set((entry.inflections || []).map(i => String(i.form || '').toLowerCase()));
+    const posKind = info.pos || 'other';
+    let added = false;
+    for (const f of info.forms) {
+      const form = String(f.form || '').trim();
+      if (!form || have.has(form.toLowerCase())) continue;
+      // 按词性过滤（挡住动词被塞进「复数」这种错标签）
+      const meta = U0.inflMeta(f.label);
+      if (!U0.formAllowedFor(posKind, meta)) continue;
+      entry.inflections = entry.inflections || [];
+      entry.inflections.push({ label: meta.label, form });
+      have.add(form.toLowerCase());
+      added = true;
+    }
+    if (!added) return;
+    // 只重画变形栏，不动其它已渲染的内容（避免闪烁与丢失标签选中态）
+    const grid = document.querySelector('#lk-result .entry-pane[data-pane="infl"] .infl-grid');
+    const holders = document.querySelectorAll('#lk-result [data-pane="infl"]');
+    if (holders.length && U0.inflectionGridHtml) {
+      holders.forEach((h) => { h.innerHTML = U0.inflectionGridHtml(entry); });
+    } else if (grid) {
+      grid.outerHTML = U0.inflectionGridHtml(entry);
+    }
+  }
 
   /**
    * 双向词条：**目标语言侧的对应词及其完整词条**。
@@ -1293,10 +1407,16 @@ const Lookup = (() => {
     // 查询后由 loadPairs 填充 —— 与主词条并行拉取，绝不拖慢主结果的出现。
     const pairsBox = '<div id="lk-pairs" class="lk-pairs hidden"></div>';
 
+    // 原形条容器：查 `saw` 时在词条上方提示「这是 see 的过去式」，
+    // 点一下就把 see 的完整词条（含例句、音标、变形）载进来。
+    // 查询后由 loadFormsNote 异步填充 —— 只在真的命中变形词时才显示，
+    // 所以默认 hidden，避免每个词都闪一下空容器。
+    const formsNote = '<div id="lk-forms-note" class="lk-forms-note hidden"></div>';
+
     // 结果区采用「分块卡片 + 标签切换」排布（`tabs: true`）。
     // 「对应词」不进标签：它是异步补齐的另一个容器（#lk-pairs），
     // 硬塞进标签面板会让「标签已经画好、内容还没回来」变成空面板。
-    box.innerHTML = langNote + degradeNote + transBox + U().renderEntry(res.entry, {
+    box.innerHTML = formsNote + langNote + degradeNote + transBox + U().renderEntry(res.entry, {
       tabs: true,
       showInflections: study.show_inflections !== false,
       showExamples: study.show_examples !== false,

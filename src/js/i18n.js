@@ -172,6 +172,20 @@
       'No examples yet — click "AI Explain" below to generate examples and inflections.',
     '暂无变形数据 —— 「AI 讲解」会一并生成。':
       'No inflection data — "AI Explain" generates it together with the entry.',
+    // 变形栏：首行标签随词性变（修掉「名词显示现在时」）
+    '原形': 'Base form',
+    '原形（现在时）': 'Base form (present)',
+    '原形（单数）': 'Base form (singular)',
+    '原形（原级）': 'Base form (positive degree)',
+    // 变形类别（后端 morph_en 生成的全是中文标签，这里给出英文对照）
+    '第三人称单数': 'Third person singular', '现在分词': 'Present participle',
+    '过去式': 'Past tense', '过去分词': 'Past participle',
+    '复数': 'Plural', '单数': 'Singular', '比较级': 'Comparative',
+    '最高级': 'Superlative', '动名词': 'Gerund', '不定式': 'Infinitive',
+    '祈使形': 'Imperative', '变体': 'Variant', '缩写': 'Abbreviation',
+    // 原形条（查变形词时的提示，如 saw → see）
+    '载入': 'Load',
+    ' 的词条': "'s entry",
     '强制刷新': 'Force refresh', '本地模型': 'Local model', '在线搜索': 'Web search',
     '历史记录': 'History', '例句生成': 'Generate examples',
     '我的词库': 'My Wordbook', '在线词库': 'Online Wordbook',

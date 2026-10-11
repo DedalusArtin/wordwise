@@ -132,8 +132,16 @@ const API = {
   translateStatus: () => invoke('cmd_translate_status'),
 
   // 查词搜索
-  lookup: (word, lang, forceRefresh) =>
-    invoke('cmd_lookup', { word, lang: lang || null, forceRefresh: !!forceRefresh }),
+  //
+  // `recordHistory` 传 false 时后端不写查询历史。用于**用户没有主动查**的
+  // 内部查询（如点「载入 see 的词条」）——否则历史会冒出用户没查过的词。
+  lookup: (word, lang, forceRefresh, recordHistory) =>
+    invoke('cmd_lookup', {
+      word,
+      lang: lang || null,
+      forceRefresh: !!forceRefresh,
+      recordHistory: recordHistory !== false,
+    }),
   // 双向词条：目标语言侧的对应词及其完整词条（[{ word, lang, entry, via }]）。
   // 失败一律返回空数组，绝不抛错 —— 没有对应词不等于查词失败。
   // translated / alternatives 是「已经翻译过了」的意思：查词页的「词级译文」
@@ -181,7 +189,30 @@ const API = {
   wordFamily: (word, lang) => invoke('cmd_word_family', { word, lang: lang || null }),
   searchWords: (query, lang, limit) =>
     invoke('cmd_search_words', { query, lang: lang || null, limit: limit || 50 }),
-  recentSearches: () => invoke('cmd_recent_searches'),
+
+  /**
+   * 查询历史（输入框下方的历史面板）。
+   *
+   * 返回 `[{ query, at, times }]`：`query` 已去重，`at` 是**最近一次**
+   * 查询的时间戳，`times` 累计次数。后端用 `GROUP BY query + MAX(at)`
+   * 排序 —— 老实现是 `SELECT DISTINCT … ORDER BY at`，SQLite 会取
+   * 该词的任意一行参与排序（实测取到最早那条），于是「半年前查过、
+   * 刚刚又查了一遍」的词会沉到列表底部，用户以为历史没记。
+   */
+  recentSearches: (limit) => invoke('cmd_recent_searches', { limit: limit || null }),
+  /** 删掉历史里的某一条（列表每行右侧 ×）。 */
+  deleteSearchHistory: (query) => invoke('cmd_delete_search_history', { query }),
+  /** 清空整份历史（列表底部「清空」）。 */
+  clearSearchHistory: () => invoke('cmd_clear_search_history'),
+
+  /**
+   * 变形查询：`saw → { base: 'see', kind: '过去式', pos: 'verb', forms: [...] }`。
+   *
+   * 本地查表 + 本地拼写规则，不联网。用于两件事：
+   *   ① 查词页显示「saw 是 see 的过去式 —— 载入 see 的词条」提示条；
+   *   ② 变形栏数据不足时补齐（见 `ui.js` 的 `localForms`）。
+   */
+  formsOf: (word, lang) => invoke('cmd_forms_of', { word, lang: lang || null }),
 
   // AI 讲解存档（「讲解也是一种存储，可以在词库里搜到」）
   // 讲解在生成时后端已自动落库，这里的 saveExplain 主要是为了**拿回存档行**
@@ -865,6 +896,27 @@ const Mock = (() => {
           return store.words.filter(w => w.word.includes((args.query||'').toLowerCase()))
             .map(w => ({ word: w.word, lang: 'en', entry: w, added_at: 0 }));
         case 'cmd_recent_searches': return [];
+        case 'cmd_delete_search_history': return false;
+        case 'cmd_clear_search_history': return 0;
+        // 调试模式下也走真实的形态学规则：变形是本地确定性计算，
+        // 没有「后端才有」的部分，Mock 直接复用 UI 层的实现最省事也最诚实
+        case 'cmd_forms_of': {
+          const q = String(args.word || '').toLowerCase();
+          const entry = store.words.find(w => w.word === q) || null;
+          const U = window.WW;
+          // 词性取词条自己的；查不到词条就是 other（不猜）
+          const kind = (entry && U && U.primaryPosKind)
+            ? U.primaryPosKind(entry).kind : 'other';
+          const pos = U && U.posKind ? kind : 'other';
+          return {
+            query: q,
+            base: q,
+            kind: '',
+            pos: pos === 'other' ? 'other' : pos,
+            forms: (entry && U && U.localForms) ? U.localForms(q, kind) : [],
+            entry,
+          };
+        }
         case 'cmd_list_words':
           return store.words.map(w => ({ word: w.word, lang: 'en', entry: w, added_at: 0 }));
         case 'cmd_add_word': store.words.push(args.entry); return null;
